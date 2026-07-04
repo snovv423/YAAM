@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#0A2417">
+<title>YAAM — доставка еды в Чечне</title>
+<meta name="description" content="YAAM — локальный агрегатор доставки еды в Грозном, Аргуне, Гудермесе и Шали. Закажите из любимых ресторанов, оплата по СБП.">
+<meta property="og:title" content="YAAM — доставка еды в Чечне">
+<meta property="og:description" content="Локальный агрегатор доставки еды. Грозный, Аргун, Гудермес, Шали.">
+<meta property="og:type" content="website">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%230A2417'/%3E%3Ctext x='32' y='45' font-family='Georgia,serif' font-size='36' fill='%23FF9A2E' text-anchor='middle'%3EY%3C/text%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Cormorant+Garamond:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<div id="statusbg"></div>
+
+<!-- HOME -->
+<div id="home" class="screen active">
+  <div class="top">
+    <div class="hero-brand">
+      <div class="wm" onclick="neonFlash(this)">YAAM<span class="order-dot" id="orderdot" onclick="event.stopPropagation();dotTap()" title="Ваш заказ"></span></div>
+      <div class="cities" id="cities">
+        <span class="citychip sel" onclick="selectCity('Грозный')">Грозный</span>
+        <span class="citychip" onclick="selectCity('Аргун')">Аргун</span>
+        <span class="citychip" onclick="selectCity('Гудермес')">Гудермес</span>
+        <span class="citychip" onclick="selectCity('Шали')">Шали</span>
+      </div>
+      <div class="partners"><div class="ptrack"><span class="pname">Кавказ</span><span class="pname">ASCOFFEE</span><span class="pname">Бургер Хаус</span><span class="pname">Хинкальная №1</span><span class="pname">Сладкий дом</span><span class="pname">Чайхана Восток</span><span class="pname">Кавказ</span><span class="pname">ASCOFFEE</span><span class="pname">Бургер Хаус</span><span class="pname">Хинкальная №1</span><span class="pname">Сладкий дом</span><span class="pname">Чайхана Восток</span></div></div>
+    </div>
+    <div class="search glass">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="20.5" y1="20.5" x2="16.5" y2="16.5"/></svg>
+      <input id="q" placeholder="Поиск ресторана…" oninput="renderList();showSuggest(this.value)" onblur="setTimeout(()=>hideSuggest(),150)">
+      <div class="suggest glass" id="suggest"></div>
+    </div>
+  </div>
+  <div id="new-sec"></div>
+  <div class="ptr" id="ptr">↻ Обновление…</div>
+  <div class="sec"><h2>Открыто сейчас</h2></div>
+  <div class="list" id="list"></div>
+  <div class="note">Прототип YAAM. Фото — для примера; реальные снимки блюд загрузите при подключении ресторанов.</div>
+</div>
+
+<!-- MENU -->
+<div id="menu" class="screen">
+  <div class="hero" id="m-hero">
+    <button class="back" onclick="go('home')">← Назад</button>
+    <div class="hero-info"><div class="mtitle" id="m-name"></div><div class="mmeta" id="m-meta"></div></div>
+  </div>
+  <div class="mtabs" id="m-tabs"></div>
+  <div id="m-body"></div>
+</div>
+
+<!-- DISH -->
+<div id="dish" class="screen">
+  <div class="dhero" id="d-hero"><button class="back" onclick="go('menu')">← Назад</button></div>
+  <div class="gallery" id="d-gallery"></div>
+  <div class="dwrap">
+    <div class="dttl" id="d-name"></div><div class="dsub" id="d-sub"></div>
+    <div class="kbju" id="d-kbju"></div>
+    <div class="blockh">Состав</div><div class="sostav" id="d-sostav"></div>
+  </div>
+  <div class="dish-add"><div class="row">
+    <div class="dq"><button onclick="dishQtyMinus()">−</button><span id="d-qty">1</span><button onclick="dishQtyPlus()">+</button></div>
+    <button class="addbtn" id="d-add" onclick="addFromDish()"></button>
+  </div></div>
+</div>
+
+<!-- CHECKOUT -->
+<div id="cart" class="screen">
+  <div class="ctitle">Оформление</div>
+  <div class="csub" id="c-rest"></div>
+  <div class="co">
+    <div class="field"><label>Имя</label><input id="c-name" placeholder="Как к вам обращаться"></div>
+    <div class="field"><div class="addr-top"><label>Адрес доставки</label><span class="citytag" id="c-city"></span></div><input id="c-addr" value="ул. Маяковского, 18, кв. 7"></div>
+    <div class="field"><label>Телефон</label><input id="c-phone" value="+7 928 000-00-00"></div>
+    <div class="field"><label>Комментарий к заказу</label><input id="c-comment" placeholder="Подъезд, этаж, домофон…"></div>
+    <div class="panel" id="c-items"></div>
+    <div class="trust"><span class="ic">🛡️</span><p>Оплата защищена. Не примет ресторан — вернём деньги.</p></div>
+    <button class="pay" onclick="openQR()">Оплатить еду по СБП · <span id="c-total"></span></button>
+    <div class="center-wrap"><button class="ghost" onclick="backToMenu()">← Вернуться к меню</button></div>
+  </div>
+</div>
+
+<!-- QR -->
+<div id="qr" class="screen">
+  <div class="hero bare-hero"><button class="back" onclick="go('cart')">← Назад</button></div>
+  <div class="qrwrap">
+    <h2>Оплата заказа</h2><div class="sbpttl">по СБП</div>
+    <div id="qrcode"></div>
+    <div class="amt" id="qr-amt">0 ₽</div>
+    <div class="qr-timer">Оплатите в течение <span id="qr-time">10:00</span></div>
+    <div class="hint">Отсканируйте код в приложении вашего банка<br>и подтвердите оплату. После оплаты страница обновится автоматически.</div>
+    <div class="qr-screenshot-hint">Сделайте скриншот экрана — это ваш чек об оплате.</div>
+    <div class="qr-demo-wrap"><button class="ghost" onclick="afterPay()">Демо: оплата прошла →</button></div>
+  </div>
+</div>
+
+<!-- STATUS -->
+<div id="status" class="screen">
+  <div class="stwrap">
+    <div class="stnum"><div class="lbl">Ваш заказ</div><div class="n" id="st-num">YAAM-1042</div><div class="order-time" id="st-time"></div></div>
+    <div class="sticon" id="st-icon">🍽️</div>
+    <div class="progress" id="st-progress"></div>
+    <div class="ststate" id="st-state">Принят</div>
+    <div class="st-substate" id="st-substate" style="display:none"></div>
+    <div class="stitems" id="st-items"></div>
+    <div class="demobar">
+      <button class="pay" id="st-next" onclick="nextStatus()">Следующий статус →</button>
+      <div id="st-final" style="display:none">
+        <div class="final-wrap">
+          <button class="ghost" onclick="resetAll()">На главную</button>
+        </div>
+      </div>
+      <div id="st-demowrap"><button class="demolink" onclick="openRejected()">Демо: а если ресторан отклонит →</button></div>
+    </div>
+  </div>
+</div>
+
+<!-- REJECTED -->
+<div id="rejected" class="screen">
+  <div class="ok">
+    <div class="okmark"><svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v4h4"/></svg></div>
+    <h2 id="rej-title">«Кавказ» не смог принять заказ</h2>
+    <p>Так бывает в часы загрузки — кухня сейчас не берёт новые заказы.</p>
+    <p>Полная сумма, <b id="rej-sum">1 430 ₽</b>, уже отправлена обратно на вашу карту по СБП — она вернётся в ближайшее время.</p>
+    <button class="pay rej-retry" onclick="resetAll()">Выбрать другой ресторан</button>
+    <p class="rej-order-id">Заказ YAAM-1042</p>
+  </div>
+</div>
+
+<!-- Штора корзины -->
+<div class="sheet-overlay" id="sheet-overlay" onclick="closeSheet()"></div>
+<div class="sheet" id="sheet" ontouchstart="sheetTouchStart(event)" ontouchmove="sheetTouchMove(event)" ontouchend="sheetTouchEnd(event)">
+  <div class="sheet-handle"></div>
+  <div class="sheet-title">Корзина</div>
+  <div id="sheet-items"></div>
+  <div id="sheet-total-wrap"></div>
+  <div class="minwarn" id="minwarn"></div>
+  <button class="sheet-btn" id="sheet-checkout" onclick="closeSheet();openCart()">Оформить заказ</button>
+  <button class="sheet-clear" onclick="clearCart()">Очистить корзину</button>
+</div>
+
+<!-- Своё окно подтверждения (системный confirm заблокирован в песочнице) -->
+<div class="confirm-overlay" id="confirm-overlay">
+  <div class="confirm-box">
+    <div class="confirm-text" id="confirm-text"></div>
+    <div class="confirm-btns">
+      <button class="confirm-no" id="confirm-no">Отмена</button>
+      <button class="confirm-yes" id="confirm-yes">Да</button>
+    </div>
+  </div>
+</div>
+
+<!-- Ручка голосования -->
+<div class="vote-handle" id="vote-handle" onclick="openVote()">
+  <div class="vh-tab">Кого ждём?</div>
+  <div class="vh-grip"></div>
+</div>
+<!-- Штора голосования -->
+<div class="vote-overlay" id="vote-overlay" onclick="closeVote()" ontouchmove="event.preventDefault()"></div>
+<div class="vote-sheet" id="vote-sheet">
+  <div class="vs-draghandle" ontouchstart="voteTouchStart(event)" ontouchmove="voteTouchMove(event)" ontouchend="voteTouchEnd(event)"><div class="vs-drag"></div></div>
+  <div class="vs-head">
+    <div class="vs-title">Какой ресторан вы ждёте в YAAM?</div>
+    <div class="vs-sub">Голосуйте за ресторан, которого не хватает — у кого больше голосов, того подключим следующим.</div>
+  </div>
+  <div class="vote-list" id="vote-list"></div>
+  <button class="vs-close" onclick="closeVote()">Закрыть ✕</button>
+</div>
+
+<!-- Экран ошибки -->
+<div id="errscreen">
+  <div class="eico">📡</div>
+  <h3>Нет соединения</h3>
+  <p>Проверьте интернет и попробуйте снова.</p>
+  <button class="pay" onclick="hideErr()">Попробовать снова</button>
+</div>
+
+<div class="cartbar" id="cartbar" style="display:none">
+  <button class="cartbtn" onclick="openSheet()"><span><span id="cb-count"></span> <small>· корзина</small></span><span id="cb-sum"></span></button>
+</div>
+
+<script src="js/data.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
