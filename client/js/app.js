@@ -268,8 +268,15 @@ const PRE_STEPS=[
   {icon:'⏳',anim:'iconpop .5s cubic-bezier(.3,1.4,.4,1), pulse-glow 1.4s ease-in-out .5s infinite',title:'Заказ отправлен, ждём ответа ресторана',sub:null}
 ];
 const RESTAURANT_RESPONSE_WINDOW_SEC=180;
-let preStep=0,inPreStatus=true,preTimer=null;
+const BANK_CONFIRM_DELAY_MS=1600; // на проде это реальный callback от PSP, а не решение человека — проходит само
+let preStep=0,inPreStatus=true,preTimer=null,preAutoTimer=null;
 
+function advancePreStep(){
+  clearInterval(preTimer);clearTimeout(preAutoTimer);
+  preStep++;
+  if(preStep>=PRE_STEPS.length){inPreStatus=false;document.getElementById('st-progress').style.display='flex';renderStatus();}
+  else renderPreStatus();
+}
 function renderPreStatus(){
   const step=PRE_STEPS[preStep];
   document.getElementById('st-progress').style.display='none';
@@ -279,13 +286,16 @@ function renderPreStatus(){
     sub.style.display='block';
     startResponseTimer();
   } else {
+    // «Оплачено, ждём подтверждения» — не решение ресторана, проходит автоматически, без тапа
     sub.textContent=step.sub;sub.style.display='block';
+    clearTimeout(preAutoTimer);
+    preAutoTimer=setTimeout(advancePreStep,BANK_CONFIRM_DELAY_MS);
   }
   const ic=document.getElementById('st-icon');
   ic.textContent=step.icon;ic.style.animation='none';
   requestAnimationFrame(()=>{ic.style.animation=step.anim;});
   document.getElementById('statusbg').style.background='';
-  document.getElementById('st-next').style.display='block';
+  document.getElementById('st-next').style.display=(preStep===0)?'none':'block';
   document.getElementById('st-final').style.display='none';
   document.getElementById('st-demowrap').style.display=(preStep===1)?'block':'none';
 }
@@ -308,18 +318,12 @@ function openStatus(){
   renderPreStatus();go('status');
 }
 function nextStatus(){
-  if(inPreStatus){
-    clearInterval(preTimer);
-    preStep++;
-    if(preStep>=PRE_STEPS.length){inPreStatus=false;document.getElementById('st-progress').style.display='flex';renderStatus();}
-    else renderPreStatus();
-    return;
-  }
+  if(inPreStatus){advancePreStep();return;}
   if(statusStep<STEPS.length-1){statusStep++;renderStatus();}
 }
 
 function openRejected(reason){
-  clearInterval(preTimer);
+  clearInterval(preTimer);clearTimeout(preAutoTimer);
   showOrderDot(false);
   if(curRest){
     document.getElementById('rej-title').textContent=(reason==='timeout')?`«${curRest.name}» не ответил вовремя`:`«${curRest.name}» не смог принять заказ`;
@@ -331,7 +335,7 @@ function openRejected(reason){
 
 function cur(id){return document.getElementById(id).classList.contains('active');}
 function go(id){document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));document.getElementById(id).classList.add('active');document.querySelector('.dish-add').style.display=(id==='dish')?'block':'none';if(id!=='status'&&id!=='rejected')document.getElementById('statusbg').style.display='none';const vh=document.getElementById('vote-handle');if(vh)vh.style.display=(id==='home')?'flex':'none';window.scrollTo(0,0);updateBar();try{if(id!=='home')history.pushState({screen:id},'');else history.replaceState({screen:'home'},'');}catch(e){}}
-function resetAll(){clearInterval(preTimer);cart={};curRest=null;document.getElementById('q').value='';document.getElementById('statusbg').style.display='none';go('home');renderList();}
+function resetAll(){clearInterval(preTimer);clearTimeout(preAutoTimer);cart={};curRest=null;document.getElementById('q').value='';document.getElementById('statusbg').style.display='none';go('home');renderList();}
 // Своё окно подтверждения (замена заблокированного confirm)
 function yaamConfirm(text,onYes){
   const ov=document.getElementById('confirm-overlay');
