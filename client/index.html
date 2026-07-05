@@ -104,19 +104,22 @@
 <div id="status" class="screen">
   <div class="stwrap">
     <div class="stnum"><div class="lbl">Ваш заказ</div><div class="n" id="st-num">YAAM-1042</div><div class="order-time" id="st-time"></div></div>
-    <div class="sticon" id="st-icon">🍽️</div>
-    <div class="progress" id="st-progress"></div>
-    <div class="ststate" id="st-state">Принят</div>
-    <div class="st-substate" id="st-substate" style="display:none"></div>
-    <div class="stitems" id="st-items"></div>
-    <div class="demobar">
-      <button class="pay" id="st-next" onclick="nextStatus()">Следующий статус →</button>
-      <div id="st-final" style="display:none">
-        <div class="final-wrap">
-          <button class="ghost" onclick="resetAll()">На главную</button>
+    <div class="st-spin" id="st-spin"></div>
+    <div id="st-content">
+      <div class="sticon" id="st-icon">🍽️</div>
+      <div class="progress" id="st-progress"></div>
+      <div class="ststate" id="st-state">Принят</div>
+      <div class="st-substate" id="st-substate" style="display:none"></div>
+      <div class="stitems" id="st-items"></div>
+      <div class="demobar">
+        <button class="pay" id="st-next" onclick="nextStatus()">Следующий статус →</button>
+        <div id="st-final" style="display:none">
+          <div class="final-wrap">
+            <button class="ghost" onclick="resetAll()">На главную</button>
+          </div>
         </div>
+        <div id="st-demowrap"><button class="demolink" onclick="openRejected()">Демо: а если ресторан отклонит →</button></div>
       </div>
-      <div id="st-demowrap"><button class="demolink" onclick="openRejected()">Демо: а если ресторан отклонит →</button></div>
     </div>
   </div>
 </div>

@@ -309,6 +309,10 @@
   .pdot{transition:background .4s ease,transform .3s ease,color .3s ease}
   /* иконки статуса */
   .sticon{font-size:64px;text-align:center;margin:10px 0 6px;display:block}
+  /* спиннер подтверждения оплаты — короткая техническая пауза, не отдельный статус */
+  .st-spin{display:none;width:52px;height:52px;margin:44px auto;border-radius:50%;border:4px solid rgba(255,255,255,.14);border-top-color:var(--amber);animation:stspin .8s linear infinite}
+  .st-spin.on{display:block}
+  @keyframes stspin{to{transform:rotate(360deg)}}
   @keyframes iconpop{from{transform:scale(.3);opacity:0}to{transform:scale(1);opacity:1}}
   @keyframes pulse-glow{0%,100%{transform:scale(1)}50%{transform:scale(1.1)}}
   @keyframes cooking{0%{transform:rotate(-14deg)}25%{transform:rotate(0deg) scale(1.07)}50%{transform:rotate(14deg)}75%{transform:rotate(0deg) scale(1.07)}100%{transform:rotate(-14deg)}}

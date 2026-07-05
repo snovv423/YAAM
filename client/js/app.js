@@ -262,42 +262,29 @@ function drawQR(){
 const STEPS=['Принят','Готовится','В пути','Доставлен'];
 let statusStep=0;
 
-// Шаги ДО «Принят»: банк подтверждает оплату, затем ресторан должен ответить (окно 3 мин).
-const PRE_STEPS=[
-  {icon:'💳',anim:'iconpop .5s cubic-bezier(.3,1.4,.4,1), pulse-glow 2s ease-in-out .5s infinite',title:'Оплачено, ждём подтверждения',sub:'Обычно занимает несколько секунд'},
-  {icon:'⏳',anim:'iconpop .5s cubic-bezier(.3,1.4,.4,1), pulse-glow 1.4s ease-in-out .5s infinite',title:'Заказ отправлен, ждём ответа ресторана',sub:null}
-];
+// После оплаты — короткий спиннер (банк/PSP подтверждает платёж, доли секунды-пара секунд
+// на проде), затем единственный реальный шаг ожидания: ответ ресторана (окно 3 мин).
 const RESTAURANT_RESPONSE_WINDOW_SEC=180;
-const BANK_CONFIRM_DELAY_MS=1600; // на проде это реальный callback от PSP, а не решение человека — проходит само
-let preStep=0,inPreStatus=true,preTimer=null,preAutoTimer=null;
+const BANK_CONFIRM_DELAY_MS=1400;
+let inPreStatus=true,preTimer=null,preAutoTimer=null;
 
-function advancePreStep(){
-  clearInterval(preTimer);clearTimeout(preAutoTimer);
-  preStep++;
-  if(preStep>=PRE_STEPS.length){inPreStatus=false;document.getElementById('st-progress').style.display='flex';renderStatus();}
-  else renderPreStatus();
+function showStatusSpinner(on){
+  document.getElementById('st-spin').classList.toggle('on',on);
+  document.getElementById('st-content').style.display=on?'none':'';
 }
-function renderPreStatus(){
-  const step=PRE_STEPS[preStep];
+function renderWaitForRestaurant(){
+  showStatusSpinner(false);
   document.getElementById('st-progress').style.display='none';
-  document.getElementById('st-state').textContent=step.title;
-  const sub=document.getElementById('st-substate');
-  if(preStep===1){
-    sub.style.display='block';
-    startResponseTimer();
-  } else {
-    // «Оплачено, ждём подтверждения» — не решение ресторана, проходит автоматически, без тапа
-    sub.textContent=step.sub;sub.style.display='block';
-    clearTimeout(preAutoTimer);
-    preAutoTimer=setTimeout(advancePreStep,BANK_CONFIRM_DELAY_MS);
-  }
+  document.getElementById('st-state').textContent='Заказ отправлен, ждём ответа ресторана';
+  document.getElementById('st-substate').style.display='block';
+  startResponseTimer();
   const ic=document.getElementById('st-icon');
-  ic.textContent=step.icon;ic.style.animation='none';
-  requestAnimationFrame(()=>{ic.style.animation=step.anim;});
+  ic.textContent='⏳';ic.style.animation='none';
+  requestAnimationFrame(()=>{ic.style.animation='iconpop .5s cubic-bezier(.3,1.4,.4,1), pulse-glow 1.4s ease-in-out .5s infinite';});
   document.getElementById('statusbg').style.background='';
-  document.getElementById('st-next').style.display=(preStep===0)?'none':'block';
+  document.getElementById('st-next').style.display='block';
   document.getElementById('st-final').style.display='none';
-  document.getElementById('st-demowrap').style.display=(preStep===1)?'block':'none';
+  document.getElementById('st-demowrap').style.display='block';
 }
 function startResponseTimer(){
   clearInterval(preTimer);
@@ -312,18 +299,28 @@ function startResponseTimer(){
   },1000);
 }
 function openStatus(){
-  statusStep=0;preStep=0;inPreStatus=true;setOrderTime();showOrderDot(true);
+  statusStep=0;inPreStatus=true;setOrderTime();showOrderDot(true);
   document.getElementById('st-items').innerHTML=Object.values(cart).map(c=>`<div class="sumrow"><span>${c.q} × ${c.n}</span><span>${c.p*c.q} ₽</span></div>`).join('');
   document.getElementById('statusbg').style.display='block';
-  renderPreStatus();go('status');
+  showStatusSpinner(true);
+  go('status');
+  clearTimeout(preAutoTimer);
+  preAutoTimer=setTimeout(renderWaitForRestaurant,BANK_CONFIRM_DELAY_MS);
 }
 function nextStatus(){
-  if(inPreStatus){advancePreStep();return;}
+  if(inPreStatus){
+    clearInterval(preTimer);clearTimeout(preAutoTimer);
+    inPreStatus=false;
+    document.getElementById('st-progress').style.display='flex';
+    renderStatus();
+    return;
+  }
   if(statusStep<STEPS.length-1){statusStep++;renderStatus();}
 }
 
 function openRejected(reason){
   clearInterval(preTimer);clearTimeout(preAutoTimer);
+  showStatusSpinner(false);
   showOrderDot(false);
   if(curRest){
     document.getElementById('rej-title').textContent=(reason==='timeout')?`«${curRest.name}» не ответил вовремя`:`«${curRest.name}» не смог принять заказ`;
