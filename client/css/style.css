@@ -111,6 +111,21 @@
   .sleep h3{font-weight:800;font-size:20px;margin-top:10px}
   .sleep p{color:var(--txt2);font-size:13.5px;font-weight:600;margin-top:5px}
   .note{font-size:11.5px;color:var(--txt2);text-align:center;padding:18px 28px 6px;line-height:1.55;font-weight:500;position:relative;z-index:2}
+  /* footer со ссылками на юридические страницы */
+  .site-footer{display:flex;flex-wrap:wrap;justify-content:center;gap:6px 14px;padding:14px 24px 100px;position:relative;z-index:2}
+  .site-footer a{font-size:11px;font-weight:600;color:var(--txt2);text-decoration:none}
+  .site-footer a:hover{color:var(--amber)}
+  /* чекаут: плашка про доставку + согласия */
+  .delivery-note{font-size:12px;color:var(--txt2);line-height:1.5;margin:10px 0 0;text-align:center}
+  .delivery-note a{color:var(--amber)}
+  .legal-check{display:flex;align-items:flex-start;gap:9px;font-size:12.5px;color:var(--txt2);line-height:1.4;margin-top:10px;cursor:pointer}
+  .legal-check input{margin-top:2px;flex:0 0 auto}
+  .legal-check a{color:var(--amber)}
+  .legal-ok{font-size:12.5px;color:var(--txt2);margin-top:12px;text-align:center}
+  .legal-inline-link{text-align:center;margin-top:10px}
+  .legal-inline-link a{font-size:12.5px;color:var(--txt2);text-decoration:underline}
+  .offer-accept-note{text-align:center;font-size:11.5px;color:var(--txt2);line-height:1.5;margin-top:10px}
+  .offer-accept-note a{color:var(--amber)}
   /* тост (замена alert — блокируется в песочнице) */
   .toast{position:fixed;left:50%;bottom:110px;transform:translateX(-50%) translateY(20px);max-width:calc(100% - 40px);z-index:200;padding:13px 18px;border-radius:16px;background:var(--glass2);border:1px solid var(--gbord);box-shadow:var(--spec),var(--shadow-sm);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);font-size:13.5px;font-weight:700;color:var(--txt);text-align:center;opacity:0;pointer-events:none;transition:opacity .25s ease,transform .25s ease}
   .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}

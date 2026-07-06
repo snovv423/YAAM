@@ -309,6 +309,7 @@ function openCart(){
     Object.values(cart).map(c=>`<div class="sumrow"><span>${c.q} × ${c.n}</span><span>${c.p*c.q} ₽</span></div>`).join('')
     +`<div class="sumrow total"><span>К оплате сейчас (СБП)</span><span>${sum} ₽</span></div>`;
   document.getElementById('c-total').textContent=sum+' ₽';
+  renderLegalConsent();
   go('cart');updateBar();
 }
 function backToMenu(){go('menu');updateBar();}
@@ -322,6 +323,44 @@ function validateCheckout(){
     return false;
   }
   wrap.classList.remove('err');
+  return true;
+}
+
+// Согласие на обработку персональных данных — отдельный чекбокс, обязателен.
+// Оферта отдельного чекбокса не имеет — её акцепт происходит самим нажатием
+// «Оплатить» (см. текст под кнопкой), поэтому версию оферты тут не храним.
+const CONSENT_VERSION='1.0', PRIVACY_VERSION='1.0';
+function getLegalAcceptance(){
+  try{return JSON.parse(localStorage.getItem('yaam_legal')||'null');}catch{return null;}
+}
+function isLegalAccepted(){
+  const a=getLegalAcceptance();
+  return !!(a&&a.acceptedPersonalData&&a.consentVersion===CONSENT_VERSION&&a.privacyVersion===PRIVACY_VERSION);
+}
+function saveLegalAcceptance(){
+  localStorage.setItem('yaam_legal',JSON.stringify({
+    acceptedPersonalData:true,
+    consentVersion:CONSENT_VERSION,privacyVersion:PRIVACY_VERSION,
+    acceptedAt:new Date().toISOString(),
+  }));
+}
+function renderLegalConsent(){
+  const el=document.getElementById('legal-consent');
+  if(isLegalAccepted()){
+    el.innerHTML=`<p class="legal-ok">Вы уже дали согласие на обработку данных для оформления заказа.</p>`;
+  }else{
+    el.innerHTML=
+      `<label class="legal-check"><input type="checkbox" id="chk-pdn"><span>Я даю <a href="legal/personal-data-consent.html" target="_blank" rel="noopener">согласие</a> на обработку персональных данных согласно <a href="legal/privacy.html" target="_blank" rel="noopener">политике обработки данных</a></span></label>`;
+  }
+}
+function validateLegalConsent(){
+  if(isLegalAccepted())return true;
+  const pdnOk=document.getElementById('chk-pdn')?.checked;
+  if(!pdnOk){
+    showToast('Чтобы оформить заказ, нужно дать согласие на обработку персональных данных.');
+    return false;
+  }
+  saveLegalAcceptance();
   return true;
 }
 // Собранные данные оформления заказа. Без бэкенда (USE_API=false) остаются
@@ -343,6 +382,7 @@ function buildOrderPayload(){
 }
 async function openQR(){
   if(!validateCheckout())return;
+  if(!validateLegalConsent())return;
   const payload=buildOrderPayload();
   const{sum}=totals();
 

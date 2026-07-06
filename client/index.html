@@ -43,6 +43,15 @@
   <div class="sec"><h2>Открыто сейчас</h2></div>
   <div class="list" id="list"></div>
   <div class="note">Прототип YAAM. Фото — для примера; реальные снимки блюд загрузите при подключении ресторанов.</div>
+  <footer class="site-footer">
+    <a href="legal/offer.html" target="_blank" rel="noopener">Оферта</a>
+    <a href="legal/privacy.html" target="_blank" rel="noopener">Политика ПДн</a>
+    <a href="legal/personal-data-consent.html" target="_blank" rel="noopener">Согласие на ПДн</a>
+    <a href="legal/payment-refund.html" target="_blank" rel="noopener">Оплата и возврат</a>
+    <a href="legal/delivery.html" target="_blank" rel="noopener">Доставка</a>
+    <a href="legal/cookies.html" target="_blank" rel="noopener">Cookies</a>
+    <a href="legal/contacts.html" target="_blank" rel="noopener">Контакты</a>
+  </footer>
 </div>
 
 <!-- MENU -->
@@ -87,7 +96,10 @@
     <div class="field"><label>Комментарий к заказу</label><input id="c-comment" placeholder="Подъезд, этаж, домофон…"></div>
     <div class="panel" id="c-items"></div>
     <div class="trust"><span class="ic">🛡️</span><p>Оплата защищена. Не примет ресторан — вернём деньги.</p></div>
+    <p class="delivery-note">Доставку организует ресторан. YAAM принимает оплату только за еду. <a href="legal/delivery.html" target="_blank" rel="noopener">Подробнее</a></p>
+    <div id="legal-consent"></div>
     <button class="pay" onclick="openQR()">Оплатить еду по СБП · <span id="c-total"></span></button>
+    <p class="offer-accept-note">Нажимая «Оплатить», вы принимаете условия <a href="legal/offer.html" target="_blank" rel="noopener">оферты YAAM</a>.</p>
     <div class="center-wrap"><button class="ghost" onclick="backToMenu()">← Вернуться к меню</button></div>
   </div>
 </div>
@@ -102,6 +114,7 @@
     <div class="qr-timer">Оплатите в течение <span id="qr-time">10:00</span></div>
     <div class="hint">Отсканируйте код в приложении вашего банка<br>и подтвердите оплату. После оплаты страница обновится автоматически.</div>
     <div class="qr-screenshot-hint">Сделайте скриншот экрана — это ваш чек об оплате.</div>
+    <p class="legal-inline-link"><a href="legal/payment-refund.html" target="_blank" rel="noopener">Условия оплаты и возврата</a></p>
     <div class="qr-demo-wrap"><button class="ghost" onclick="afterPay()">Демо: оплата прошла →</button></div>
   </div>
 </div>
