@@ -1,5 +1,28 @@
 let curRest=null, cart={}, selectedCity='Грозный';
-const SOLD_OUT={'2_0':true}; // демо: блюдо в стоп-листе
+const SOLD_OUT={'2_0':true}; // демо: блюдо в стоп-листе (актуально только без бэкенда)
+
+// Приводим ответ бэкенда к той же форме, в которой всегда жили демо-данные
+// из data.js — это позволяет всем render-функциям ниже не знать, откуда
+// пришли данные (demo-массив или API), и не дублировать логику отрисовки.
+function normalizeRestaurant(r){
+  return{
+    id:r.id, name:r.name, cui:r.cuisine||'', photoUrl:r.photo_url||'',
+    e:'🍽️', g:'linear-gradient(135deg,#3d6b4e,#1e4630)', im:null,
+    rate:r.rating||0, votes:r.rating_count||0,
+    time:r.time||'30–40 мин', hours:r.hours||'', deliv:r.delivery_price||0, min:r.min_order||0,
+    open:!!r.is_open, isNew:!!r.is_new, cities:r.cities||[],
+    menu:(r.menu||[]).map(cat=>({
+      cat:cat.name,
+      items:cat.items.map(it=>({
+        id:it.id, n:it.name, d:it.description||'', p:it.price,
+        e:'🍽️', g:'linear-gradient(135deg,#3d6b4e,#1e4630)', im:null, photoUrl:it.photo_url||'',
+        pop:!!it.is_popular, available:it.is_available!==0,
+        w:it.weight_g, kcal:it.kcal, prot:it.protein_g, fat:it.fat_g, carb:it.carbs_g, s:it.composition,
+      })),
+    })),
+  };
+}
+let restaurantsCache=[];
 
 let cityAnimTimer=null;
 function selectCity(c){
@@ -16,20 +39,35 @@ function selectCity(c){
   },200);
 }
 
-function cardHTML(r){return `
+function cardHTML(r){
+  const photo=r.photoUrl?`<img src="${r.photoUrl}" loading="lazy" onerror="this.remove()">`:`<img src="${U(r.im,900)}" loading="lazy" onerror="this.remove()">`;
+  return `
   <div class="card ${r.open?'':'closed'}" onclick="${r.open?`openRest(${r.id},event)`:`shut('${r.name}')`}">
     <div class="photo" style="background:${r.g}">
-      <span class="mj">${r.e}</span><img src="${U(r.im,900)}" loading="lazy" onerror="this.remove()">
+      <span class="mj">${r.e}</span>${photo}
       <div class="chip st ${r.open?'open':'shut'}"><span class="bdot"></span>${r.open?'Открыто':'Закрыто'}</div>
       <div class="chip rt">★ ${r.rate} · ${r.votes}</div>
       <div class="info"><div class="cname">${r.name}${r.open&&r.isNew?' <span class="newtag">NEW</span>':''}</div><div class="ccui">${r.cui}</div>
         <div class="ordcnt">уже заказали ${r.votes*3} раз</div>
         <div class="cmeta"><span>🕑 ${r.time}</span><span>🛵 ${r.deliv} ₽</span><span><b>мин.</b> ${r.min} ₽</span><span>🕐 ${r.hours}</span></div></div>
-    </div></div>`;}
+    </div></div>`;
+}
 
-function renderList(instant){
+async function renderList(instant){
   const q=(document.getElementById('q').value||'').toLowerCase().trim();
-  let base=restaurants.filter(r=>r.cities.includes(selectedCity)).filter(r=>!q||r.name.toLowerCase().includes(q)||r.cui.toLowerCase().includes(q));
+  let base;
+  if(USE_API){
+    try{
+      base=(await api.getRestaurants(selectedCity)).map(normalizeRestaurant);
+    }catch(err){
+      showToast('Не удалось загрузить рестораны — проверьте соединение');
+      base=[];
+    }
+  }else{
+    base=restaurants.filter(r=>r.cities.includes(selectedCity));
+  }
+  restaurantsCache=base;
+  base=base.filter(r=>!q||r.name.toLowerCase().includes(q)||r.cui.toLowerCase().includes(q));
   const openR=base.filter(r=>r.open).sort((a,b)=>(b.isNew?1:0)-(a.isNew?1:0)||b.rate-a.rate);
   const closedR=base.filter(r=>!r.open);
   document.getElementById('new-sec').innerHTML='';
@@ -60,7 +98,7 @@ function showToast(msg){
 function openRest(id){
   const cnt=Object.keys(cart).length;
   if(cnt>0 && curRest && curRest.id!==id){
-    const other=restaurants.find(r=>r.id===id);
+    const other=restaurantsCache.find(r=>r.id===id)||{name:'другого ресторана'};
     yaamConfirm(`В корзине блюда из «${curRest.name}». Очистить корзину и заказать из «${other.name}»?`,()=>doOpenRest(id));
     return;
   }
@@ -141,12 +179,23 @@ function renderStatus(){
 }
 
 // Размытие при входе в ресторан
-function doOpenRest(id){
+async function doOpenRest(id){
   const same=curRest&&curRest.id===id;
-  curRest=restaurants.find(r=>r.id===id); if(!same)cart={};
+  if(USE_API){
+    try{
+      curRest=normalizeRestaurant(await api.getRestaurant(id));
+    }catch(err){
+      showToast('Не удалось открыть ресторан — проверьте соединение');
+      return;
+    }
+  }else{
+    curRest=restaurants.find(r=>r.id===id);
+  }
+  if(!same)cart={};
   const h=document.getElementById('m-hero');const old=h.querySelector('img');if(old)old.remove();
   h.style.background=curRest.g;
-  const img=new Image();img.src=U(curRest.im,900);img.onerror=function(){this.remove()};h.insertBefore(img,h.firstChild);
+  const heroSrc=curRest.photoUrl||U(curRest.im,900);
+  const img=new Image();img.src=heroSrc;img.onerror=function(){this.remove()};h.insertBefore(img,h.firstChild);
   document.getElementById('m-name').textContent=curRest.name;
   document.getElementById('m-meta').innerHTML=`<span>★ ${curRest.rate} · ${curRest.votes}</span><span>🕑 ${curRest.time}</span><span>🛵 ${curRest.deliv} ₽</span><span>🕐 ${curRest.hours}</span>`;
   const tabs=['Популярное',...curRest.menu.map(c=>c.cat)];
@@ -154,11 +203,12 @@ function doOpenRest(id){
   renderMenuBody(); go('menu'); updateBar();
 }
 function key(ci,ii){return ci+'_'+ii;}
-function findItem(k){const[ci,ii]=k.split('_').map(Number);const d=curRest.menu[ci].items[ii];return{n:d.n.replace(/'/g,''),p:d.p};}
+function findItem(k){const[ci,ii]=k.split('_').map(Number);const d=curRest.menu[ci].items[ii];return{n:d.n.replace(/'/g,''),p:d.p,id:d.id||null};}
 function dishCard(d,ci,ii){
-  const k=key(ci,ii);const q=cart[k]?cart[k].q:0;const so=SOLD_OUT[k];
+  const k=key(ci,ii);const q=cart[k]?cart[k].q:0;const so=SOLD_OUT[k]||d.available===false;
+  const photo=d.photoUrl?`<img src="${d.photoUrl}" loading="lazy" onerror="this.remove()">`:`<img src="${U(d.im,700)}" loading="lazy" onerror="this.remove()">`;
   return `<div class="dish ${so?'dis':''}" ${so?'':`onclick="openDish('${k}')"`}>
-    <div class="dphoto" style="background:${d.g}"><span class="mj">${d.e}</span><img src="${U(d.im,700)}" loading="lazy" onerror="this.remove()">
+    <div class="dphoto" style="background:${d.g}"><span class="mj">${d.e}</span>${photo}
     <div class="dplate"><div class="dname">${d.n}${d.pop?' <span class="hit">Хит</span>':''}</div><div class="ddesc">${d.d}</div>
     <div class="dbot"><div class="dprice">${d.p} ₽</div>${so?'<span class="soldout">Нет в наличии</span>':`<div id="ctrl_${k}" onclick="event.stopPropagation()">${q>0?qtyHtml(k,q):`<button class="add" onclick="addItem('${k}',event)">+</button>`}</div>`}</div></div></div></div>`;
 }
@@ -171,7 +221,7 @@ function renderMenuBody(){
   document.getElementById('m-body').innerHTML=html;
 }
 function qtyHtml(k,q){return `<div class="qty"><button onclick="dec('${k}')">−</button><span>${q}</span><button onclick="inc('${k}',event)">+</button></div>`;}
-function addItem(k,e){const it=findItem(k);cart[k]={n:it.n,p:it.p,q:1};refreshAll(k);if(e)flyAnim(e);}
+function addItem(k,e){const it=findItem(k);cart[k]={n:it.n,p:it.p,q:1,menuItemId:it.id};refreshAll(k);if(e)flyAnim(e);}
 function inc(k,e){cart[k].q++;refreshAll(k);if(e)flyAnim(e);}
 function dec(k){cart[k].q--;if(cart[k].q<=0)delete cart[k];refreshAll(k);}
 function refreshAll(k){document.querySelectorAll('#ctrl_'+k).forEach(el=>{const c=cart[k];el.innerHTML=(c&&c.q>0)?qtyHtml(k,c.q):`<button class="add" onclick="addItem('${k}',event)">+</button>`;});updateBar();}
@@ -179,12 +229,23 @@ function refreshAll(k){document.querySelectorAll('#ctrl_'+k).forEach(el=>{const 
 let curDishKey=null,curDishPrice=0,dishQty=1;
 function openDish(k){
   curDishKey=k;const[ci,ii]=k.split('_').map(Number);const d=curRest.menu[ci].items[ii];
-  const det=DETAILS[d.n]||{w:300,kcal:450,p:20,f:20,c:40,s:'Натуральные ингредиенты'};
+  // из API приходят реальные значения (могут быть пустыми, если админ их не заполнил);
+  // в демо-режиме — из локального справочника DETAILS.
+  const fromApi=d.kcal!=null;
+  const det=fromApi
+    ? {w:d.w||'—',kcal:d.kcal??'—',p:d.prot??'—',f:d.fat??'—',c:d.carb??'—',s:d.s||'Состав не указан'}
+    : (DETAILS[d.n]||{w:300,kcal:450,p:20,f:20,c:40,s:'Натуральные ингредиенты'});
   const h=document.getElementById('d-hero');h.querySelectorAll('.mj,img').forEach(x=>x.remove());h.style.background=d.g;
   const mj=document.createElement('span');mj.className='mj';mj.textContent=d.e;h.insertBefore(mj,h.firstChild);
-  const img=new Image();img.src=U(d.im,1000);img.onerror=function(){this.remove()};h.insertBefore(img,h.firstChild);
-  const ids=[d.im,...POOL.filter(x=>x!==d.im)].slice(0,4);
-  document.getElementById('d-gallery').innerHTML=ids.map((id,i)=>`<div class="thumb ${i===0?'on':''}" onclick="swapHero('${id}',${i})"><img src="${U(id,200)}" onerror="this.parentNode.style.display='none'"></div>`).join('');
+  const heroSrc=d.photoUrl||U(d.im,1000);
+  const img=new Image();img.src=heroSrc;img.onerror=function(){this.remove()};h.insertBefore(img,h.firstChild);
+  const gallery=document.getElementById('d-gallery');
+  if(d.photoUrl){
+    gallery.innerHTML=`<div class="thumb on"><img src="${d.photoUrl}" onerror="this.parentNode.style.display='none'"></div>`;
+  }else{
+    const ids=[d.im,...POOL.filter(x=>x!==d.im)].slice(0,4);
+    gallery.innerHTML=ids.map((id,i)=>`<div class="thumb ${i===0?'on':''}" onclick="swapHero('${id}',${i})"><img src="${U(id,200)}" onerror="this.parentNode.style.display='none'"></div>`).join('');
+  }
   document.getElementById('d-name').textContent=d.n;
   document.getElementById('d-sub').textContent=`${det.w} г · ${d.p} ₽`;
   document.getElementById('d-kbju').innerHTML=`<div class="kc"><b>${det.kcal}</b><span>ккал</span></div><div class="kc"><b>${det.p} г</b><span>белки</span></div><div class="kc"><b>${det.f} г</b><span>жиры</span></div><div class="kc"><b>${det.c} г</b><span>углеводы</span></div>`;
@@ -194,7 +255,7 @@ function openDish(k){
 function renderDishAdd(){document.getElementById('d-qty').textContent=dishQty;document.getElementById('d-add').textContent=`Добавить · ${curDishPrice*dishQty} ₽`;}
 function dishQtyPlus(){dishQty++;renderDishAdd();}
 function dishQtyMinus(){if(dishQty>1){dishQty--;renderDishAdd();}}
-function addFromDish(){const it=findItem(curDishKey);cart[curDishKey]={n:it.n,p:it.p,q:dishQty};refreshAll(curDishKey);go('menu');}
+function addFromDish(){const it=findItem(curDishKey);cart[curDishKey]={n:it.n,p:it.p,q:dishQty,menuItemId:it.id};refreshAll(curDishKey);go('menu');}
 function swapHero(id,i){const img=document.querySelector('#d-hero img');if(img)img.src=U(id,1000);document.querySelectorAll('#d-gallery .thumb').forEach((t,j)=>t.classList.toggle('on',j===i));}
 
 function totals(){let sum=0,cnt=0;for(const k in cart){sum+=cart[k].p*cart[k].q;cnt+=cart[k].q;}return{sum,cnt};}
@@ -225,8 +286,10 @@ function validateCheckout(){
   wrap.classList.remove('err');
   return true;
 }
-// Собранные данные оформления заказа — сюда подключится бот ресторана/бэкенд.
+// Собранные данные оформления заказа. Без бэкенда (USE_API=false) остаются
+// только в браузере — ровно то же самое, что отправится в API, когда он появится.
 let lastOrder=null;
+let currentOrderCode=null, currentProviderPaymentId=null;
 function buildOrderPayload(){
   const{sum}=totals();
   return{
@@ -236,14 +299,33 @@ function buildOrderPayload(){
     comment:document.getElementById('c-comment').value.trim(),
     city:selectedCity,
     restaurant:curRest.name,
-    items:Object.values(cart).map(c=>({name:c.n,qty:c.q,price:c.p})),
+    items:Object.values(cart).map(c=>({name:c.n,qty:c.q,price:c.p,menuItemId:c.menuItemId||null})),
     total:sum
   };
 }
-function openQR(){
+async function openQR(){
   if(!validateCheckout())return;
-  lastOrder=buildOrderPayload();
+  const payload=buildOrderPayload();
   const{sum}=totals();
+
+  if(USE_API){
+    try{
+      const{order,payment}=await api.createOrder({
+        restaurantId:curRest.id, city:selectedCity,
+        customerName:payload.name, customerPhone:payload.phone,
+        address:payload.address, comment:payload.comment,
+        items:payload.items.map(i=>({name:i.name,price:i.price,qty:i.qty,menuItemId:i.menuItemId})),
+      });
+      currentOrderCode=order.public_code;
+      currentProviderPaymentId=payment.providerPaymentId;
+    }catch(err){
+      showToast(err.message||'Не удалось оформить заказ');
+      return;
+    }
+  }else{
+    lastOrder=payload;
+  }
+
   document.getElementById('qr-amt').textContent=sum+' ₽';
   document.getElementById('cartbar').style.display='none';
   drawQR();startQRTimer();go('qr');
@@ -319,9 +401,13 @@ function nextStatus(){
 }
 
 function openRejected(reason){
-  clearInterval(preTimer);clearTimeout(preAutoTimer);
+  clearInterval(preTimer);clearTimeout(preAutoTimer);stopOrderPolling();
   showStatusSpinner(false);
   showOrderDot(false);
+  document.getElementById('rej-explain').style.display='';
+  document.getElementById('rej-refund-line').style.display='';
+  const btn=document.getElementById('rej-action-btn');
+  btn.textContent='Выбрать другой ресторан';btn.onclick=resetAll;
   if(curRest){
     document.getElementById('rej-title').textContent=(reason==='timeout')?`«${curRest.name}» не ответил вовремя`:`«${curRest.name}» не смог принять заказ`;
     const{sum}=totals();if(sum>0)document.getElementById('rej-sum').textContent=sum.toLocaleString('ru-RU')+' ₽';
@@ -330,9 +416,98 @@ function openRejected(reason){
   go('rejected');
 }
 
+// Оплата не прошла (ошибка провайдера/банка) — отдельный экран-состояние,
+// в отличие от отказа ресторана деньги тут не возвращаются, их и не списывали.
+function openPaymentFailed(){
+  stopOrderPolling();showStatusSpinner(false);showOrderDot(false);
+  document.getElementById('rej-title').textContent='Оплата не прошла';
+  document.getElementById('rej-explain').textContent='Банк отклонил платёж или соединение прервалось — деньги не списаны.';
+  document.getElementById('rej-refund-line').style.display='none';
+  const btn=document.getElementById('rej-action-btn');
+  btn.textContent='Попробовать снова';btn.onclick=retryPaymentFlow;
+  document.getElementById('statusbg').style.display='none';
+  go('rejected');
+}
+async function retryPaymentFlow(){
+  try{
+    const{payment}=await api.retryPayment(currentOrderCode);
+    currentProviderPaymentId=payment.providerPaymentId;
+    const{sum}=totals();
+    document.getElementById('qr-amt').textContent=sum+' ₽';
+    drawQR();startQRTimer();go('qr');
+  }catch(err){
+    showToast(err.message||'Не удалось создать новый платёж');
+  }
+}
+function cancelOrderFlow(){
+  yaamConfirm('Отменить заказ? Деньги вернутся автоматически.',async()=>{
+    try{
+      await api.cancelOrder(currentOrderCode);
+      stopOrderPolling();
+      showToast('Заказ отменён, деньги вернутся автоматически');
+      resetAll();
+    }catch(err){
+      showToast(err.message||'Не удалось отменить заказ');
+    }
+  });
+}
+
+// --- Поллинг реального статуса заказа (только в режиме API) ---
+const ORDER_STATUS_TO_STEP={accepted:0,preparing:1,courier:2,delivered:3};
+let orderPollTimer=null;
+function stopOrderPolling(){clearInterval(orderPollTimer);orderPollTimer=null;}
+async function pollOrderOnce(){
+  let order;
+  try{order=await api.getOrder(currentOrderCode);}catch(err){return;} // сеть моргнула — попробуем на следующем тике
+  document.getElementById('st-num').textContent=order.public_code;
+
+  if(order.status==='awaiting_restaurant'){
+    showStatusSpinner(false);
+    document.getElementById('st-progress').style.display='none';
+    document.getElementById('st-state').textContent='Заказ отправлен, ждём ответа ресторана';
+    const updatedMs=Date.parse(order.status_updated_at.replace(' ','T')+'Z');
+    const left=Math.max(0,RESTAURANT_RESPONSE_WINDOW_SEC-Math.floor((Date.now()-updatedMs)/1000));
+    const m=Math.floor(left/60),s=left%60;
+    document.getElementById('st-substate').textContent=`Ответ ресторана в течение ${m}:${s<10?'0':''}${s}`;
+    document.getElementById('st-substate').style.display='block';
+    const ic=document.getElementById('st-icon');ic.textContent='⏳';
+    document.getElementById('st-next').style.display='none';
+    document.getElementById('st-demowrap').style.display='none';
+    document.getElementById('st-cancel-wrap').style.display='block';
+  }else if(ORDER_STATUS_TO_STEP[order.status]!==undefined){
+    inPreStatus=false;
+    statusStep=ORDER_STATUS_TO_STEP[order.status];
+    document.getElementById('st-progress').style.display='flex';
+    document.getElementById('st-next').style.display='none'; // статус двигает ресторан по-настоящему, не демо-кнопка
+    document.getElementById('st-demowrap').style.display='none';
+    document.getElementById('st-cancel-wrap').style.display='none';
+    renderStatus();
+    if(order.status==='delivered')stopOrderPolling();
+  }else if(order.status==='declined'){
+    openRejected('declined');
+  }else if(order.status==='timed_out'){
+    openRejected('timeout');
+  }else if(order.status==='cancelled'){
+    stopOrderPolling();resetAll();
+  }else if(order.status==='payment_failed'){
+    openPaymentFailed();
+  }
+}
+function startOrderPolling(){
+  statusStep=0;inPreStatus=true;setOrderTime();showOrderDot(true);
+  document.getElementById('st-items').innerHTML=Object.values(cart).map(c=>`<div class="sumrow"><span>${c.q} × ${c.n}</span><span>${c.p*c.q} ₽</span></div>`).join('');
+  document.getElementById('statusbg').style.display='block';
+  document.getElementById('st-cancel-wrap').style.display='none';
+  showStatusSpinner(true);
+  go('status');
+  stopOrderPolling();
+  pollOrderOnce();
+  orderPollTimer=setInterval(pollOrderOnce,4000);
+}
+
 function cur(id){return document.getElementById(id).classList.contains('active');}
 function go(id){document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));document.getElementById(id).classList.add('active');document.querySelector('.dish-add').style.display=(id==='dish')?'block':'none';if(id!=='status'&&id!=='rejected')document.getElementById('statusbg').style.display='none';const vh=document.getElementById('vote-handle');if(vh)vh.style.display=(id==='home')?'flex':'none';window.scrollTo(0,0);updateBar();try{if(id!=='home')history.pushState({screen:id},'');else history.replaceState({screen:'home'},'');}catch(e){}}
-function resetAll(){clearInterval(preTimer);clearTimeout(preAutoTimer);cart={};curRest=null;document.getElementById('q').value='';document.getElementById('statusbg').style.display='none';go('home');renderList();}
+function resetAll(){clearInterval(preTimer);clearTimeout(preAutoTimer);stopOrderPolling();cart={};curRest=null;currentOrderCode=null;currentProviderPaymentId=null;document.getElementById('q').value='';document.getElementById('statusbg').style.display='none';go('home');renderList();}
 // Своё окно подтверждения (замена заблокированного confirm)
 function yaamConfirm(text,onYes){
   const ov=document.getElementById('confirm-overlay');
@@ -365,7 +540,7 @@ function openSheet(){
 function showSuggest(q){
   const el=document.getElementById('suggest');
   if(!q||q.length<1){el.classList.remove('on');return;}
-  const matches=restaurants.filter(r=>r.cities.includes(selectedCity)&&r.name.toLowerCase().includes(q.toLowerCase())).slice(0,4);
+  const matches=restaurantsCache.filter(r=>r.cities.includes(selectedCity)&&r.name.toLowerCase().includes(q.toLowerCase())).slice(0,4);
   if(!matches.length){el.classList.remove('on');return;}
   el.innerHTML=matches.map(r=>`<div class="sug-item" onclick="pickSuggest('${r.name}')">🍽 ${r.name} <span style="color:var(--txt2);font-size:12px">· ${r.cui.split('·')[0].trim()}</span></div>`).join('');
   el.classList.add('on');
@@ -374,7 +549,16 @@ function hideSuggest(){document.getElementById('suggest').classList.remove('on')
 function pickSuggest(name){document.getElementById('q').value=name;hideSuggest();renderList();}
 
 // После оплаты — сразу к статусу
-function afterPay(){clearInterval(qrInterval);openStatus();}
+async function afterPay(){
+  clearInterval(qrInterval);
+  if(USE_API){
+    try{await api.devMarkPaid(currentProviderPaymentId);}
+    catch(err){showToast(err.message||'Оплата не прошла');return;}
+    startOrderPolling();
+  }else{
+    openStatus();
+  }
+}
 function closeSheet(){document.getElementById('sheet-overlay').classList.remove('on');document.getElementById('sheet').classList.remove('on');document.body.style.overflow='';}
 function sheetInc(k){inc(k);openSheet();}
 function sheetDec(k){
