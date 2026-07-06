@@ -198,9 +198,47 @@ async function doOpenRest(id){
   const img=new Image();img.src=heroSrc;img.onerror=function(){this.remove()};h.insertBefore(img,h.firstChild);
   document.getElementById('m-name').textContent=curRest.name;
   document.getElementById('m-meta').innerHTML=`<span>★ ${curRest.rate} · ${curRest.votes}</span><span>🕑 ${curRest.time}</span><span>🛵 ${curRest.deliv} ₽</span><span>🕐 ${curRest.hours}</span>`;
+  document.getElementById('msb-name').textContent=curRest.name;
+  document.getElementById('msb-rate').textContent=`★ ${curRest.rate}`;
   const tabs=['Популярное',...curRest.menu.map(c=>c.cat)];
   document.getElementById('m-tabs').innerHTML=tabs.map((t,i)=>`<div class="mtab ${i===0?'on':''}" onclick="document.getElementById('sec${i}').scrollIntoView({behavior:'smooth'})">${t}</div>`).join('');
   renderMenuBody(); go('menu'); updateBar();
+  window.scrollTo(0,0);
+  initMenuScrollFX();
+}
+
+// Компактная плашка ресторана при скролле меню + подсветка активной категории
+// + лёгкий скролл-параллакс на фото ресторана (transform-only, работает и на тач-устройствах,
+// в отличие от прежнего hover-параллакса на главной, который на мобильном просто не срабатывал).
+let catObserver=null, menuScrollHandler=null;
+function initMenuScrollFX(){
+  const hero=document.querySelector('#m-hero img');
+  const stickybar=document.getElementById('menu-stickybar');
+  const heroHeight=document.getElementById('m-hero').offsetHeight;
+
+  const onScroll=()=>{
+    if(!cur('menu'))return;
+    const y=window.scrollY;
+    stickybar.classList.toggle('show',y>heroHeight*0.6);
+    if(hero)hero.style.transform=`translateY(${Math.min(y*0.25,40)}px)`;
+  };
+  window.removeEventListener('scroll',menuScrollHandler);
+  menuScrollHandler=onScroll;
+  window.addEventListener('scroll',menuScrollHandler,{passive:true});
+  onScroll();
+
+  if(catObserver)catObserver.disconnect();
+  const sections=[...document.querySelectorAll('#m-body .cat-h')];
+  const tabs=[...document.querySelectorAll('#m-tabs .mtab')];
+  catObserver=new IntersectionObserver((entries)=>{
+    entries.forEach(en=>{
+      if(!en.isIntersecting)return;
+      const idx=sections.indexOf(en.target);
+      tabs.forEach((t,i)=>t.classList.toggle('on',i===idx));
+      if(tabs[idx])tabs[idx].scrollIntoView({behavior:'smooth',inline:'center',block:'nearest'});
+    });
+  },{rootMargin:'-96px 0px -75% 0px'});
+  sections.forEach(s=>catObserver.observe(s));
 }
 function key(ci,ii){return ci+'_'+ii;}
 function findItem(k){const[ci,ii]=k.split('_').map(Number);const d=curRest.menu[ci].items[ii];return{n:d.n.replace(/'/g,''),p:d.p,id:d.id||null};}
