@@ -2,8 +2,24 @@ const express = require('express');
 const crypto = require('node:crypto');
 const db = require('../db');
 const { layout } = require('../admin/layout');
+const orderService = require('../services/orderService');
 
 const router = express.Router();
+
+const PAUSE_LABELS = { short: '33 мин', medium: '3 часа', long: '11 часов' };
+
+function statusBadge(r) {
+  if (r.is_open) return '<span class="badge open">Открыт</span>';
+  if (r.paused_until) {
+    // paused_until хранится в формате SQLite datetime('now', ...) — UTC, "YYYY-MM-DD HH:MM:SS" —
+    // явно указываем, что это UTC, добавляя T/Z, иначе New Date() может интерпретировать как локальное время.
+    const until = new Date(r.paused_until.replace(' ', 'T') + 'Z');
+    const hh = String(until.getHours()).padStart(2, '0');
+    const mm = String(until.getMinutes()).padStart(2, '0');
+    return `<span class="badge paused">Перерыв до ${hh}:${mm}</span>`;
+  }
+  return '<span class="badge closed">Закрыт</span>';
+}
 
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -52,7 +68,7 @@ router.get('/restaurants', (req, res) => {
       ${list.map((r) => `<tr>
         <td>${esc(r.name)}</td>
         <td>${esc(JSON.parse(r.cities || '[]').join(', '))}</td>
-        <td><span class="badge ${r.is_open ? 'open' : 'closed'}">${r.is_open ? 'Открыт' : 'Пауза'}</span></td>
+        <td>${statusBadge(r)}</td>
         <td>${r.telegram_chat_id ? '✅ подключён' : `<code>${esc(r.connect_code || '—')}</code>`}</td>
         <td><a class="btn" href="/admin/restaurants/${r.id}/edit">Редактировать</a></td>
       </tr>`).join('')}
@@ -69,23 +85,25 @@ router.get('/restaurants/new', (req, res) => {
       <label>Фото (URL)</label><input name="photo_url" placeholder="https://...">
       <label>Города (через запятую)</label><input name="cities" placeholder="Грозный, Аргун" required>
       <label>Часы работы</label><input name="hours" placeholder="10:00–23:00">
+      <label>Телефон (виден клиенту после оформления заказа)</label><input name="phone" placeholder="+7 928 000-00-00">
       <div class="row">
         <div><label>Доставка, ₽</label><input name="delivery_price" type="number" value="150"></div>
         <div><label>Мин. заказ, ₽</label><input name="min_order" type="number" value="500"></div>
       </div>
+      <label>Время готовки по умолчанию, мин (бот предложит его и ±10/+15 на выбор)</label><input name="default_cook_minutes" type="number" value="40">
       <button type="submit">Создать</button>
     </form>
   `));
 });
 
 router.post('/restaurants', (req, res) => {
-  const { name, cuisine, photo_url, cities, hours, delivery_price, min_order } = req.body;
+  const { name, cuisine, photo_url, cities, hours, phone, delivery_price, min_order, default_cook_minutes } = req.body;
   const connectCode = crypto.randomBytes(3).toString('hex').toUpperCase();
   const citiesJson = JSON.stringify(String(cities || '').split(',').map((c) => c.trim()).filter(Boolean));
   const info = db.prepare(`
-    INSERT INTO restaurants (name, cuisine, photo_url, cities, hours, delivery_price, min_order, connect_code)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(name, cuisine || '', photo_url || '', citiesJson, hours || '', Number(delivery_price) || 0, Number(min_order) || 0, connectCode);
+    INSERT INTO restaurants (name, cuisine, photo_url, cities, hours, phone, delivery_price, min_order, default_cook_minutes, connect_code)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(name, cuisine || '', photo_url || '', citiesJson, hours || '', phone || '', Number(delivery_price) || 0, Number(min_order) || 0, Number(default_cook_minutes) || 40, connectCode);
   res.redirect(`/admin/restaurants/${info.lastInsertRowid}/edit`);
 });
 
@@ -104,17 +122,26 @@ router.get('/restaurants/:id/edit', (req, res) => {
       <label>Фото (URL)</label><input name="photo_url" value="${esc(r.photo_url)}">
       <label>Города (через запятую)</label><input name="cities" value="${esc(JSON.parse(r.cities || '[]').join(', '))}">
       <label>Часы работы</label><input name="hours" value="${esc(r.hours)}">
+      <label>Телефон (виден клиенту после оформления заказа)</label><input name="phone" value="${esc(r.phone)}" placeholder="+7 928 000-00-00">
       <div class="row">
         <div><label>Доставка, ₽</label><input name="delivery_price" type="number" value="${r.delivery_price}"></div>
         <div><label>Мин. заказ, ₽</label><input name="min_order" type="number" value="${r.min_order}"></div>
       </div>
+      <label>Время готовки по умолчанию, мин</label><input name="default_cook_minutes" type="number" value="${r.default_cook_minutes}">
       <button type="submit">Сохранить</button>
     </form>
 
-    <form method="post" action="/admin/restaurants/${r.id}/toggle-open" class="panel" style="display:flex;align-items:center;justify-content:space-between">
-      <span>Статус: <span class="badge ${r.is_open ? 'open' : 'closed'}">${r.is_open ? 'Открыт' : 'Пауза'}</span></span>
-      <button class="${r.is_open ? 'danger' : ''}" type="submit">${r.is_open ? 'Поставить на паузу' : 'Открыть'}</button>
-    </form>
+    <div class="panel">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:${r.is_open ? '0' : '14px'}">
+        <span>Статус: ${statusBadge(r)}</span>
+        ${r.is_open ? '' : `<form method="post" action="/admin/restaurants/${r.id}/resume" style="margin:0"><button type="submit">Открыть сейчас</button></form>`}
+      </div>
+      ${r.is_open ? `
+      <label style="margin-top:0">Уйти на перерыв</label>
+      <div class="row">
+        ${Object.keys(PAUSE_LABELS).map((key) => `<form method="post" action="/admin/restaurants/${r.id}/pause"><input type="hidden" name="preset" value="${key}"><button class="ghost" type="submit" style="width:100%">${PAUSE_LABELS[key]}</button></form>`).join('')}
+      </div>` : ''}
+    </div>
 
     <div class="panel">
       <h2 style="font-size:15px;margin-top:0">Категории меню</h2>
@@ -160,16 +187,20 @@ router.get('/restaurants/:id/edit', (req, res) => {
 
 router.post('/restaurants/:id/', (req, res) => res.redirect(307, `/admin/restaurants/${req.params.id}`));
 router.post('/restaurants/:id', (req, res) => {
-  const { name, cuisine, photo_url, cities, hours, delivery_price, min_order } = req.body;
+  const { name, cuisine, photo_url, cities, hours, phone, delivery_price, min_order, default_cook_minutes } = req.body;
   const citiesJson = JSON.stringify(String(cities || '').split(',').map((c) => c.trim()).filter(Boolean));
   db.prepare(`
-    UPDATE restaurants SET name=?, cuisine=?, photo_url=?, cities=?, hours=?, delivery_price=?, min_order=? WHERE id=?
-  `).run(name, cuisine || '', photo_url || '', citiesJson, hours || '', Number(delivery_price) || 0, Number(min_order) || 0, req.params.id);
+    UPDATE restaurants SET name=?, cuisine=?, photo_url=?, cities=?, hours=?, phone=?, delivery_price=?, min_order=?, default_cook_minutes=? WHERE id=?
+  `).run(name, cuisine || '', photo_url || '', citiesJson, hours || '', phone || '', Number(delivery_price) || 0, Number(min_order) || 0, Number(default_cook_minutes) || 40, req.params.id);
   res.redirect(`/admin/restaurants/${req.params.id}/edit`);
 });
 
-router.post('/restaurants/:id/toggle-open', (req, res) => {
-  db.prepare('UPDATE restaurants SET is_open = 1 - is_open WHERE id = ?').run(req.params.id);
+router.post('/restaurants/:id/pause', (req, res) => {
+  orderService.pauseRestaurant(req.params.id, req.body.preset);
+  res.redirect(`/admin/restaurants/${req.params.id}/edit`);
+});
+router.post('/restaurants/:id/resume', (req, res) => {
+  orderService.resumeRestaurant(req.params.id);
   res.redirect(`/admin/restaurants/${req.params.id}/edit`);
 });
 
@@ -211,6 +242,35 @@ router.get('/orders', (req, res) => {
         <td>${esc(o.status)}</td><td>${esc(o.created_at)}</td>
       </tr>`).join('') || '<tr><td colspan="6" style="color:var(--txt2)">Заказов пока нет</td></tr>'}
     </table>
+  `));
+});
+
+// --- Оценки ---
+router.get('/ratings', (req, res) => {
+  const rated = db.prepare(`
+    SELECT o.public_code, o.rating, o.created_at, r.name AS restaurant_name
+    FROM orders o JOIN restaurants r ON r.id = o.restaurant_id
+    WHERE o.rating IS NOT NULL
+    ORDER BY o.id DESC LIMIT 200
+  `).all();
+  const perRestaurant = db.prepare('SELECT name, rating, rating_count FROM restaurants ORDER BY rating_count DESC').all();
+
+  res.send(layout('Оценки', `
+    <h1>Оценки</h1>
+    <div class="panel">
+      <h2 style="font-size:15px;margin-top:0">Средний балл по ресторанам</h2>
+      <table>
+        <tr><th>Ресторан</th><th>Средний балл</th><th>Оценок</th></tr>
+        ${perRestaurant.map((r) => `<tr><td>${esc(r.name)}</td><td>★ ${r.rating?.toFixed(1) ?? '—'}</td><td>${r.rating_count}</td></tr>`).join('')}
+      </table>
+    </div>
+    <div class="panel">
+      <h2 style="font-size:15px;margin-top:0">Последние оценённые заказы</h2>
+      <table>
+        <tr><th>Заказ</th><th>Ресторан</th><th>Оценка</th><th>Дата</th></tr>
+        ${rated.map((o) => `<tr><td>${esc(o.public_code)}</td><td>${esc(o.restaurant_name)}</td><td>★ ${o.rating}</td><td>${esc(o.created_at)}</td></tr>`).join('') || '<tr><td colspan="4" style="color:var(--txt2)">Оценок пока нет</td></tr>'}
+      </table>
+    </div>
   `));
 });
 

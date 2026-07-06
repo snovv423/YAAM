@@ -9,10 +9,13 @@ CREATE TABLE IF NOT EXISTS restaurants (
   hours TEXT NOT NULL DEFAULT '',          -- "10:00–23:00"
   delivery_price INTEGER NOT NULL DEFAULT 0,
   min_order INTEGER NOT NULL DEFAULT 0,
-  is_open INTEGER NOT NULL DEFAULT 1,      -- ручной тумблер "Пауза" (плюс часы работы влияют отдельно)
+  is_open INTEGER NOT NULL DEFAULT 1,      -- ручной тумблер "Перерыв" (плюс часы работы влияют отдельно)
+  paused_until TEXT,                        -- если задано — перерыв снимается сам по истечении (см. orderService.sweepPauseExpiry)
   is_new INTEGER NOT NULL DEFAULT 1,
   rating REAL NOT NULL DEFAULT 0,
   rating_count INTEGER NOT NULL DEFAULT 0,
+  phone TEXT NOT NULL DEFAULT '',           -- показывается клиенту только на экране статуса ПОСЛЕ оформления заказа
+  default_cook_minutes INTEGER NOT NULL DEFAULT 40, -- своё для каждого ресторана; от него бот предлагает 3 варианта на шаге "Готовится"
   telegram_chat_id TEXT,                    -- заполняется, когда ресторан подключил бота по коду
   connect_code TEXT UNIQUE,                 -- одноразовый код для привязки бота
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -58,7 +61,8 @@ CREATE TABLE IF NOT EXISTS orders (
   --          | payment_failed | declined | timed_out | cancelled
   status_updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  rating INTEGER                              -- 1..5, ставится один раз после delivered
+  rating INTEGER,                             -- 1..5, ставится один раз после delivered
+  estimated_ready_minutes INTEGER             -- ресторан выбирает в боте на шаге "Готовится" (см. bot/index.js)
 );
 
 CREATE TABLE IF NOT EXISTS order_items (

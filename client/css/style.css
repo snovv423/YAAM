@@ -334,6 +334,17 @@
   .st-spin{display:none;width:52px;height:52px;margin:44px auto;border-radius:50%;border:4px solid rgba(255,255,255,.14);border-top-color:var(--amber);animation:stspin .8s linear infinite}
   .st-spin.on{display:block}
   @keyframes stspin{to{transform:rotate(360deg)}}
+  /* телефон ресторана — только после оформления заказа, не на карточке заранее */
+  .st-phone-wrap{border-radius:19px;padding:15px 17px;margin:14px 0;background:var(--glass);border:1px solid var(--gbord);box-shadow:var(--spec);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px)}
+  .st-phone-wrap p{font-size:12.5px;color:var(--txt2);line-height:1.5;margin-bottom:10px}
+  .st-phone-btn{display:block;text-align:center;text-decoration:none}
+  /* звёзды оценки на экране "Доставлен" */
+  .rating-wrap{text-align:center;margin-bottom:18px}
+  .rating-wrap p{font-size:13.5px;font-weight:700;color:var(--txt2);margin-bottom:10px}
+  .rating-stars{display:flex;justify-content:center;gap:6px}
+  .rating-star{background:none;border:none;font-size:34px;line-height:1;cursor:pointer;padding:2px;filter:grayscale(1) opacity(.5);transition:filter .15s ease,transform .15s ease}
+  .rating-star.on{filter:none;transform:scale(1.12)}
+  .rating-thanks{font-size:13.5px;font-weight:700;color:var(--amber);margin-bottom:18px}
   @keyframes iconpop{from{transform:scale(.3);opacity:0}to{transform:scale(1);opacity:1}}
   @keyframes pulse-glow{0%,100%{transform:scale(1)}50%{transform:scale(1.1)}}
   @keyframes cooking{0%{transform:rotate(-14deg)}25%{transform:rotate(0deg) scale(1.07)}50%{transform:rotate(14deg)}75%{transform:rotate(0deg) scale(1.07)}100%{transform:rotate(-14deg)}}
@@ -399,6 +410,13 @@
   .st-substate{text-align:center;color:var(--amber);font-size:14px;font-weight:700;margin-top:-4px;margin-bottom:6px}
   .sheet-clear{display:block;width:calc(100% - 32px);margin:10px auto 0;background:none;border:none;color:var(--txt2);font-family:inherit;font-size:13px;font-weight:700;cursor:pointer;padding:8px}
   .sheet-clear:active{color:#e08a8a}
+  /* плавающая кнопка поддержки — видна на всех экранах */
+  .support-fab{position:fixed;bottom:88px;right:16px;z-index:55;width:50px;height:50px;border-radius:50%;background:var(--glass2);border:1px solid var(--gbord);box-shadow:var(--spec),var(--shadow);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);display:flex;align-items:center;justify-content:center;font-size:21px;cursor:pointer;transition:transform .15s ease}
+  .support-fab:active{transform:scale(.9)}
+  .support-body{padding:4px 20px 6px}
+  .support-body p{font-size:13.5px;color:var(--txt2);line-height:1.55;margin-bottom:10px}
+  .support-note{font-size:12px!important;opacity:.8}
+  .support-link{display:block;text-align:center;text-decoration:none;margin-top:14px}
   /* минимум */
   .minwarn{background:rgba(255,154,46,.14);border:1px solid rgba(255,154,46,.3);border-radius:13px;padding:11px 14px;margin:10px 0 0;font-size:13px;font-weight:700;color:#ffd59a;display:none}
   /* флай-анимация добавления */

@@ -2,6 +2,8 @@ const { TelegramBot } = require('node-telegram-bot-api');
 const db = require('../db');
 const orderService = require('../services/orderService');
 
+const PAUSE_LABELS = { short: '33 мин', medium: '3 часа', long: '11 часов' };
+
 function startBot(token) {
   const bot = new TelegramBot(token, { polling: true });
 
@@ -22,16 +24,23 @@ function startBot(token) {
     bot.sendMessage(msg.chat.id, `Готово! «${restaurant.name}» подключён. Сюда будут приходить новые заказы.`);
   });
 
+  // Перерыв — не мгновенное выключение, а выбор одного из трёх пресетов;
+  // снимается сам по истечении (orderService.sweepPauseExpiry).
   bot.onText(/\/pause/, (msg) => {
     const r = restaurantByChat(msg.chat.id);
     if (!r) return bot.sendMessage(msg.chat.id, 'Сначала подключите ресторан: /start КОД');
-    db.prepare('UPDATE restaurants SET is_open = 0 WHERE id = ?').run(r.id);
-    bot.sendMessage(msg.chat.id, `«${r.name}» поставлен на паузу — новые заказы не приходят. /open чтобы снова открыться.`);
+    bot.sendMessage(msg.chat.id, 'На сколько уйти на перерыв?', {
+      reply_markup: {
+        inline_keyboard: [Object.keys(PAUSE_LABELS).map((key) => ({
+          text: PAUSE_LABELS[key], callback_data: `pause:${key}`,
+        }))],
+      },
+    });
   });
   bot.onText(/\/open/, (msg) => {
     const r = restaurantByChat(msg.chat.id);
     if (!r) return bot.sendMessage(msg.chat.id, 'Сначала подключите ресторан: /start КОД');
-    db.prepare('UPDATE restaurants SET is_open = 1 WHERE id = ?').run(r.id);
+    orderService.resumeRestaurant(r.id);
     bot.sendMessage(msg.chat.id, `«${r.name}» снова открыт.`);
   });
 
@@ -73,25 +82,41 @@ function startBot(token) {
   bot.on('callback_query', async (query) => {
     const parts = query.data.split(':');
     const action = parts[0];
-    // accept/decline/toggle_item: "action:id" — id = parts[1]
-    // advance: "advance:nextStatus:orderId" — три части
-    const id = Number(parts[1]);
+    const chatId = query.message.chat.id;
+    const messageId = query.message.message_id;
     try {
       if (action === 'accept') {
-        orderService.restaurantAccept(id);
-        await bot.editMessageText(`✅ Заказ принят.`, { chat_id: query.message.chat.id, message_id: query.message.message_id });
-        await sendProgressButtons(bot, query.message.chat.id, id, 'preparing');
+        const orderId = Number(parts[1]);
+        orderService.restaurantAccept(orderId);
+        await bot.editMessageText(`✅ Заказ принят.`, { chat_id: chatId, message_id: messageId });
+        await sendCookTimeButtons(bot, chatId, orderId);
       } else if (action === 'decline') {
-        await orderService.restaurantDecline(id);
-        await bot.editMessageText(`❌ Заказ отклонён, деньги клиенту возвращены.`, { chat_id: query.message.chat.id, message_id: query.message.message_id });
+        const orderId = Number(parts[1]);
+        await orderService.restaurantDecline(orderId);
+        await bot.editMessageText(`❌ Заказ отклонён, деньги клиенту возвращены.`, { chat_id: chatId, message_id: messageId });
+      } else if (action === 'cook_time') {
+        // cook_time:orderId:minutes — ресторан выбрал время на шаге "Готовится"
+        const orderId = Number(parts[1]);
+        const minutes = Number(parts[2]);
+        orderService.restaurantAdvance(orderId, 'preparing', { estimatedMinutes: minutes });
+        await bot.editMessageText(`Готовится — клиенту показано «~${minutes} мин».`, { chat_id: chatId, message_id: messageId });
+        await sendProgressButton(bot, chatId, orderId, 'preparing');
       } else if (action === 'advance') {
+        // advance:nextStatus:orderId (courier -> delivered)
         const nextStatus = parts[1];
         const orderId = Number(parts[2]);
         orderService.restaurantAdvance(orderId, nextStatus);
-        const labels = { preparing: 'Готовится', courier: 'Передал курьеру', delivered: 'Доставлен' };
-        await bot.editMessageText(`Статус обновлён: ${labels[nextStatus]}`, { chat_id: query.message.chat.id, message_id: query.message.message_id });
-        if (nextStatus !== 'delivered') await sendProgressButtons(bot, query.message.chat.id, orderId, nextStatus);
+        const labels = { courier: 'Передал курьеру', delivered: 'Доставлен' };
+        await bot.editMessageText(`Статус обновлён: ${labels[nextStatus]}`, { chat_id: chatId, message_id: messageId });
+        if (nextStatus !== 'delivered') await sendProgressButton(bot, chatId, orderId, nextStatus);
+      } else if (action === 'pause') {
+        const r = restaurantByChat(chatId);
+        if (r) {
+          orderService.pauseRestaurant(r.id, parts[1]);
+          await bot.editMessageText(`Перерыв: ${PAUSE_LABELS[parts[1]]}. /open — вернуться раньше срока.`, { chat_id: chatId, message_id: messageId });
+        }
       } else if (action === 'toggle_item') {
+        const id = Number(parts[1]);
         const item = db.prepare('SELECT * FROM menu_items WHERE id = ?').get(id);
         if (item) db.prepare('UPDATE menu_items SET is_available = 1 - is_available WHERE id = ?').run(id);
       }
@@ -101,12 +126,27 @@ function startBot(token) {
     }
   });
 
-  async function sendProgressButtons(botInstance, chatId, orderId, currentStatus) {
+  // Три варианта времени готовки относительно своего времени ресторана
+  // (default_cook_minutes из админки) — не одно фиксированное число на всех.
+  async function sendCookTimeButtons(botInstance, chatId, orderId) {
+    const order = orderService.getOrder(orderId);
+    const restaurant = db.prepare('SELECT * FROM restaurants WHERE id = ?').get(order.restaurant_id);
+    const base = restaurant.default_cook_minutes || 40;
+    const options = [Math.max(10, base - 10), base, base + 15];
+    await botInstance.sendMessage(chatId, `Заказ ${order.public_code}: сколько времени на готовку?`, {
+      reply_markup: {
+        inline_keyboard: [options.map((m) => ({ text: `~${m} мин`, callback_data: `cook_time:${orderId}:${m}` }))],
+      },
+    });
+  }
+
+  async function sendProgressButton(botInstance, chatId, orderId, currentStatus) {
     const nextMap = { preparing: 'courier', courier: 'delivered' };
     const labelMap = { courier: 'Передал курьеру', delivered: 'Доставлен' };
     const next = nextMap[currentStatus];
     if (!next) return;
-    await botInstance.sendMessage(chatId, `Заказ ${orderId}: когда будет готово, нажмите ниже.`, {
+    const order = orderService.getOrder(orderId);
+    await botInstance.sendMessage(chatId, `Заказ ${order.public_code}: когда будет готово, нажмите ниже.`, {
       reply_markup: { inline_keyboard: [[{ text: labelMap[next], callback_data: `advance:${next}:${orderId}` }]] },
     });
   }

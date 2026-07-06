@@ -21,14 +21,24 @@ function restaurantWithMenu(restaurant) {
 
 router.get('/restaurants', (req, res) => {
   const city = req.query.city;
-  const all = db.prepare('SELECT * FROM restaurants').all()
+  const all = db.prepare(`
+    SELECT r.*, COUNT(o.id) AS orders_count
+    FROM restaurants r
+    LEFT JOIN orders o ON o.restaurant_id = r.id AND o.status NOT IN ('cancelled','declined','timed_out','payment_failed','awaiting_payment')
+    GROUP BY r.id
+  `).all()
     .map((r) => ({ ...r, cities: JSON.parse(r.cities || '[]') }))
     .filter((r) => !city || r.cities.includes(city));
   res.json(all);
 });
 
 router.get('/restaurants/:id', (req, res) => {
-  const r = db.prepare('SELECT * FROM restaurants WHERE id = ?').get(req.params.id);
+  const r = db.prepare(`
+    SELECT r.*, COUNT(o.id) AS orders_count
+    FROM restaurants r
+    LEFT JOIN orders o ON o.restaurant_id = r.id AND o.status NOT IN ('cancelled','declined','timed_out','payment_failed','awaiting_payment')
+    WHERE r.id = ? GROUP BY r.id
+  `).get(req.params.id);
   if (!r) return res.status(404).json({ error: 'ресторан не найден' });
   res.json(restaurantWithMenu(r));
 });

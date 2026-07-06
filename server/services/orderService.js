@@ -11,6 +11,9 @@ const orderEvents = new EventEmitter();
 const RESTAURANT_RESPONSE_WINDOW_SEC = 180;
 const RATING_ELIGIBLE_STATUS = 'delivered';
 
+// Варианты «перерыва» ресторана — фиксированные пресеты, а не произвольный ввод.
+const PAUSE_PRESETS_MIN = { short: 33, medium: 3 * 60, long: 11 * 60 };
+
 function genPublicCode() {
   const n = 1000 + Math.floor(Math.random() * 9000);
   return `YAAM-${n}`;
@@ -18,8 +21,14 @@ function genPublicCode() {
 
 function getOrder(idOrCode) {
   const row = Number.isInteger(idOrCode)
-    ? db.prepare('SELECT * FROM orders WHERE id = ?').get(idOrCode)
-    : db.prepare('SELECT * FROM orders WHERE public_code = ?').get(idOrCode);
+    ? db.prepare(`
+        SELECT o.*, r.name AS restaurant_name, r.phone AS restaurant_phone
+        FROM orders o JOIN restaurants r ON r.id = o.restaurant_id WHERE o.id = ?
+      `).get(idOrCode)
+    : db.prepare(`
+        SELECT o.*, r.name AS restaurant_name, r.phone AS restaurant_phone
+        FROM orders o JOIN restaurants r ON r.id = o.restaurant_id WHERE o.public_code = ?
+      `).get(idOrCode);
   if (!row) return null;
   const items = db.prepare('SELECT name, price, qty FROM order_items WHERE order_id = ?').all(row.id);
   return { ...row, items };
@@ -159,14 +168,43 @@ async function restaurantDecline(orderId) {
   return setStatus(orderId, 'declined');
 }
 
-function restaurantAdvance(orderId, nextStatus) {
+function restaurantAdvance(orderId, nextStatus, { estimatedMinutes } = {}) {
   const allowed = { accepted: 'preparing', preparing: 'courier', courier: 'delivered' };
   const order = getOrder(orderId);
   if (!order) throw new Error('заказ не найден');
   if (allowed[order.status] !== nextStatus) {
     throw new Error(`нельзя перейти из ${order.status} в ${nextStatus}`);
   }
+  if (nextStatus === 'preparing' && estimatedMinutes) {
+    db.prepare('UPDATE orders SET estimated_ready_minutes = ? WHERE id = ?').run(estimatedMinutes, orderId);
+  }
   return setStatus(orderId, nextStatus);
+}
+
+// --- Перерыв ресторана (снимается сам по истечении, см. sweepPauseExpiry) ---
+
+function pauseRestaurant(restaurantId, presetKey) {
+  const minutes = PAUSE_PRESETS_MIN[presetKey];
+  if (!minutes) throw new Error(`неизвестный пресет перерыва: ${presetKey}`);
+  // Считаем "until" средствами SQLite (не new Date().toISOString()), чтобы формат
+  // строки совпадал с тем, что сравнивает sweepPauseExpiry (datetime('now')) —
+  // иначе лексикографическое сравнение двух разных форматов будет всегда false.
+  const { until } = db.prepare("SELECT datetime('now', '+' || ? || ' minutes') AS until").get(minutes);
+  db.prepare('UPDATE restaurants SET is_open = 0, paused_until = ? WHERE id = ?').run(until, restaurantId);
+  return until;
+}
+
+function resumeRestaurant(restaurantId) {
+  db.prepare('UPDATE restaurants SET is_open = 1, paused_until = NULL WHERE id = ?').run(restaurantId);
+}
+
+// Свип истёкших перерывов — тот же принцип, что и sweepTimeouts: сервер может
+// перезапуститься, а таймер должен пережить рестарт.
+function sweepPauseExpiry() {
+  db.prepare(`
+    UPDATE restaurants SET is_open = 1, paused_until = NULL
+    WHERE is_open = 0 AND paused_until IS NOT NULL AND paused_until <= datetime('now')
+  `).run();
 }
 
 function rateOrder(orderId, rating) {
@@ -218,5 +256,9 @@ module.exports = {
   restaurantAdvance,
   rateOrder,
   sweepTimeouts,
+  pauseRestaurant,
+  resumeRestaurant,
+  sweepPauseExpiry,
+  PAUSE_PRESETS_MIN,
   RESTAURANT_RESPONSE_WINDOW_SEC,
 };

@@ -35,6 +35,8 @@ app.get('/health', (req, res) => res.json({ ok: true }));
 
 // Автосвип заказов, на которые ресторан не ответил за 3 минуты (см. orderService).
 setInterval(() => orderService.sweepTimeouts(), 10_000);
+// Автосвип истёкших перерывов ресторанов (33 мин / 3 часа / 11 часов).
+setInterval(() => orderService.sweepPauseExpiry(), 30_000);
 
 app.listen(PORT, () => {
   console.log(`[server] YAAM API слушает на порту ${PORT}`);

@@ -29,6 +29,7 @@ function layout(title, body) {
   .badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700}
   .badge.open{background:rgba(52,211,140,.18);color:#34D38C}
   .badge.closed{background:rgba(255,112,89,.18);color:#FF7059}
+  .badge.paused{background:rgba(255,154,46,.18);color:var(--amber)}
   .row{display:flex;gap:12px}
   .row>*{flex:1}
 </style>
@@ -39,6 +40,7 @@ function layout(title, body) {
   <a href="/admin">Сегодня</a>
   <a href="/admin/restaurants">Рестораны</a>
   <a href="/admin/orders">Заказы</a>
+  <a href="/admin/ratings">Оценки</a>
 </nav>
 <main>${body}</main>
 </body>

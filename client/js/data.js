@@ -91,12 +91,12 @@ const M_ASCOFFEE=[
   {n:'Брускетта',d:'Томаты, базилик, 3 шт',p:240,e:'🍅',g:G.red,im:P.bread}]}
 ];
 const restaurants=[
- {id:1,name:'Кавказ',cui:'Шашлык · Чеченская кухня',e:'🍢',g:G.meat,im:P.meat,rate:4.8,votes:215,time:'30–40 мин',hours:'10:00–23:00',deliv:150,min:600,open:true,isNew:false,menu:M_KAVKAZ,cities:['Грозный','Аргун']},
- {id:2,name:'ASCOFFEE',cui:'Кофе · Десерты · Сэндвичи',e:'☕',g:G.honey,im:P.coffee,rate:4.7,votes:73,time:'20–30 мин',hours:'08:00–23:00',deliv:120,min:400,open:true,isNew:true,menu:M_ASCOFFEE,cities:['Грозный','Гудермес']},
- {id:3,name:'Бургер Хаус',cui:'Бургеры · Шаурма',e:'🍔',g:G.honey,im:P.burger,rate:4.5,votes:143,time:'20–30 мин',hours:'10:00–02:00',deliv:100,min:400,open:true,isNew:false,menu:M_BURGER,cities:['Грозный','Аргун','Гудермес','Шали']},
- {id:4,name:'Хинкальная №1',cui:'Чеченская · Кавказская',e:'🥟',g:G.green,im:P.dumpling,rate:4.9,votes:307,time:'35–45 мин',hours:'09:00–22:00',deliv:150,min:700,open:false,isNew:false,menu:M_KAVKAZ,cities:['Грозный','Шали']},
- {id:5,name:'Сладкий дом',cui:'Десерты · Кофе',e:'🍰',g:G.pink,im:P.cake,rate:4.7,votes:64,time:'25–35 мин',hours:'09:00–22:00',deliv:120,min:300,open:true,isNew:true,menu:M_SWEET,cities:['Грозный','Гудермес']},
- {id:6,name:'Чайхана Восток',cui:'Плов · Лагман · Чай',e:'🍜',g:G.cool,im:P.noodles,rate:4.4,votes:41,time:'40–50 мин',hours:'10:00–23:00',deliv:180,min:600,open:false,isNew:false,menu:M_KAVKAZ,cities:['Грозный','Аргун']}
+ {id:1,name:'Кавказ',cui:'Шашлык · Чеченская кухня',e:'🍢',g:G.meat,im:P.meat,rate:4.8,votes:215,time:'30–40 мин',hours:'10:00–23:00',deliv:150,min:600,open:true,isNew:false,menu:M_KAVKAZ,cities:['Грозный','Аргун'],phone:'+7 928 100-00-01'},
+ {id:2,name:'ASCOFFEE',cui:'Кофе · Десерты · Сэндвичи',e:'☕',g:G.honey,im:P.coffee,rate:4.7,votes:73,time:'20–30 мин',hours:'08:00–23:00',deliv:120,min:400,open:true,isNew:true,menu:M_ASCOFFEE,cities:['Грозный','Гудермес'],phone:'+7 928 100-00-02'},
+ {id:3,name:'Бургер Хаус',cui:'Бургеры · Шаурма',e:'🍔',g:G.honey,im:P.burger,rate:4.5,votes:143,time:'20–30 мин',hours:'10:00–02:00',deliv:100,min:400,open:true,isNew:false,menu:M_BURGER,cities:['Грозный','Аргун','Гудермес','Шали'],phone:'+7 928 100-00-03'},
+ {id:4,name:'Хинкальная №1',cui:'Чеченская · Кавказская',e:'🥟',g:G.green,im:P.dumpling,rate:4.9,votes:307,time:'35–45 мин',hours:'09:00–22:00',deliv:150,min:700,open:false,isNew:false,menu:M_KAVKAZ,cities:['Грозный','Шали'],phone:'+7 928 100-00-04'},
+ {id:5,name:'Сладкий дом',cui:'Десерты · Кофе',e:'🍰',g:G.pink,im:P.cake,rate:4.7,votes:64,time:'25–35 мин',hours:'09:00–22:00',deliv:120,min:300,open:true,isNew:true,menu:M_SWEET,cities:['Грозный','Гудермес'],phone:'+7 928 100-00-05'},
+ {id:6,name:'Чайхана Восток',cui:'Плов · Лагман · Чай',e:'🍜',g:G.cool,im:P.noodles,rate:4.4,votes:41,time:'40–50 мин',hours:'10:00–23:00',deliv:180,min:600,open:false,isNew:false,menu:M_KAVKAZ,cities:['Грозный','Аргун'],phone:'+7 928 100-00-06'}
 ];
 
 // Голосование: рестораны, которых ещё нет в YAAM — клиенты голосуют, кого подключить следующим.
