@@ -1,3 +1,4 @@
 .DS_Store
 .vercel
 docs/*.pdf
+docs/reports/*.pdf
