@@ -169,6 +169,14 @@
   .qty span{color:#3a1c00;font-weight:800;font-size:14px;min-width:14px;text-align:center}
   .soldout{font-size:12px;font-weight:800;color:var(--red);background:rgba(255,112,89,.16);padding:7px 11px;border-radius:10px}
   .dish.dis{filter:grayscale(.6) brightness(.8)}
+  .dish.dis .dname{text-decoration:line-through;opacity:.8}
+  /* нет фото — универсальная серая заглушка вместо цветного градиента с эмодзи */
+  .photo.nophoto,.dphoto.nophoto{background:linear-gradient(135deg,#3a423e,#242b28)!important}
+  .photo.nophoto .mj,.dphoto.nophoto .mj{display:none}
+  .photo.nophoto::after,.dphoto.nophoto::after{content:"🖼️";position:absolute;inset:0;z-index:1;display:flex;align-items:center;justify-content:center;font-size:48px;opacity:.3}
+  .hero.nophoto,.dhero.nophoto{background:linear-gradient(135deg,#3a423e,#242b28)!important}
+  .dhero.nophoto .mj{display:none}
+  .hero.nophoto::before,.dhero.nophoto::before{content:"🖼️";position:absolute;inset:0;z-index:0;display:flex;align-items:center;justify-content:center;font-size:56px;opacity:.28}
   /* dish detail */
   .dhero{position:relative;height:300px;background:#13402a}
   .dhero>img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:0}
@@ -310,11 +318,6 @@
   /* скрытие шапки при скролле */
   .top{transition:transform .45s ease,opacity .45s ease}
   .top.hidden{transform:translateY(-110%);opacity:0}
-  /* параллакс на карточке */
-  .photo .parallax-img{position:absolute;inset:-18px;width:calc(100% + 36px);height:calc(100% + 36px);object-fit:cover;z-index:1;will-change:transform}
-  /* размытие фона при входе в ресторан */
-  .blur-overlay{display:none;position:fixed;inset:0;z-index:38;backdrop-filter:blur(12px) brightness(.6);-webkit-backdrop-filter:blur(12px) brightness(.6);animation:blurIn .3s ease}
-  @keyframes blurIn{from{opacity:0}to{opacity:1}}
   /* стаггер карточек */
   @keyframes cardStagger{from{opacity:0;transform:translateY(22px)}to{opacity:1;transform:none}}
   /* вспышка кнопок при тапе */
@@ -425,12 +428,6 @@
   /* таймер QR */
   .qr-timer{font-size:13px;font-weight:700;color:var(--txt2);margin-top:6px}
   .qr-timer span{color:var(--amber);font-weight:800}
-  /* экран ошибки */
-  #errscreen{display:none;position:fixed;inset:0;z-index:200;background:rgba(8,28,18,.97);flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:32px}
-  #errscreen.on{display:flex}
-  #errscreen .eico{font-size:54px;margin-bottom:18px}
-  #errscreen h3{font-weight:800;font-size:22px;margin-bottom:8px}
-  #errscreen p{color:var(--txt2);font-size:14px;font-weight:600;line-height:1.55;margin-bottom:24px}
   /* дыхание логотипа */
   .wm::before{animation:wmBreath 5s ease-in-out infinite}
   @keyframes wmBreath{0%,100%{opacity:.4;filter:blur(7px)}50%{opacity:.62;filter:blur(9px)}}

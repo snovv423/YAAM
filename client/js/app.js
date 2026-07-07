@@ -1,6 +1,15 @@
 let curRest=null, cart={}, selectedCity='Грозный';
 const SOLD_OUT={'2_0':true}; // демо: блюдо в стоп-листе (актуально только без бэкенда)
 
+// Именованные тайминги/пороги — вместо магических чисел по всему файлу.
+const RATING_MIN_VOTES=5;       // рейтинг на карточке показываем только от стольки оценок
+const POLL_INTERVAL_MS=4000;    // как часто опрашиваем реальный статус заказа
+const QR_TIMER_SEC=600;         // на сколько даём времени на оплату по QR
+const TOAST_DURATION_MS=2600;
+const FLY_ANIM_MS=750;
+const CART_STORAGE_KEY='yaam_cart_state';
+const ORDER_STORAGE_KEY='yaam_active_order';
+
 // Приводим ответ бэкенда к той же форме, в которой всегда жили демо-данные
 // из data.js — это позволяет всем render-функциям ниже не знать, откуда
 // пришли данные (demo-массив или API), и не дублировать логику отрисовки.
@@ -40,13 +49,14 @@ function selectCity(c){
 }
 
 function cardHTML(r){
-  const photo=r.photoUrl?`<img src="${r.photoUrl}" loading="lazy" onerror="this.remove()">`:`<img src="${U(r.im,900)}" loading="lazy" onerror="this.remove()">`;
+  const hasSrc=!!(r.photoUrl||r.im);
+  const photo=hasSrc?`<img src="${r.photoUrl||U(r.im,900)}" loading="lazy" onerror="this.closest('.photo').classList.add('nophoto');this.remove()">`:'';
   return `
   <div class="card ${r.open?'':'closed'}" onclick="${r.open?`openRest(${r.id},event)`:`shut('${r.name}')`}">
-    <div class="photo" style="background:${r.g}">
+    <div class="photo ${hasSrc?'':'nophoto'}" style="background:${r.g}">
       <span class="mj">${r.e}</span>${photo}
       <div class="chip st ${r.open?'open':'shut'}"><span class="bdot"></span>${r.open?'Открыто':'Закрыто'}</div>
-      <div class="chip rt">★ ${r.rate} · ${r.votes}</div>
+      ${r.votes>=RATING_MIN_VOTES?`<div class="chip rt">★ ${r.rate} · ${r.votes}</div>`:''}
       <div class="info"><div class="cname">${r.name}${r.open&&r.isNew?' <span class="newtag">NEW</span>':''}</div><div class="ccui">${r.cui}</div>
         <div class="ordcnt">уже заказали ${r.ordersCount??(r.votes*3)} раз</div>
         <div class="cmeta"><span>🕑 ${r.time}</span><span>🛵 ${r.deliv} ₽</span><span><b>мин.</b> ${r.min} ₽</span><span>🕐 ${r.hours}</span></div></div>
@@ -92,7 +102,7 @@ function showToast(msg){
   t.textContent=msg;
   t.classList.remove('show');void t.offsetWidth;t.classList.add('show');
   clearTimeout(showToast._timer);
-  showToast._timer=setTimeout(()=>t.classList.remove('show'),2600);
+  showToast._timer=setTimeout(()=>t.classList.remove('show'),TOAST_DURATION_MS);
 }
 
 function openRest(id){
@@ -142,9 +152,6 @@ function applyStagger(){
   });
   firstLoad=false;
 }
-
-// Параллакс на карточках
-function initParallax(){document.querySelectorAll('.photo img').forEach(img=>{img.classList.add('parallax-img');const card=img.closest('.card');if(!card)return;card.addEventListener('mousemove',e=>{const r=card.getBoundingClientRect();const dy=(e.clientY-r.top-r.height/2)/r.height;img.style.transform=`translateY(${dy*14}px)`;},{passive:true});card.addEventListener('mouseleave',()=>{img.style.transform='';});});}
 
 // Точка активного заказа
 function showOrderDot(on){const d=document.getElementById('orderdot');if(d)d.classList.toggle('on',on);}
@@ -222,11 +229,15 @@ async function doOpenRest(id){
   }else{
     curRest=restaurants.find(r=>r.id===id);
   }
-  if(!same)cart={};
-  const h=document.getElementById('m-hero');const old=h.querySelector('img');if(old)old.remove();
+  if(!same){cart={};saveCartState();}
+  const h=document.getElementById('m-hero');h.querySelectorAll('img').forEach(x=>x.remove());
+  const heroHasSrc=!!(curRest.photoUrl||curRest.im);
+  h.classList.toggle('nophoto',!heroHasSrc);
   h.style.background=curRest.g;
-  const heroSrc=curRest.photoUrl||U(curRest.im,900);
-  const img=new Image();img.src=heroSrc;img.onerror=function(){this.remove()};h.insertBefore(img,h.firstChild);
+  if(heroHasSrc){
+    const heroSrc=curRest.photoUrl||U(curRest.im,900);
+    const img=new Image();img.src=heroSrc;img.onerror=function(){h.classList.add('nophoto');this.remove()};h.insertBefore(img,h.firstChild);
+  }
   document.getElementById('m-name').textContent=curRest.name;
   document.getElementById('m-meta').innerHTML=`<span>★ ${curRest.rate} · ${curRest.votes}</span><span>🕑 ${curRest.time}</span><span>🛵 ${curRest.deliv} ₽</span><span>🕐 ${curRest.hours}</span>`;
   document.getElementById('msb-name').textContent=curRest.name;
@@ -275,9 +286,10 @@ function key(ci,ii){return ci+'_'+ii;}
 function findItem(k){const[ci,ii]=k.split('_').map(Number);const d=curRest.menu[ci].items[ii];return{n:d.n.replace(/'/g,''),p:d.p,id:d.id||null};}
 function dishCard(d,ci,ii){
   const k=key(ci,ii);const q=cart[k]?cart[k].q:0;const so=SOLD_OUT[k]||d.available===false;
-  const photo=d.photoUrl?`<img src="${d.photoUrl}" loading="lazy" onerror="this.remove()">`:`<img src="${U(d.im,700)}" loading="lazy" onerror="this.remove()">`;
+  const hasSrc=!!(d.photoUrl||d.im);
+  const photo=hasSrc?`<img src="${d.photoUrl||U(d.im,700)}" loading="lazy" onerror="this.closest('.dphoto').classList.add('nophoto');this.remove()">`:'';
   return `<div class="dish ${so?'dis':''}" ${so?'':`onclick="openDish('${k}')"`}>
-    <div class="dphoto" style="background:${d.g}"><span class="mj">${d.e}</span>${photo}
+    <div class="dphoto ${hasSrc?'':'nophoto'}" style="background:${d.g}"><span class="mj">${d.e}</span>${photo}
     <div class="dplate"><div class="dname">${d.n}${d.pop?' <span class="hit">Хит</span>':''}</div><div class="ddesc">${d.d}</div>
     <div class="dbot"><div class="dprice">${d.p} ₽</div>${so?'<span class="soldout">Нет в наличии</span>':`<div id="ctrl_${k}" onclick="event.stopPropagation()">${q>0?qtyHtml(k,q):`<button class="add" onclick="addItem('${k}',event)">+</button>`}</div>`}</div></div></div></div>`;
 }
@@ -293,7 +305,62 @@ function qtyHtml(k,q){return `<div class="qty"><button onclick="dec('${k}')">−
 function addItem(k,e){const it=findItem(k);cart[k]={n:it.n,p:it.p,q:1,menuItemId:it.id};refreshAll(k);if(e)flyAnim(e);}
 function inc(k,e){cart[k].q++;refreshAll(k);if(e)flyAnim(e);}
 function dec(k){cart[k].q--;if(cart[k].q<=0)delete cart[k];refreshAll(k);}
-function refreshAll(k){document.querySelectorAll('#ctrl_'+k).forEach(el=>{const c=cart[k];el.innerHTML=(c&&c.q>0)?qtyHtml(k,c.q):`<button class="add" onclick="addItem('${k}',event)">+</button>`;});updateBar();}
+function refreshAll(k){document.querySelectorAll('#ctrl_'+k).forEach(el=>{const c=cart[k];el.innerHTML=(c&&c.q>0)?qtyHtml(k,c.q):`<button class="add" onclick="addItem('${k}',event)">+</button>`;});updateBar();saveCartState();}
+
+// Персист корзины — переживает обновление/закрытие вкладки (см. tryRestoreSession).
+function saveCartState(){
+  try{
+    if(curRest&&Object.keys(cart).length){
+      localStorage.setItem(CART_STORAGE_KEY,JSON.stringify({restId:curRest.id,city:selectedCity,cart}));
+    }else{
+      localStorage.removeItem(CART_STORAGE_KEY);
+    }
+  }catch(e){}
+}
+function saveOrderState(){
+  try{
+    if(currentOrderCode){
+      localStorage.setItem(ORDER_STORAGE_KEY,JSON.stringify({orderCode:currentOrderCode,providerPaymentId:currentProviderPaymentId,restId:curRest?curRest.id:null}));
+    }else{
+      localStorage.removeItem(ORDER_STORAGE_KEY);
+    }
+  }catch(e){}
+}
+
+// Восстановление после обновления/закрытия вкладки. Активный оплаченный заказ
+// важнее корзины — если он есть, сразу возвращаемся на экран статуса и продолжаем
+// поллинг (актуально только в режиме реального бэкенда: у демо-статуса нет
+// серверного заказа, который имело бы смысл возобновлять).
+async function tryRestoreSession(){
+  let savedOrder=null;
+  try{savedOrder=JSON.parse(localStorage.getItem(ORDER_STORAGE_KEY)||'null');}catch(e){}
+  if(USE_API&&savedOrder&&savedOrder.orderCode){
+    currentOrderCode=savedOrder.orderCode;
+    currentProviderPaymentId=savedOrder.providerPaymentId||null;
+    if(savedOrder.restId){
+      try{curRest=normalizeRestaurant(await api.getRestaurant(savedOrder.restId));}catch(e){}
+    }
+    startOrderPolling();
+    return true;
+  }
+  let savedCart=null;
+  try{savedCart=JSON.parse(localStorage.getItem(CART_STORAGE_KEY)||'null');}catch(e){}
+  if(savedCart&&savedCart.restId){
+    let rest=null;
+    if(USE_API){
+      try{rest=normalizeRestaurant(await api.getRestaurant(savedCart.restId));}catch(e){return false;}
+    }else{
+      rest=restaurants.find(r=>r.id===savedCart.restId);
+    }
+    if(!rest)return false;
+    if(savedCart.city)selectedCity=savedCart.city;
+    curRest=rest; // выставляем заранее — doOpenRest увидит "тот же ресторан" и не сотрёт корзину
+    cart=savedCart.cart||{};
+    await doOpenRest(rest.id);
+    return true;
+  }
+  return false;
+}
 
 let curDishKey=null,curDishPrice=0,dishQty=1;
 function openDish(k){
@@ -304,16 +371,25 @@ function openDish(k){
   const det=fromApi
     ? {w:d.w||'—',kcal:d.kcal??'—',p:d.prot??'—',f:d.fat??'—',c:d.carb??'—',s:d.s||'Состав не указан'}
     : (DETAILS[d.n]||{w:300,kcal:450,p:20,f:20,c:40,s:'Натуральные ингредиенты'});
-  const h=document.getElementById('d-hero');h.querySelectorAll('.mj,img').forEach(x=>x.remove());h.style.background=d.g;
-  const mj=document.createElement('span');mj.className='mj';mj.textContent=d.e;h.insertBefore(mj,h.firstChild);
-  const heroSrc=d.photoUrl||U(d.im,1000);
-  const img=new Image();img.src=heroSrc;img.onerror=function(){this.remove()};h.insertBefore(img,h.firstChild);
+  const h=document.getElementById('d-hero');h.querySelectorAll('.mj,img').forEach(x=>x.remove());
+  const dishHasSrc=!!(d.photoUrl||d.im);
+  h.classList.toggle('nophoto',!dishHasSrc);
+  h.style.background=d.g;
   const gallery=document.getElementById('d-gallery');
-  if(d.photoUrl){
-    gallery.innerHTML=`<div class="thumb on"><img src="${d.photoUrl}" onerror="this.parentNode.style.display='none'"></div>`;
+  if(dishHasSrc){
+    const mj=document.createElement('span');mj.className='mj';mj.textContent=d.e;h.insertBefore(mj,h.firstChild);
+    const heroSrc=d.photoUrl||U(d.im,1000);
+    const img=new Image();img.src=heroSrc;img.onerror=function(){h.classList.add('nophoto');this.remove()};h.insertBefore(img,h.firstChild);
+    if(d.photoUrl){
+      gallery.innerHTML=`<div class="thumb on"><img src="${d.photoUrl}" onerror="this.parentNode.style.display='none'"></div>`;
+    }else{
+      const ids=[d.im,...POOL.filter(x=>x!==d.im)].slice(0,4);
+      gallery.innerHTML=ids.map((id,i)=>`<div class="thumb ${i===0?'on':''}" onclick="swapHero('${id}',${i})"><img src="${U(id,200)}" onerror="this.parentNode.style.display='none'"></div>`).join('');
+    }
+    gallery.style.display='';
   }else{
-    const ids=[d.im,...POOL.filter(x=>x!==d.im)].slice(0,4);
-    gallery.innerHTML=ids.map((id,i)=>`<div class="thumb ${i===0?'on':''}" onclick="swapHero('${id}',${i})"><img src="${U(id,200)}" onerror="this.parentNode.style.display='none'"></div>`).join('');
+    gallery.innerHTML='';
+    gallery.style.display='none';
   }
   document.getElementById('d-name').textContent=d.n;
   document.getElementById('d-sub').textContent=`${det.w} г · ${d.p} ₽`;
@@ -331,13 +407,17 @@ function totals(){let sum=0,cnt=0;for(const k in cart){sum+=cart[k].p*cart[k].q;
 function plural(n,a,b,c){n=Math.abs(n)%100;const n1=n%10;if(n>10&&n<20)return c;if(n1>1&&n1<5)return b;if(n1===1)return a;return c;}
 function updateBar(){const{sum,cnt}=totals();const bar=document.getElementById('cartbar');
   if(cnt>0&&cur('menu')){bar.style.display='block';document.getElementById('cb-count').textContent=cnt+' '+plural(cnt,'блюдо','блюда','блюд');document.getElementById('cb-sum').textContent=sum+' ₽';}else bar.style.display='none';}
+// Строки заказа "N × Блюдо — сумма" — используются в корзине и на двух экранах статуса.
+function orderItemsHTML(){
+  return Object.values(cart).map(c=>`<div class="sumrow"><span>${c.q} × ${c.n}</span><span>${c.p*c.q} ₽</span></div>`).join('');
+}
 function openCart(){
   const{sum}=totals();
   document.getElementById('c-rest').textContent=curRest.name;
   document.getElementById('c-city').textContent=selectedCity;
   document.getElementById('c-addr').value=`г. ${selectedCity}, ул. Маяковского, 18, кв. 7`;
   document.getElementById('c-items').innerHTML=
-    Object.values(cart).map(c=>`<div class="sumrow"><span>${c.q} × ${c.n}</span><span>${c.p*c.q} ₽</span></div>`).join('')
+    orderItemsHTML()
     +`<div class="sumrow total"><span>К оплате сейчас (СБП)</span><span>${sum} ₽</span></div>`;
   document.getElementById('c-total').textContent=sum+' ₽';
   renderLegalConsent();
@@ -396,7 +476,6 @@ function validateLegalConsent(){
 }
 // Собранные данные оформления заказа. Без бэкенда (USE_API=false) остаются
 // только в браузере — ровно то же самое, что отправится в API, когда он появится.
-let lastOrder=null;
 let currentOrderCode=null, currentProviderPaymentId=null;
 function buildOrderPayload(){
   const{sum}=totals();
@@ -427,12 +506,11 @@ async function openQR(){
       });
       currentOrderCode=order.public_code;
       currentProviderPaymentId=payment.providerPaymentId;
+      saveOrderState();
     }catch(err){
       showToast(err.message||'Не удалось оформить заказ');
       return;
     }
-  }else{
-    lastOrder=payload;
   }
 
   document.getElementById('qr-amt').textContent=sum+' ₽';
@@ -489,11 +567,16 @@ function startResponseTimer(){
     tick();
   },1000);
 }
-function openStatus(){
+// Общий пролог обоих режимов статус-экрана (демо-шаги и реальный поллинг),
+// расходятся только после него — демо крутит статусы кнопкой, реальный ждёт сервер.
+function initStatusScreen(){
   statusStep=0;inPreStatus=true;curEstimatedMinutes=null;ratingSubmitted=false;setOrderTime();showOrderDot(true);
-  document.getElementById('st-items').innerHTML=Object.values(cart).map(c=>`<div class="sumrow"><span>${c.q} × ${c.n}</span><span>${c.p*c.q} ₽</span></div>`).join('');
+  document.getElementById('st-items').innerHTML=orderItemsHTML();
   document.getElementById('statusbg').style.display='block';
   showStatusSpinner(true);
+}
+function openStatus(){
+  initStatusScreen();
   showRestaurantPhone(curRest.phone);
   go('status');
   clearTimeout(preAutoTimer);
@@ -543,6 +626,7 @@ async function retryPaymentFlow(){
   try{
     const{payment}=await api.retryPayment(currentOrderCode);
     currentProviderPaymentId=payment.providerPaymentId;
+    saveOrderState();
     const{sum}=totals();
     document.getElementById('qr-amt').textContent=sum+' ₽';
     drawQR();startQRTimer();go('qr');
@@ -607,20 +691,17 @@ async function pollOrderOnce(){
   }
 }
 function startOrderPolling(){
-  statusStep=0;inPreStatus=true;curEstimatedMinutes=null;ratingSubmitted=false;setOrderTime();showOrderDot(true);
-  document.getElementById('st-items').innerHTML=Object.values(cart).map(c=>`<div class="sumrow"><span>${c.q} × ${c.n}</span><span>${c.p*c.q} ₽</span></div>`).join('');
-  document.getElementById('statusbg').style.display='block';
+  initStatusScreen();
   document.getElementById('st-cancel-wrap').style.display='none';
-  showStatusSpinner(true);
   go('status');
   stopOrderPolling();
   pollOrderOnce();
-  orderPollTimer=setInterval(pollOrderOnce,4000);
+  orderPollTimer=setInterval(pollOrderOnce,POLL_INTERVAL_MS);
 }
 
 function cur(id){return document.getElementById(id).classList.contains('active');}
 function go(id){document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));document.getElementById(id).classList.add('active');document.querySelector('.dish-add').style.display=(id==='dish')?'block':'none';if(id!=='status'&&id!=='rejected')document.getElementById('statusbg').style.display='none';const vh=document.getElementById('vote-handle');if(vh)vh.style.display=(id==='home')?'flex':'none';window.scrollTo(0,0);updateBar();try{if(id!=='home')history.pushState({screen:id},'');else history.replaceState({screen:'home'},'');}catch(e){}}
-function resetAll(){clearInterval(preTimer);clearTimeout(preAutoTimer);stopOrderPolling();showRestaurantPhone(null);cart={};curRest=null;currentOrderCode=null;currentProviderPaymentId=null;document.getElementById('q').value='';document.getElementById('statusbg').style.display='none';go('home');renderList();}
+function resetAll(){clearInterval(preTimer);clearTimeout(preAutoTimer);stopOrderPolling();showRestaurantPhone(null);cart={};curRest=null;currentOrderCode=null;currentProviderPaymentId=null;saveCartState();saveOrderState();document.getElementById('q').value='';document.getElementById('statusbg').style.display='none';go('home');renderList();}
 // Своё окно подтверждения (замена заблокированного confirm)
 function yaamConfirm(text,onYes){
   const ov=document.getElementById('confirm-overlay');
@@ -635,7 +716,7 @@ function yaamConfirm(text,onYes){
 }
 
 function clearCart(){yaamConfirm('Очистить корзину?',()=>{cart={};closeSheet();refreshAllVisible();backToMenu();});}
-function refreshAllVisible(){document.querySelectorAll('[id^="ctrl_"]').forEach(el=>{const k=el.id.replace('ctrl_','');const c=cart[k];el.innerHTML=(c&&c.q>0)?qtyHtml(k,c.q):`<button class="add" onclick="addItem('${k}',event)">+</button>`;});updateBar();}
+function refreshAllVisible(){document.querySelectorAll('[id^="ctrl_"]').forEach(el=>{const k=el.id.replace('ctrl_','');const c=cart[k];el.innerHTML=(c&&c.q>0)?qtyHtml(k,c.q):`<button class="add" onclick="addItem('${k}',event)">+</button>`;});updateBar();saveCartState();}
 // Штора корзины
 let sheetStartY=0,sheetCurY=0;
 function openSheet(){
@@ -690,14 +771,14 @@ function sheetTouchEnd(){if(sheetCurY>80)closeSheet();document.getElementById('s
 function flyAnim(e){
   const fly=document.createElement('div');fly.className='fly';fly.textContent='+ в корзину';
   fly.style.left=(e.clientX-60)+'px';fly.style.top=(e.clientY-20)+'px';
-  document.body.appendChild(fly);setTimeout(()=>fly.remove(),750);
+  document.body.appendChild(fly);setTimeout(()=>fly.remove(),FLY_ANIM_MS);
   try{if(navigator.vibrate)navigator.vibrate(40);}catch(e){}
 }
 
 // Таймер QR
 let qrInterval=null;
 function startQRTimer(){
-  let secs=600;const el=document.getElementById('qr-time');
+  let secs=QR_TIMER_SEC;const el=document.getElementById('qr-time');
   clearInterval(qrInterval);
   qrInterval=setInterval(()=>{secs--;const m=Math.floor(secs/60),s=secs%60;el.textContent=m+':'+(s<10?'0':'')+s;if(secs<=0)clearInterval(qrInterval);},1000);
 }
@@ -707,9 +788,6 @@ function setOrderTime(){
   const now=new Date();const h=now.getHours(),m=now.getMinutes();
   document.getElementById('st-time').textContent='Заказ оформлен в '+h+':'+(m<10?'0':'')+m;
 }
-
-// Экран ошибки
-function hideErr(){document.getElementById('errscreen').classList.remove('on');}
 
 neonFlash=function(el){if(el.classList.contains('neon'))return;el.classList.add('neon');el.addEventListener('animationend',()=>el.classList.remove('neon'),{once:true});};
 
@@ -779,4 +857,4 @@ function voteTouchEnd(){
 }
 
 renderList();
-setTimeout(initParallax,300);
+tryRestoreSession();
