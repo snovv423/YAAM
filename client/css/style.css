@@ -59,26 +59,43 @@
   .sheet-total span:first-child{font-size:14px;font-weight:600;color:var(--txt2)}
   .sheet-total span:last-child{font-size:24px;font-weight:800}
   .add:active{transform:scale(.82);box-shadow:0 0 18px rgba(255,154,46,.7)}
-  .suggest{position:absolute;top:100%;left:0;right:0;z-index:50;border-radius:0 0 16px 16px;overflow:hidden;background:rgba(10,30,18,.97);border:1px solid var(--gbord);border-top:none;display:none}
-  .suggest.on{display:block}
-  .sug-item{padding:12px 17px;font-size:14px;font-weight:600;cursor:pointer;border-bottom:1px solid rgba(255,255,255,.06)}
-  .sug-item:last-child{border-bottom:none}
-  .sug-item:active{background:rgba(255,255,255,.08)}
-  .search{position:relative;margin-top:18px;display:flex;align-items:center;gap:11px;border-radius:18px;padding:15px 17px;box-shadow:var(--spec),var(--shadow-sm);color:rgba(255,255,255,.7)}
-  .search input{border:none;background:none;outline:none;font-family:inherit;font-size:16px;font-weight:600;color:var(--txt);width:100%}
-  .search input::placeholder{color:var(--txt2)}
+  /* Intro-блок вместо поиска: тихий стеклянный слой со слоганом — компактный,
+     без мутного blur-затухания. Верх/низ — чёткие тонкие кромки (::before/::after),
+     а не размытая маска. Живёт в обычном потоке (не sticky) — уходит под шапку
+     и приглушается скроллом через initIntroLayerFX(). */
+  .intro{
+    position:relative;margin:14px 32px 8px;padding:14px 20px 15px;border-radius:14px;
+    text-align:center;cursor:pointer;
+    background:rgba(255,255,255,.05);
+    backdrop-filter:blur(13px) saturate(140%);-webkit-backdrop-filter:blur(13px) saturate(140%);
+    box-shadow:0 10px 22px rgba(0,0,0,.18);
+    transition:box-shadow .4s ease;
+    will-change:opacity,transform;
+  }
+  .intro::before{ /* верхняя стеклянная кромка — чёткая тонкая линия света */
+    content:"";position:absolute;top:0;left:12%;right:12%;height:1px;
+    background:linear-gradient(90deg,transparent,rgba(255,255,255,.5),transparent);
+  }
+  .intro::after{ /* нижняя стеклянная кромка — едва заметная линия-грань */
+    content:"";position:absolute;bottom:0;left:12%;right:12%;height:1px;
+    background:linear-gradient(90deg,transparent,rgba(255,255,255,.16),transparent);
+  }
+  /* Карточка светится изнутри чистым красным неоном по тапу — тумблер,
+     без мигания, тот же красный, что у выбранного города/кнопки голосования. */
+  .intro.lit{
+    background:linear-gradient(180deg,rgba(168,32,44,.72),rgba(120,18,30,.55));
+    box-shadow:0 10px 22px rgba(0,0,0,.18), 0 0 0 1px #ff1a2e, 0 0 22px 4px rgba(255,10,30,.55), inset 0 0 26px rgba(255,10,30,.35);
+  }
+  .intro-title{
+    font-family:'Cormorant Garamond',serif;font-weight:400;font-size:18px;letter-spacing:.2px;line-height:1.3;
+    margin:0 0 6px;color:rgba(255,255,255,.94);text-align:center;
+  }
+  .intro-text{
+    font-family:'Manrope',sans-serif;font-weight:400;font-size:12px;line-height:1.6;
+    color:rgba(255,255,255,.58);max-width:270px;margin:0 auto;text-align:center;
+  }
   .sec{padding:20px 20px 2px;display:flex;align-items:center;gap:9px}
   .sec h2{font-weight:800;font-size:15px;letter-spacing:.3px}
-  /* новинки */
-  .newrow{display:flex;gap:13px;overflow-x:auto;padding:12px 16px 4px;scrollbar-width:none}
-  .newrow::-webkit-scrollbar{display:none}
-  .newcard{flex:0 0 156px;border-radius:20px;overflow:hidden;box-shadow:var(--shadow-sm);cursor:pointer;position:relative;background:#13402a}
-  .newcard .np{height:96px;position:relative}
-  .newcard .np>img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
-  .newcard .nb{position:absolute;top:8px;left:8px;font-size:10px;font-weight:800;color:#3a1c00;background:var(--amber);padding:3px 8px;border-radius:999px}
-  .newcard .ni{padding:9px 11px;background:var(--glass2);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px)}
-  .newcard .ni b{font-size:13.5px;font-weight:800;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .newcard .ni span{font-size:11px;color:rgba(255,255,255,.7);font-weight:600}
   /* карточки */
   .list{padding:12px 16px 8px;display:flex;flex-direction:column;gap:20px;position:relative;z-index:2}
   .card{position:relative;border-radius:28px;overflow:hidden;cursor:pointer;box-shadow:var(--shadow);transition:transform .16s ease;isolation:isolate}
@@ -132,7 +149,6 @@
   /* screens */
   .screen{display:none}.screen.active{display:block;animation:scrIn .55s ease}
   @keyframes scrIn{from{opacity:0}to{opacity:1}}
-  @keyframes cardIn{from{opacity:0;transform:translateY(14px) scale(.985)}to{opacity:1;transform:none}}
   .hero{position:relative;height:190px;background:#13402a;overflow:hidden}
   .hero>img{position:absolute;inset:-20% 0;width:100%;height:140%;object-fit:cover;z-index:0;will-change:transform}
   .hero::after{content:"";position:absolute;inset:0;z-index:1;background:linear-gradient(180deg,rgba(0,0,0,.3),transparent 45%,rgba(6,28,17,.75))}
@@ -240,25 +256,6 @@
   .ptr.show{height:48px}
   /* финальный экран */
   .final-wrap{padding:30px 28px 40px;text-align:center;position:relative;z-index:2}
-  .final-slogan{color:#daffe8;margin:10px 0 38px;text-align:center;animation:neonbroken 3.4s linear infinite}
-  .fs-big{display:block;font-family:'Cormorant Garamond',serif;font-weight:300;font-size:82px;letter-spacing:8px;line-height:1}
-  .fs-sub{display:block;font-family:'Cormorant Garamond',serif;font-weight:300;font-style:italic;font-size:27px;letter-spacing:1.5px;margin-top:10px;opacity:.92}
-  @keyframes neonbroken{
-    0%{opacity:1;text-shadow:0 0 7px #39ff14,0 0 16px #39ff14,0 0 30px #15a83c}
-    8%{opacity:1;text-shadow:0 0 7px #39ff14,0 0 16px #39ff14,0 0 30px #15a83c}
-    9%{opacity:.35;text-shadow:none}
-    11%{opacity:1;text-shadow:0 0 8px #39ff14,0 0 18px #39ff14,0 0 34px #15a83c}
-    40%{opacity:1;text-shadow:0 0 8px #39ff14,0 0 18px #39ff14,0 0 34px #15a83c}
-    41%{opacity:.4;text-shadow:none}
-    43%{opacity:1;text-shadow:0 0 8px #39ff14,0 0 18px #39ff14,0 0 34px #15a83c}
-    70%{opacity:1;text-shadow:0 0 8px #39ff14,0 0 18px #39ff14,0 0 34px #15a83c}
-    71%{opacity:.5;text-shadow:none}
-    72%{opacity:1;text-shadow:0 0 11px #6bff86,0 0 24px #39ff14,0 0 44px #15a83c}
-    88%{opacity:1;text-shadow:0 0 8px #39ff14,0 0 18px #39ff14,0 0 34px #15a83c}
-    89%{opacity:.35;text-shadow:none}
-    91%{opacity:1;text-shadow:0 0 8px #39ff14,0 0 18px #39ff14,0 0 34px #15a83c}
-    100%{opacity:1;text-shadow:0 0 7px #39ff14,0 0 16px #39ff14,0 0 30px #15a83c}
-  }
   /* галерея плавный перелист */
   .gallery{scroll-behavior:smooth;-webkit-overflow-scrolling:touch}
   .trust .ic{font-size:18px}
@@ -318,8 +315,6 @@
   /* скрытие шапки при скролле */
   .top{transition:transform .45s ease,opacity .45s ease}
   .top.hidden{transform:translateY(-110%);opacity:0}
-  /* стаггер карточек */
-  @keyframes cardStagger{from{opacity:0;transform:translateY(22px)}to{opacity:1;transform:none}}
   /* вспышка кнопок при тапе */
   .citychip,.pay,.ghost,.addbtn,.sheet-btn,.cartbtn{position:relative;overflow:hidden}
   .citychip::after,.pay::after,.ghost::after,.addbtn::after,.sheet-btn::after,.cartbtn::after{content:"";position:absolute;inset:0;background:rgba(255,255,255,.22);opacity:0;pointer-events:none;transition:opacity .18s ease}
@@ -353,34 +348,49 @@
   @keyframes cooking{0%{transform:rotate(-14deg)}25%{transform:rotate(0deg) scale(1.07)}50%{transform:rotate(14deg)}75%{transform:rotate(0deg) scale(1.07)}100%{transform:rotate(-14deg)}}
   @keyframes riding{0%{transform:translateX(-5px) translateY(0)}25%{transform:translateX(0) translateY(-6px)}50%{transform:translateX(5px) translateY(0)}75%{transform:translateX(0) translateY(-4px)}100%{transform:translateX(-5px) translateY(0)}}
   @keyframes delivered{0%{transform:scale(.3) rotate(-20deg);opacity:0}60%{transform:scale(1.2) rotate(6deg);opacity:1}80%{transform:scale(.93) rotate(-3deg)}100%{transform:scale(1) rotate(0)}}
-  .vote-handle{position:fixed;top:-2px;left:50%;transform:translateX(-50%);z-index:45;display:flex;flex-direction:column;align-items:center;cursor:pointer;transition:transform .25s ease}
-  .vote-handle:active{transform:translateX(-50%) translateY(3px)}
-  .vote-handle.hidden{transform:translateX(-50%) translateY(-120%)}
-  .vh-tab{background:linear-gradient(180deg,#c0303c,#9a1f2a);color:#fff;font-size:10.5px;font-weight:800;letter-spacing:.3px;padding:4px 16px 5px;border-radius:0 0 14px 14px;box-shadow:0 6px 18px rgba(150,20,30,.5),inset 0 1px 0 rgba(255,255,255,.25);display:flex;align-items:center;gap:6px;border:1px solid rgba(255,120,120,.3);border-top:none}
-  .vh-grip{width:26px;height:3px;border-radius:999px;background:rgba(255,255,255,.55);margin-top:3px;animation:vhpulse 2.5s ease-in-out infinite}
-  @keyframes vhpulse{0%,100%{transform:translateY(0);opacity:.55}50%{transform:translateY(3px);opacity:1}}
-  .vote-overlay{display:none;position:fixed;inset:0;z-index:62;background:rgba(0,0,0,.5);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px)}
+  /* Кнопка голосования — отдельным элементом под intro-карточкой, зелёная
+     (тот же неоновый зелёный, что и у вспышки логотипа, #39ff14). Тумблер
+     без мерцания: тап — мгновенно загорается ярче, неоном по кромке,
+     повторный тап — гаснет сразу же (см. openVote/closeVote — класс .lit). */
+  .vote-chip{
+    display:block;width:max-content;margin:10px auto 0;padding:7px 18px;border-radius:999px;
+    background:linear-gradient(180deg,rgba(52,211,140,.75),rgba(20,140,90,.55));
+    border:1.5px solid rgba(150,255,190,.45);
+    color:#fff;font-size:11px;font-weight:700;letter-spacing:.3px;
+    cursor:pointer;
+    box-shadow:0 6px 16px rgba(20,120,70,.35);
+    transition:transform .12s ease,filter .12s ease;
+  }
+  .vote-chip:active{transform:scale(.92);filter:brightness(1.2)}
+  .vote-chip.lit{
+    border-color:#39ff14;
+    box-shadow:0 6px 16px rgba(20,120,70,.35), 0 0 0 1px #39ff14, 0 0 16px 4px rgba(57,255,20,.9), inset 0 0 11px rgba(57,255,20,.6);
+  }
+  .vote-overlay{display:none;position:fixed;inset:0;z-index:62;background:rgba(0,0,0,.42);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px)}
   .vote-overlay.on{display:block}
-  .vote-overlay{display:none;position:fixed;inset:0;z-index:62;background:rgba(0,0,0,.42)}
-  .vote-overlay.on{display:block}
+  /* Флекс-колонка: заголовок и хват — фиксированные, скроллится только сам
+     список кандидатов. Раньше хват лежал внутри общего overflow:auto шторки —
+     при длинном списке он уезжал за экран, и дотянуться до него для закрытия
+     было невозможно без прокрутки всего списка. */
   .vote-sheet{position:fixed;top:0;left:50%;transform:translateX(-50%) translateY(-100%);width:100%;max-width:480px;z-index:63;border-radius:0 0 30px 30px;
     background:linear-gradient(180deg,rgba(8,26,16,.46),rgba(4,16,10,.40));
     backdrop-filter:blur(22px) saturate(170%);-webkit-backdrop-filter:blur(22px) saturate(170%);
     border-bottom:1px solid rgba(255,255,255,.18);
     box-shadow:0 30px 70px rgba(0,0,0,.55),inset 0 1px 0 rgba(255,255,255,.45),inset 0 -1px 0 rgba(255,255,255,.07);
-    transition:transform .42s cubic-bezier(.25,1,.2,1);max-height:88vh;overflow-y:auto;padding:16px 0 24px}
+    transition:transform .42s cubic-bezier(.25,1,.2,1);max-height:88vh;
+    display:flex;flex-direction:column;overflow:hidden}
   .vote-sheet::before{content:"";position:absolute;inset:0;pointer-events:none;border-radius:0 0 30px 30px;
     background:linear-gradient(118deg,rgba(255,255,255,.22) 0%,rgba(255,255,255,0) 20%,rgba(255,255,255,0) 80%,rgba(255,255,255,.10) 100%)}
   .vote-sheet::after{content:"";position:absolute;top:0;left:6%;right:6%;height:1px;pointer-events:none;
     background:linear-gradient(90deg,transparent,rgba(255,255,255,.6),transparent)}
-  .vs-draghandle{padding:6px 0 14px;cursor:grab;touch-action:none}
+  .vs-draghandle{flex:0 0 auto;padding:10px 0 24px;cursor:grab;touch-action:none}
   .vs-draghandle:active{cursor:grabbing}
   .vs-drag{width:46px;height:5px;border-radius:999px;background:rgba(255,255,255,.4);margin:0 auto;position:relative;z-index:2}
   .vote-sheet.on{transform:translateX(-50%) translateY(0)}
-  .vs-head{padding:0 22px 6px}
+  .vs-head{flex:0 0 auto;padding:16px 22px 6px}
   .vs-title{font-weight:800;font-size:21px}
   .vs-sub{color:var(--txt2);font-size:13px;font-weight:600;margin-top:4px;line-height:1.5}
-  .vote-list{padding:16px 18px 4px;display:flex;flex-direction:column;gap:11px}
+  .vote-list{flex:1 1 auto;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:16px 18px 4px;display:flex;flex-direction:column;gap:11px}
   .vote-item{border-radius:18px;padding:14px 16px;background:linear-gradient(180deg,rgba(255,255,255,.08),rgba(255,255,255,.02));border:1px solid rgba(255,255,255,.14);box-shadow:inset 0 1px 0 rgba(255,255,255,.22)}
   .vote-row{display:flex;align-items:center;gap:12px}
   .vote-name{font-weight:800;font-size:15px}
@@ -390,7 +400,6 @@
   .vbtn{flex:0 0 auto;width:38px;height:38px;border-radius:13px;border:none;background:var(--amber);color:#3a1c00;font-size:22px;font-weight:800;cursor:pointer;font-family:inherit;line-height:1;transition:.14s;box-shadow:0 5px 14px rgba(255,154,46,.45)}
   .vbtn:active{transform:scale(.85)}
   .vbtn.voted{background:rgba(52,211,140,.85);color:#06301c;box-shadow:none}
-  .vs-close{display:block;margin:14px auto 0;background:none;border:none;color:var(--txt2);font-family:inherit;font-size:13px;font-weight:700;cursor:pointer}
   .sheet-overlay{display:none;position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.5);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px)}
   .sheet-overlay.on{display:block}
   .sheet{position:fixed;bottom:0;left:50%;transform:translateX(-50%) translateY(100%);width:100%;max-width:480px;z-index:61;border-radius:26px 26px 0 0;background:linear-gradient(180deg,rgba(14,38,24,.97),rgba(8,28,18,.99));border-top:1px solid var(--gbord);box-shadow:0 -20px 60px rgba(0,0,0,.5);transition:transform .52s cubic-bezier(.25,1,.2,1);max-height:85vh;overflow-y:auto;padding-bottom:28px}
@@ -409,17 +418,11 @@
   .confirm-no,.confirm-yes{flex:1;border:none;border-radius:14px;padding:14px;font-family:inherit;font-weight:800;font-size:14px;cursor:pointer}
   .confirm-no{background:var(--glass2);color:var(--txt);border:1px solid var(--gbord)}
   .confirm-yes{background:var(--amber);color:#3a1c00}
-  .sheet-empty{text-align:center;padding:32px;color:var(--txt2);font-weight:600}
   .st-substate{text-align:center;color:var(--amber);font-size:14px;font-weight:700;margin-top:-4px;margin-bottom:6px}
   .sheet-clear{display:block;width:calc(100% - 32px);margin:10px auto 0;background:none;border:none;color:var(--txt2);font-family:inherit;font-size:13px;font-weight:700;cursor:pointer;padding:8px}
   .sheet-clear:active{color:#e08a8a}
-  /* плавающая кнопка поддержки — видна на всех экранах */
-  .support-fab{position:fixed;bottom:88px;right:16px;z-index:55;width:50px;height:50px;border-radius:50%;background:var(--glass2);border:1px solid var(--gbord);box-shadow:var(--spec),var(--shadow);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);display:flex;align-items:center;justify-content:center;font-size:21px;cursor:pointer;transition:transform .15s ease}
-  .support-fab:active{transform:scale(.9)}
-  .support-body{padding:4px 20px 6px}
-  .support-body p{font-size:13.5px;color:var(--txt2);line-height:1.55;margin-bottom:10px}
-  .support-note{font-size:12px!important;opacity:.8}
-  .support-link{display:block;text-align:center;text-decoration:none;margin-top:14px}
+  /* HELP — обычная ссылка в подвале главной, ведёт прямо в Telegram, без плашки/панели */
+  .help-link{display:block;text-align:center;margin:18px 0 4px;font-size:14px;font-weight:800;letter-spacing:.4px;color:var(--amber);text-decoration:none;position:relative;z-index:2}
   /* минимум */
   .minwarn{background:rgba(255,154,46,.14);border:1px solid rgba(255,154,46,.3);border-radius:13px;padding:11px 14px;margin:10px 0 0;font-size:13px;font-weight:700;color:#ffd59a;display:none}
   /* флай-анимация добавления */

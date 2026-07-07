@@ -64,7 +64,6 @@ function cardHTML(r){
 }
 
 async function renderList(instant){
-  const q=(document.getElementById('q').value||'').toLowerCase().trim();
   let base;
   if(USE_API){
     try{
@@ -77,14 +76,11 @@ async function renderList(instant){
     base=restaurants.filter(r=>r.cities.includes(selectedCity));
   }
   restaurantsCache=base;
-  base=base.filter(r=>!q||r.name.toLowerCase().includes(q)||r.cui.toLowerCase().includes(q));
   const openR=base.filter(r=>r.open).sort((a,b)=>(b.isNew?1:0)-(a.isNew?1:0)||b.rate-a.rate);
   const closedR=base.filter(r=>!r.open);
-  document.getElementById('new-sec').innerHTML='';
   const el=document.getElementById('list');
   if(!base.length){
-    if(q){el.innerHTML='<div class="empty">Ничего не нашлось</div>';}
-    else{el.innerHTML='<div class="empty">В этом городе пока нет ресторанов.<br>Скоро появятся — проголосуйте за свой город наверху!</div>';}
+    el.innerHTML='<div class="empty">В этом городе пока нет ресторанов.<br>Скоро появятся — проголосуйте за свой город наверху!</div>';
     return;
   }
   let html='';
@@ -93,7 +89,7 @@ async function renderList(instant){
   if(closedR.length) html+=`<div class="grouplbl">Закрыты сейчас</div>`+closedR.map(cardHTML).join('');
   el.innerHTML=html;
   if(instant){return;}           // смена города — сразу видимы, без анимации
-  if(!q)setTimeout(applyStagger,10);
+  setTimeout(applyStagger,10);
 }
 function shut(n){showToast(n+' сейчас закрыт — загляните позже 🙂');}
 function showToast(msg){
@@ -151,6 +147,30 @@ function applyStagger(){
     }
   });
   firstLoad=false;
+}
+
+// Слойный эффект intro-блока (замена поиска): при скролле главной страницы
+// слоган мягко приглушается и чуть сдвигается вверх — уходит под шапку
+// (которая и так sticky+непрозрачная) и к моменту, когда снизу подъезжают
+// карточки ресторанов, уже почти неразличим. Только opacity/translateY —
+// плоско, без scale/3D, дёшево для composited-слоя, без лагов.
+let introEl=null, introFadeHandler=null;
+function initIntroLayerFX(){
+  introEl=document.getElementById('intro');
+  if(!introEl)return;
+  const onScroll=()=>{
+    if(!cur('home'))return;
+    const top=document.querySelector('.top');
+    const topH=top?top.offsetHeight:0;
+    const rect=introEl.getBoundingClientRect();
+    const progress=Math.max(0,Math.min(1,(topH-rect.top)/rect.height));
+    introEl.style.opacity=String(1-progress*0.95);
+    introEl.style.transform=`translateY(${-progress*14}px)`;
+  };
+  window.removeEventListener('scroll',introFadeHandler);
+  introFadeHandler=onScroll;
+  window.addEventListener('scroll',introFadeHandler,{passive:true});
+  onScroll();
 }
 
 // Точка активного заказа
@@ -700,8 +720,8 @@ function startOrderPolling(){
 }
 
 function cur(id){return document.getElementById(id).classList.contains('active');}
-function go(id){document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));document.getElementById(id).classList.add('active');document.querySelector('.dish-add').style.display=(id==='dish')?'block':'none';if(id!=='status'&&id!=='rejected')document.getElementById('statusbg').style.display='none';const vh=document.getElementById('vote-handle');if(vh)vh.style.display=(id==='home')?'flex':'none';window.scrollTo(0,0);updateBar();try{if(id!=='home')history.pushState({screen:id},'');else history.replaceState({screen:'home'},'');}catch(e){}}
-function resetAll(){clearInterval(preTimer);clearTimeout(preAutoTimer);stopOrderPolling();showRestaurantPhone(null);cart={};curRest=null;currentOrderCode=null;currentProviderPaymentId=null;saveCartState();saveOrderState();document.getElementById('q').value='';document.getElementById('statusbg').style.display='none';go('home');renderList();}
+function go(id){document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));document.getElementById(id).classList.add('active');document.querySelector('.dish-add').style.display=(id==='dish')?'block':'none';if(id!=='status'&&id!=='rejected')document.getElementById('statusbg').style.display='none';window.scrollTo(0,0);updateBar();if(id==='home'&&introFadeHandler)introFadeHandler();try{if(id!=='home')history.pushState({screen:id},'');else history.replaceState({screen:'home'},'');}catch(e){}}
+function resetAll(){clearInterval(preTimer);clearTimeout(preAutoTimer);stopOrderPolling();showRestaurantPhone(null);cart={};curRest=null;currentOrderCode=null;currentProviderPaymentId=null;saveCartState();saveOrderState();document.getElementById('statusbg').style.display='none';go('home');renderList();}
 // Своё окно подтверждения (замена заблокированного confirm)
 function yaamConfirm(text,onYes){
   const ov=document.getElementById('confirm-overlay');
@@ -730,18 +750,6 @@ function openSheet(){
   document.getElementById('sheet-overlay').classList.add('on');document.getElementById('sheet').classList.add('on');document.body.style.overflow='hidden';
 }
 
-// Автоподсказки поиска
-function showSuggest(q){
-  const el=document.getElementById('suggest');
-  if(!q||q.length<1){el.classList.remove('on');return;}
-  const matches=restaurantsCache.filter(r=>r.cities.includes(selectedCity)&&r.name.toLowerCase().includes(q.toLowerCase())).slice(0,4);
-  if(!matches.length){el.classList.remove('on');return;}
-  el.innerHTML=matches.map(r=>`<div class="sug-item" onclick="pickSuggest('${r.name}')">🍽 ${r.name} <span style="color:var(--txt2);font-size:12px">· ${r.cui.split('·')[0].trim()}</span></div>`).join('');
-  el.classList.add('on');
-}
-function hideSuggest(){document.getElementById('suggest').classList.remove('on');}
-function pickSuggest(name){document.getElementById('q').value=name;hideSuggest();renderList();}
-
 // После оплаты — сразу к статусу
 async function afterPay(){
   clearInterval(qrInterval);
@@ -755,10 +763,6 @@ async function afterPay(){
 }
 function closeSheet(){document.getElementById('sheet-overlay').classList.remove('on');document.getElementById('sheet').classList.remove('on');document.body.style.overflow='';}
 
-// Поддержка YAAM — плавающая кнопка, видна на всех экранах, открывает
-// выезжающую снизу панель (та же механика, что и корзина/голосование).
-function openSupport(){document.getElementById('support-overlay').classList.add('on');document.getElementById('support-sheet').classList.add('on');document.body.style.overflow='hidden';}
-function closeSupport(){document.getElementById('support-overlay').classList.remove('on');document.getElementById('support-sheet').classList.remove('on');document.body.style.overflow='';}
 function sheetInc(k){inc(k);openSheet();}
 function sheetDec(k){
   dec(k);if(totals().cnt===0){closeSheet();}else openSheet();
@@ -789,7 +793,9 @@ function setOrderTime(){
   document.getElementById('st-time').textContent='Заказ оформлен в '+h+':'+(m<10?'0':'')+m;
 }
 
-neonFlash=function(el){if(el.classList.contains('neon'))return;el.classList.add('neon');el.addEventListener('animationend',()=>el.classList.remove('neon'),{once:true});};
+function neonFlash(el){if(el.classList.contains('neon'))return;el.classList.add('neon');el.addEventListener('animationend',()=>el.classList.remove('neon'),{once:true});}
+// Красный неон intro-блока — тумблер без анимации (см. .intro.lit в style.css).
+function toggleIntroLight(el){el.classList.toggle('lit');}
 
 // Риппл на кнопке оплатить
 document.addEventListener('click',e=>{
@@ -833,13 +839,13 @@ function renderVote(){
 function castVote(name){
   if(myVote===name)return;
   if(myVote){const prev=CANDIDATE_RESTAURANTS.find(v=>v.name===myVote);if(prev)prev.votes--;}
-  const cur=CANDIDATE_RESTAURANTS.find(v=>v.name===name);if(cur)cur.votes++;
+  const chosen=CANDIDATE_RESTAURANTS.find(v=>v.name===name);if(chosen)chosen.votes++;
   myVote=name;
   try{if(navigator.vibrate)navigator.vibrate(40);}catch(e){}
   renderVote();
 }
-function openVote(){renderVote();document.getElementById('vote-overlay').classList.add('on');document.getElementById('vote-sheet').classList.add('on');document.getElementById('vote-handle').classList.add('hidden');document.body.style.overflow='hidden';}
-function closeVote(){document.getElementById('vote-overlay').classList.remove('on');document.getElementById('vote-sheet').classList.remove('on');document.getElementById('vote-handle').classList.remove('hidden');document.body.style.overflow='';}
+function openVote(){renderVote();document.getElementById('vote-overlay').classList.add('on');document.getElementById('vote-sheet').classList.add('on');document.getElementById('vote-chip').classList.add('lit');document.body.style.overflow='hidden';}
+function closeVote(){document.getElementById('vote-overlay').classList.remove('on');document.getElementById('vote-sheet').classList.remove('on');document.getElementById('vote-chip').classList.remove('lit');document.body.style.overflow='';}
 let voteStartY=0,voteCurY=0,voteDragging=false;
 function voteTouchStart(e){voteStartY=e.touches[0].clientY;voteCurY=0;voteDragging=true;document.getElementById('vote-sheet').style.transition='none';}
 function voteTouchMove(e){
@@ -847,7 +853,11 @@ function voteTouchMove(e){
   e.preventDefault();
   voteCurY=e.touches[0].clientY-voteStartY;
   const sh=document.getElementById('vote-sheet');
-  const y=voteCurY<0?voteCurY:voteCurY*0.3;
+  // Штора висит сверху и полностью открыта в состоянии покоя — тянуть "вниз"
+  // (в сторону, противоположную закрытию) её попросту некуда: раньше здесь был
+  // лёгкий сдвиг вниз (voteCurY*0.3), который открывал щель у верхнего края.
+  // Двигаем только вверх (закрытие), вниз — держим на месте.
+  const y=Math.min(0,voteCurY);
   sh.style.transform=`translateX(-50%) translateY(${y}px)`;
 }
 function voteTouchEnd(){
@@ -858,3 +868,4 @@ function voteTouchEnd(){
 
 renderList();
 tryRestoreSession();
+initIntroLayerFX();
