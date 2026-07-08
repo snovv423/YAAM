@@ -15,7 +15,7 @@ const ORDER_STORAGE_KEY='yaam_active_order';
 // пришли данные (demo-массив или API), и не дублировать логику отрисовки.
 function normalizeRestaurant(r){
   return{
-    id:r.id, name:r.name, cui:r.cuisine||'', photoUrl:r.photo_url||'', phone:r.phone||'',
+    id:r.id, name:r.name, cui:r.cuisine||'', photoUrl:r.photo_url||'', phone:r.phone||'', address:r.address||'',
     e:'🍽️', g:'linear-gradient(135deg,#3d6b4e,#1e4630)', im:null,
     rate:r.rating||0, votes:r.rating_count||0, ordersCount:r.orders_count??null,
     time:r.time||'30–40 мин', hours:r.hours||'', deliv:r.delivery_price||0, min:r.min_order||0,
@@ -59,7 +59,7 @@ function cardHTML(r){
       ${r.votes>=RATING_MIN_VOTES?`<div class="chip rt">★ ${r.rate} · ${r.votes}</div>`:''}
       <div class="info"><div class="cname">${r.name}${r.open&&r.isNew?' <span class="newtag">NEW</span>':''}</div><div class="ccui">${r.cui}</div>
         <div class="ordcnt">уже заказали ${r.ordersCount??(r.votes*3)} раз</div>
-        <div class="cmeta"><span>🕑 ${r.time}</span><span>🛵 ${r.deliv} ₽</span><span><b>мин.</b> ${r.min} ₽</span><span>🕐 ${r.hours}</span></div></div>
+        <div class="cmeta"><span><b>мин.</b> ${r.min} ₽</span><span>🕐 ${r.hours}</span></div></div>
     </div></div>`;
 }
 
@@ -177,9 +177,26 @@ function initIntroLayerFX(){
 function showOrderDot(on){const d=document.getElementById('orderdot');if(d)d.classList.toggle('on',on);}
 function dotTap(){if(document.getElementById('orderdot').classList.contains('on'))go('status');}
 
-// Иконки статуса
-const STICONS=['📋','👨‍🍳','🛵','✅'];
-const STANIMS=['iconpop .5s cubic-bezier(.3,1.4,.4,1), pulse-glow 2s ease-in-out .5s infinite','iconpop .5s cubic-bezier(.3,1.4,.4,1), cooking 1s ease-in-out .5s infinite','iconpop .5s cubic-bezier(.3,1.4,.4,1), riding .65s ease-in-out .5s infinite','delivered .65s cubic-bezier(.3,1.6,.4,1)'];
+// Шаги статуса зависят от способа получения: у самовывоза нет курьера,
+// поэтому у него на один шаг меньше ("В пути" просто отсутствует).
+// currentFulfillment выставляется в openStatus() (демо) и pollOrderOnce()
+// (реальный бэкенд, из order.fulfillment_type) до первого renderStatus().
+const STEP_SETS={
+  delivery:{
+    steps:['Принят','Готовится','В пути','Доставлен'],
+    icons:['📋','👨‍🍳','🛵','✅'],
+    anims:['iconpop .5s cubic-bezier(.3,1.4,.4,1), pulse-glow 2s ease-in-out .5s infinite','iconpop .5s cubic-bezier(.3,1.4,.4,1), cooking 1s ease-in-out .5s infinite','iconpop .5s cubic-bezier(.3,1.4,.4,1), riding .65s ease-in-out .5s infinite','delivered .65s cubic-bezier(.3,1.6,.4,1)'],
+    statusToStep:{accepted:0,preparing:1,courier:2,delivered:3},
+  },
+  pickup:{
+    steps:['Принят','Готовится','Готово'],
+    icons:['📋','👨‍🍳','✅'],
+    anims:['iconpop .5s cubic-bezier(.3,1.4,.4,1), pulse-glow 2s ease-in-out .5s infinite','iconpop .5s cubic-bezier(.3,1.4,.4,1), cooking 1s ease-in-out .5s infinite','delivered .65s cubic-bezier(.3,1.6,.4,1)'],
+    statusToStep:{accepted:0,preparing:1,delivered:2},
+  },
+};
+let currentFulfillment='delivery';
+function stepSet(){return STEP_SETS[currentFulfillment]||STEP_SETS.delivery;}
 // Телефон ресторана — только на этом экране, после оформления заказа
 // (не на карточке ресторана заранее — см. docs/data-flow.md).
 function showRestaurantPhone(phone){
@@ -212,8 +229,9 @@ async function submitRating(n){
 }
 
 function renderStatus(){
-  document.getElementById('st-progress').innerHTML=STEPS.map((s,i)=>`<div class="pstep ${i<statusStep?'done':''} ${i===statusStep?'cur':''}"><div class="pline"></div><div class="pdot">${i<statusStep?'✓':i+1}</div><div class="plbl">${s}</div></div>`).join('');
-  document.getElementById('st-state').textContent=STEPS[statusStep];
+  const{steps,icons,anims}=stepSet();
+  document.getElementById('st-progress').innerHTML=steps.map((s,i)=>`<div class="pstep ${i<statusStep?'done':''} ${i===statusStep?'cur':''}"><div class="pline"></div><div class="pdot">${i<statusStep?'✓':i+1}</div><div class="plbl">${s}</div></div>`).join('');
+  document.getElementById('st-state').textContent=steps[statusStep];
   // время готовки от ресторана — на шаге «Готовится»
   const sub=document.getElementById('st-substate');
   if(sub){
@@ -222,14 +240,16 @@ function renderStatus(){
   }
   const ic=document.getElementById('st-icon');
   if(ic){
-    ic.textContent=STICONS[statusStep];
+    ic.textContent=icons[statusStep];
     ic.style.animation='none';
-    requestAnimationFrame(()=>{ic.style.animation=STANIMS[statusStep];});
+    requestAnimationFrame(()=>{ic.style.animation=anims[statusStep];});
   }
   const bgGreen='radial-gradient(880px circle at 8% -2%,#1B5639,transparent 54%),radial-gradient(680px circle at 98% 8%,#13674A,transparent 50%),linear-gradient(165deg,#0A2417,#08301E)';
   const bgAmber='radial-gradient(880px circle at 10% 0%,#7a4a12,transparent 54%),radial-gradient(680px circle at 95% 10%,#8a5410,transparent 50%),linear-gradient(165deg,#241405,#2e1a08)';
-  document.getElementById('statusbg').style.background=(statusStep===2)?bgAmber:bgGreen;
-  const last=statusStep===STEPS.length-1;
+  // Янтарный фон — только на шаге "В пути" (курьер), которого у самовывоза нет вообще.
+  const isCourierStep=currentFulfillment==='delivery'&&statusStep===2;
+  document.getElementById('statusbg').style.background=isCourierStep?bgAmber:bgGreen;
+  const last=statusStep===steps.length-1;
   document.getElementById('st-next').style.display=last?'none':'block';
   document.getElementById('st-final').style.display=last?'block':'none';
   document.getElementById('st-demowrap').style.display=last?'none':'block';
@@ -259,10 +279,14 @@ async function doOpenRest(id){
     const img=new Image();img.src=heroSrc;img.onerror=function(){h.classList.add('nophoto');this.remove()};h.insertBefore(img,h.firstChild);
   }
   document.getElementById('m-name').textContent=curRest.name;
-  document.getElementById('m-meta').innerHTML=`<span>★ ${curRest.rate} · ${curRest.votes}</span><span>🕑 ${curRest.time}</span><span>🛵 ${curRest.deliv} ₽</span><span>🕐 ${curRest.hours}</span>`;
+  document.getElementById('m-meta').innerHTML=`<span>★ ${curRest.rate} · ${curRest.votes}</span><span>🕐 ${curRest.hours}</span>`;
   document.getElementById('msb-name').textContent=curRest.name;
   document.getElementById('msb-rate').textContent=`★ ${curRest.rate}`;
-  const tabs=['Популярное',...curRest.menu.map(c=>c.cat)];
+  // Таб/секцию "Популярное" показываем только если реально есть отмеченные
+  // блюда — в админке пока нет поля is_popular, так что у любого реального
+  // ресторана из бэкенда список будет пуст и таб вёл бы в пустоту.
+  const hasPopular=curRest.menu.some(c=>c.items.some(d=>d.pop));
+  const tabs=[...(hasPopular?['Популярное']:[]),...curRest.menu.map(c=>c.cat)];
   document.getElementById('m-tabs').innerHTML=tabs.map((t,i)=>`<div class="mtab ${i===0?'on':''}" onclick="document.getElementById('sec${i}').scrollIntoView({behavior:'smooth'})">${t}</div>`).join('');
   renderMenuBody(); go('menu'); updateBar();
   window.scrollTo(0,0);
@@ -304,6 +328,8 @@ function initMenuScrollFX(){
 }
 function key(ci,ii){return ci+'_'+ii;}
 function findItem(k){const[ci,ii]=k.split('_').map(Number);const d=curRest.menu[ci].items[ii];return{n:d.n.replace(/'/g,''),p:d.p,id:d.id||null};}
+// data-ctrl-key вместо id: популярное блюдо рендерится дважды (в "Популярное"
+// и в своей категории) — одинаковый id на двух узлах был невалидным HTML.
 function dishCard(d,ci,ii){
   const k=key(ci,ii);const q=cart[k]?cart[k].q:0;const so=SOLD_OUT[k]||d.available===false;
   const hasSrc=!!(d.photoUrl||d.im);
@@ -311,21 +337,26 @@ function dishCard(d,ci,ii){
   return `<div class="dish ${so?'dis':''}" ${so?'':`onclick="openDish('${k}')"`}>
     <div class="dphoto ${hasSrc?'':'nophoto'}" style="background:${d.g}"><span class="mj">${d.e}</span>${photo}
     <div class="dplate"><div class="dname">${d.n}${d.pop?' <span class="hit">Хит</span>':''}</div><div class="ddesc">${d.d}</div>
-    <div class="dbot"><div class="dprice">${d.p} ₽</div>${so?'<span class="soldout">Нет в наличии</span>':`<div id="ctrl_${k}" onclick="event.stopPropagation()">${q>0?qtyHtml(k,q):`<button class="add" onclick="addItem('${k}',event)">+</button>`}</div>`}</div></div></div></div>`;
+    <div class="dbot"><div class="dprice">${d.p} ₽</div>${so?'<span class="soldout">Нет в наличии</span>':`<div data-ctrl-key="${k}" onclick="event.stopPropagation()">${q>0?qtyHtml(k,q):`<button class="add" onclick="addItem('${k}',event)">+</button>`}</div>`}</div></div></div></div>`;
 }
 function renderMenuBody(){
   let html='';
-  // популярное
+  let secIdx=0;
+  // "Популярное" — только если реально есть отмеченные блюда (см. doOpenRest,
+  // нумерация sec-ID должна совпадать с табами один в один).
   const pops=[];curRest.menu.forEach((c,ci)=>c.items.forEach((d,ii)=>{if(d.pop)pops.push([d,ci,ii]);}));
-  html+=`<div class="cat-h" id="sec0">Популярное</div>`+pops.map(([d,ci,ii])=>dishCard(d,ci,ii)).join('');
-  curRest.menu.forEach((c,ci)=>{html+=`<div class="cat-h" id="sec${ci+1}">${c.cat}</div>`+c.items.map((d,ii)=>dishCard(d,ci,ii)).join('');});
+  if(pops.length){
+    html+=`<div class="cat-h" id="sec${secIdx}">Популярное</div>`+pops.map(([d,ci,ii])=>dishCard(d,ci,ii)).join('');
+    secIdx++;
+  }
+  curRest.menu.forEach((c,ci)=>{html+=`<div class="cat-h" id="sec${secIdx}">${c.cat}</div>`+c.items.map((d,ii)=>dishCard(d,ci,ii)).join('');secIdx++;});
   document.getElementById('m-body').innerHTML=html;
 }
 function qtyHtml(k,q){return `<div class="qty"><button onclick="dec('${k}')">−</button><span>${q}</span><button onclick="inc('${k}',event)">+</button></div>`;}
 function addItem(k,e){const it=findItem(k);cart[k]={n:it.n,p:it.p,q:1,menuItemId:it.id};refreshAll(k);if(e)flyAnim(e);}
 function inc(k,e){cart[k].q++;refreshAll(k);if(e)flyAnim(e);}
 function dec(k){cart[k].q--;if(cart[k].q<=0)delete cart[k];refreshAll(k);}
-function refreshAll(k){document.querySelectorAll('#ctrl_'+k).forEach(el=>{const c=cart[k];el.innerHTML=(c&&c.q>0)?qtyHtml(k,c.q):`<button class="add" onclick="addItem('${k}',event)">+</button>`;});updateBar();saveCartState();}
+function refreshAll(k){document.querySelectorAll('[data-ctrl-key="'+k+'"]').forEach(el=>{const c=cart[k];el.innerHTML=(c&&c.q>0)?qtyHtml(k,c.q):`<button class="add" onclick="addItem('${k}',event)">+</button>`;});updateBar();saveCartState();}
 
 // Персист корзины — переживает обновление/закрытие вкладки (см. tryRestoreSession).
 function saveCartState(){
@@ -431,11 +462,26 @@ function updateBar(){const{sum,cnt}=totals();const bar=document.getElementById('
 function orderItemsHTML(){
   return Object.values(cart).map(c=>`<div class="sumrow"><span>${c.q} × ${c.n}</span><span>${c.p*c.q} ₽</span></div>`).join('');
 }
+// Доставка/самовывоз — выбор клиента при оформлении. По умолчанию всегда
+// доставка (см. setFulfillment), сбрасывается при каждом новом открытии
+// checkout, чтобы не тащить выбор из прошлого заказа в другом ресторане.
+let fulfillmentType='delivery';
+function setFulfillment(type){
+  fulfillmentType=type;
+  const d=document.getElementById('fulfill-delivery'), p=document.getElementById('fulfill-pickup');
+  d.classList.toggle('fulfill-on',type==='delivery');d.classList.toggle('fulfill-off',type!=='delivery');
+  p.classList.toggle('fulfill-on',type==='pickup');p.classList.toggle('fulfill-off',type!=='pickup');
+  document.getElementById('field-addr').style.display=type==='delivery'?'':'none';
+  document.getElementById('field-pickup-addr').style.display=type==='pickup'?'':'none';
+  document.getElementById('delivery-note').style.display=type==='delivery'?'':'none';
+}
 function openCart(){
   const{sum}=totals();
   document.getElementById('c-rest').textContent=curRest.name;
   document.getElementById('c-city').textContent=selectedCity;
   document.getElementById('c-addr').value=`г. ${selectedCity}, ул. Маяковского, 18, кв. 7`;
+  document.getElementById('c-pickup-addr').textContent=curRest.address||'Адрес уточняется';
+  setFulfillment('delivery');
   document.getElementById('c-items').innerHTML=
     orderItemsHTML()
     +`<div class="sumrow total"><span>К оплате сейчас (СБП)</span><span>${sum} ₽</span></div>`;
@@ -502,7 +548,8 @@ function buildOrderPayload(){
   return{
     name:document.getElementById('c-name').value.trim(),
     phone:document.getElementById('c-phone').value.trim(),
-    address:document.getElementById('c-addr').value.trim(),
+    address:fulfillmentType==='pickup'?(curRest.address||''):document.getElementById('c-addr').value.trim(),
+    fulfillmentType,
     comment:document.getElementById('c-comment').value.trim(),
     city:selectedCity,
     restaurant:curRest.name,
@@ -521,7 +568,7 @@ async function openQR(){
       const{order,payment}=await api.createOrder({
         restaurantId:curRest.id, city:selectedCity,
         customerName:payload.name, customerPhone:payload.phone,
-        address:payload.address, comment:payload.comment,
+        address:payload.address, fulfillmentType:payload.fulfillmentType, comment:payload.comment,
         items:payload.items.map(i=>({name:i.name,price:i.price,qty:i.qty,menuItemId:i.menuItemId})),
       });
       currentOrderCode=order.public_code;
@@ -548,7 +595,6 @@ function drawQR(){
   box.innerHTML=html;
 }
 
-const STEPS=['Принят','Готовится','В пути','Доставлен'];
 let statusStep=0;
 
 // После оплаты — короткий спиннер (банк/PSP подтверждает платёж, доли секунды-пара секунд
@@ -596,6 +642,7 @@ function initStatusScreen(){
   showStatusSpinner(true);
 }
 function openStatus(){
+  currentFulfillment=fulfillmentType;
   initStatusScreen();
   showRestaurantPhone(curRest.phone);
   go('status');
@@ -610,7 +657,7 @@ function nextStatus(){
     renderStatus();
     return;
   }
-  if(statusStep<STEPS.length-1){statusStep++;renderStatus();}
+  if(statusStep<stepSet().steps.length-1){statusStep++;renderStatus();}
 }
 
 function openRejected(reason){
@@ -668,12 +715,12 @@ function cancelOrderFlow(){
 }
 
 // --- Поллинг реального статуса заказа (только в режиме API) ---
-const ORDER_STATUS_TO_STEP={accepted:0,preparing:1,courier:2,delivered:3};
 let orderPollTimer=null;
 function stopOrderPolling(){clearInterval(orderPollTimer);orderPollTimer=null;}
 async function pollOrderOnce(){
   let order;
   try{order=await api.getOrder(currentOrderCode);}catch(err){return;} // сеть моргнула — попробуем на следующем тике
+  currentFulfillment=order.fulfillment_type==='pickup'?'pickup':'delivery';
   document.getElementById('st-num').textContent=order.public_code;
   if(order.estimated_ready_minutes)curEstimatedMinutes=order.estimated_ready_minutes;
   showRestaurantPhone(order.restaurant_phone);
@@ -691,9 +738,9 @@ async function pollOrderOnce(){
     document.getElementById('st-next').style.display='none';
     document.getElementById('st-demowrap').style.display='none';
     document.getElementById('st-cancel-wrap').style.display='block';
-  }else if(ORDER_STATUS_TO_STEP[order.status]!==undefined){
+  }else if(stepSet().statusToStep[order.status]!==undefined){
     inPreStatus=false;
-    statusStep=ORDER_STATUS_TO_STEP[order.status];
+    statusStep=stepSet().statusToStep[order.status];
     document.getElementById('st-progress').style.display='flex';
     document.getElementById('st-next').style.display='none'; // статус двигает ресторан по-настоящему, не демо-кнопка
     document.getElementById('st-demowrap').style.display='none';
@@ -736,7 +783,7 @@ function yaamConfirm(text,onYes){
 }
 
 function clearCart(){yaamConfirm('Очистить корзину?',()=>{cart={};closeSheet();refreshAllVisible();backToMenu();});}
-function refreshAllVisible(){document.querySelectorAll('[id^="ctrl_"]').forEach(el=>{const k=el.id.replace('ctrl_','');const c=cart[k];el.innerHTML=(c&&c.q>0)?qtyHtml(k,c.q):`<button class="add" onclick="addItem('${k}',event)">+</button>`;});updateBar();saveCartState();}
+function refreshAllVisible(){document.querySelectorAll('[data-ctrl-key]').forEach(el=>{const k=el.dataset.ctrlKey;const c=cart[k];el.innerHTML=(c&&c.q>0)?qtyHtml(k,c.q):`<button class="add" onclick="addItem('${k}',event)">+</button>`;});updateBar();saveCartState();}
 // Штора корзины
 let sheetStartY=0,sheetCurY=0;
 function openSheet(){

@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS restaurants (
   cuisine TEXT NOT NULL DEFAULT '',
   photo_url TEXT NOT NULL DEFAULT '',
   cities TEXT NOT NULL DEFAULT '[]',       -- JSON-массив строк, напр. ["Грозный","Аргун"]
+  address TEXT NOT NULL DEFAULT '',        -- точка самовывоза, показывается клиенту при выборе "Самовывоз"
   hours TEXT NOT NULL DEFAULT '',          -- "10:00–23:00"
   delivery_price INTEGER NOT NULL DEFAULT 0,
   min_order INTEGER NOT NULL DEFAULT 0,
@@ -52,6 +53,7 @@ CREATE TABLE IF NOT EXISTS orders (
   customer_name TEXT NOT NULL,
   customer_phone TEXT NOT NULL,
   address TEXT NOT NULL,
+  fulfillment_type TEXT NOT NULL DEFAULT 'delivery', -- 'delivery' | 'pickup' — выбор клиента при оформлении
   comment TEXT NOT NULL DEFAULT '',
   items_total INTEGER NOT NULL,              -- сумма блюд, руб. Комиссия YAAM считается от неё.
   commission_amount INTEGER NOT NULL,        -- 7% на момент создания заказа (фиксируем, а не пересчитываем задним числом)

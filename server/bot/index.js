@@ -67,7 +67,12 @@ function startBot(token) {
       return;
     }
     const itemsList = order.items.map((i) => `${i.qty} × ${i.name} — ${i.price * i.qty} ₽`).join('\n');
-    const text = `🆕 Новый заказ ${order.public_code}\n\n${itemsList}\n\nИтого: ${order.items_total} ₽\nАдрес: ${order.address}\nТелефон: ${order.customer_phone}\nКомментарий: ${order.comment || '—'}\n\nОтветьте в течение 3 минут, иначе заказ отменится автоматически.`;
+    // Самовывоз — ресторан и так знает свой адрес, курьера ждать не нужно;
+    // строку "Адрес" показываем только для доставки.
+    const fulfillmentLine = order.fulfillment_type === 'pickup'
+      ? '🏃 Самовывоз (курьер не нужен)'
+      : `🛵 Доставка\nАдрес: ${order.address}`;
+    const text = `🆕 Новый заказ ${order.public_code}\n\n${itemsList}\n\nИтого: ${order.items_total} ₽\n${fulfillmentLine}\nТелефон: ${order.customer_phone}\nКомментарий: ${order.comment || '—'}\n\nОтветьте в течение 3 минут, иначе заказ отменится автоматически.`;
     bot.sendMessage(restaurant.telegram_chat_id, text, {
       reply_markup: {
         inline_keyboard: [[
@@ -102,11 +107,13 @@ function startBot(token) {
         await bot.editMessageText(`Готовится — клиенту показано «~${minutes} мин».`, { chat_id: chatId, message_id: messageId });
         await sendProgressButton(bot, chatId, orderId, 'preparing');
       } else if (action === 'advance') {
-        // advance:nextStatus:orderId (courier -> delivered)
+        // advance:nextStatus:orderId (courier -> delivered, или preparing -> delivered напрямую для самовывоза)
         const nextStatus = parts[1];
         const orderId = Number(parts[2]);
-        orderService.restaurantAdvance(orderId, nextStatus);
-        const labels = { courier: 'Передал курьеру', delivered: 'Доставлен' };
+        const updated = orderService.restaurantAdvance(orderId, nextStatus);
+        const labels = updated.fulfillment_type === 'pickup'
+          ? { delivered: 'Клиент забрал' }
+          : { courier: 'Передал курьеру', delivered: 'Доставлен' };
         await bot.editMessageText(`Статус обновлён: ${labels[nextStatus]}`, { chat_id: chatId, message_id: messageId });
         if (nextStatus !== 'delivered') await sendProgressButton(bot, chatId, orderId, nextStatus);
       } else if (action === 'pause') {
@@ -141,11 +148,12 @@ function startBot(token) {
   }
 
   async function sendProgressButton(botInstance, chatId, orderId, currentStatus) {
-    const nextMap = { preparing: 'courier', courier: 'delivered' };
-    const labelMap = { courier: 'Передал курьеру', delivered: 'Доставлен' };
+    const order = orderService.getOrder(orderId);
+    const isPickup = order.fulfillment_type === 'pickup';
+    const nextMap = isPickup ? { preparing: 'delivered' } : { preparing: 'courier', courier: 'delivered' };
+    const labelMap = isPickup ? { delivered: 'Клиент забрал' } : { courier: 'Передал курьеру', delivered: 'Доставлен' };
     const next = nextMap[currentStatus];
     if (!next) return;
-    const order = orderService.getOrder(orderId);
     await botInstance.sendMessage(chatId, `Заказ ${order.public_code}: когда будет готово, нажмите ниже.`, {
       reply_markup: { inline_keyboard: [[{ text: labelMap[next], callback_data: `advance:${next}:${orderId}` }]] },
     });

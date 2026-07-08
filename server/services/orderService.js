@@ -34,7 +34,7 @@ function getOrder(idOrCode) {
   return { ...row, items };
 }
 
-async function createOrder({ restaurantId, city, customerName, customerPhone, address, comment, items }) {
+async function createOrder({ restaurantId, city, customerName, customerPhone, address, comment, items, fulfillmentType }) {
   if (!customerName || !customerName.trim()) throw new Error('customerName обязателен');
   if (!items || !items.length) throw new Error('корзина пуста');
 
@@ -46,10 +46,11 @@ async function createOrder({ restaurantId, city, customerName, customerPhone, ad
     throw new Error(`сумма заказа ${itemsTotal} меньше минимальной ${restaurant.min_order}`);
   }
   const commission = payments.calcCommission(itemsTotal);
+  const normalizedFulfillment = fulfillmentType === 'pickup' ? 'pickup' : 'delivery';
 
   const insertOrder = db.prepare(`
-    INSERT INTO orders (public_code, restaurant_id, city, customer_name, customer_phone, address, comment, items_total, commission_amount, status)
-    VALUES (:public_code, :restaurant_id, :city, :customer_name, :customer_phone, :address, :comment, :items_total, :commission_amount, 'awaiting_payment')
+    INSERT INTO orders (public_code, restaurant_id, city, customer_name, customer_phone, address, fulfillment_type, comment, items_total, commission_amount, status)
+    VALUES (:public_code, :restaurant_id, :city, :customer_name, :customer_phone, :address, :fulfillment_type, :comment, :items_total, :commission_amount, 'awaiting_payment')
   `);
   const insertItem = db.prepare(`
     INSERT INTO order_items (order_id, menu_item_id, name, price, qty) VALUES (?, ?, ?, ?, ?)
@@ -63,6 +64,7 @@ async function createOrder({ restaurantId, city, customerName, customerPhone, ad
       customer_name: customerName.trim(),
       customer_phone: customerPhone || '',
       address: address || '',
+      fulfillment_type: normalizedFulfillment,
       comment: comment || '',
       items_total: itemsTotal,
       commission_amount: commission,
@@ -168,10 +170,16 @@ async function restaurantDecline(orderId) {
   return setStatus(orderId, 'declined');
 }
 
+// У самовывоза нет курьера — ресторан переводит заказ сразу из "preparing" в
+// "delivered" (клиент забрал), шаг "courier" для pickup-заказов не существует.
+const ADVANCE_MAP = {
+  delivery: { accepted: 'preparing', preparing: 'courier', courier: 'delivered' },
+  pickup: { accepted: 'preparing', preparing: 'delivered' },
+};
 function restaurantAdvance(orderId, nextStatus, { estimatedMinutes } = {}) {
-  const allowed = { accepted: 'preparing', preparing: 'courier', courier: 'delivered' };
   const order = getOrder(orderId);
   if (!order) throw new Error('заказ не найден');
+  const allowed = ADVANCE_MAP[order.fulfillment_type] || ADVANCE_MAP.delivery;
   if (allowed[order.status] !== nextStatus) {
     throw new Error(`нельзя перейти из ${order.status} в ${nextStatus}`);
   }

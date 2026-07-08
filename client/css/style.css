@@ -226,6 +226,14 @@
   .ctitle{font-weight:800;font-size:24px;padding:20px 18px 2px;position:relative;z-index:2}
   .csub{padding:0 18px 6px;color:var(--txt2);font-weight:700;font-size:13px;position:relative;z-index:2}
   .co{padding:18px;position:relative;z-index:2}
+  /* Доставка/самовывоз — те же цвета, что уже есть на сайте: выбранный
+     вариант зелёный неон (как кнопка "кого ждём"), невыбранный красный
+     (как выбранный город) — ничего нового не изобретаем. */
+  .fulfill-toggle{display:flex;gap:8px;margin-bottom:14px}
+  .fulfill-chip{flex:1;text-align:center;padding:11px 12px;border-radius:14px;font-size:13px;font-weight:800;letter-spacing:.2px;cursor:pointer;font-family:inherit;color:#fff;border:1.5px solid transparent;transition:background .15s ease,border-color .15s ease,box-shadow .15s ease}
+  .fulfill-chip.fulfill-on{background:rgba(255,255,255,.06);border-color:#39ff14;box-shadow:0 0 0 1px #39ff14,0 0 14px 3px rgba(57,255,20,.65),inset 0 0 9px rgba(57,255,20,.35)}
+  .fulfill-chip.fulfill-off{background:linear-gradient(180deg,rgba(168,32,44,.72),rgba(120,18,30,.55));border-color:rgba(255,120,120,.45);box-shadow:0 6px 16px rgba(150,20,30,.35)}
+  .pickup-addr-value{font-family:inherit;font-size:16px;font-weight:600;margin-top:4px;color:var(--txt)}
   .field{border-radius:17px;padding:13px 16px;margin-bottom:11px;background:var(--glass);border:1px solid var(--gbord);box-shadow:var(--spec);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px)}
   .field label{display:block;font-size:11px;color:var(--txt2);font-weight:800;text-transform:uppercase;letter-spacing:.5px}
   .addr-top{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:2px}
@@ -372,7 +380,7 @@
      список кандидатов. Раньше хват лежал внутри общего overflow:auto шторки —
      при длинном списке он уезжал за экран, и дотянуться до него для закрытия
      было невозможно без прокрутки всего списка. */
-  .vote-sheet{position:fixed;top:0;left:50%;transform:translateX(-50%) translateY(-100%);width:100%;max-width:480px;z-index:63;border-radius:0 0 30px 30px;
+  .vote-sheet{position:fixed;top:0;left:50%;transform:translateX(-50%) translateY(calc(-100% - 60px));width:100%;max-width:480px;z-index:63;border-radius:0 0 30px 30px;
     background:linear-gradient(180deg,rgba(8,26,16,.46),rgba(4,16,10,.40));
     backdrop-filter:blur(22px) saturate(170%);-webkit-backdrop-filter:blur(22px) saturate(170%);
     border-bottom:1px solid rgba(255,255,255,.18);
@@ -402,7 +410,11 @@
   .vbtn.voted{background:rgba(52,211,140,.85);color:#06301c;box-shadow:none}
   .sheet-overlay{display:none;position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.5);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px)}
   .sheet-overlay.on{display:block}
-  .sheet{position:fixed;bottom:0;left:50%;transform:translateX(-50%) translateY(100%);width:100%;max-width:480px;z-index:61;border-radius:26px 26px 0 0;background:linear-gradient(180deg,rgba(14,38,24,.97),rgba(8,28,18,.99));border-top:1px solid var(--gbord);box-shadow:0 -20px 60px rgba(0,0,0,.5);transition:transform .52s cubic-bezier(.25,1,.2,1);max-height:85vh;overflow-y:auto;padding-bottom:28px}
+  /* +60px к translateY сверх 100% — на iOS Safari адресная строка снизу
+     динамически меняет видимую высоту экрана (layout viewport больше
+     фактического), и ровно 100% иногда не хватает, чтобы спрятать штору
+     полностью — край на пару пикселей вылезает из-под адресной строки. */
+  .sheet{position:fixed;bottom:0;left:50%;transform:translateX(-50%) translateY(calc(100% + 60px));width:100%;max-width:480px;z-index:61;border-radius:26px 26px 0 0;background:linear-gradient(180deg,rgba(14,38,24,.97),rgba(8,28,18,.99));border-top:1px solid var(--gbord);box-shadow:0 -20px 60px rgba(0,0,0,.5);transition:transform .52s cubic-bezier(.25,1,.2,1);max-height:85vh;overflow-y:auto;padding-bottom:28px}
   .sheet.on{transform:translateX(-50%) translateY(0)}
   .sheet-handle{width:42px;height:4px;border-radius:999px;background:rgba(255,255,255,.25);margin:14px auto 18px}
   .sheet-title{font-weight:800;font-size:18px;padding:0 18px 14px;border-bottom:1px solid var(--gbord)}

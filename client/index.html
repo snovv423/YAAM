@@ -92,13 +92,18 @@
   <div class="ctitle">Оформление</div>
   <div class="csub" id="c-rest"></div>
   <div class="co">
+    <div class="fulfill-toggle">
+      <button type="button" class="fulfill-chip fulfill-on" id="fulfill-delivery" onclick="setFulfillment('delivery')">Доставка</button>
+      <button type="button" class="fulfill-chip fulfill-off" id="fulfill-pickup" onclick="setFulfillment('pickup')">Самовывоз</button>
+    </div>
     <div class="field"><label>Имя</label><input id="c-name" placeholder="Как к вам обращаться"></div>
-    <div class="field"><div class="addr-top"><label>Адрес доставки</label><span class="citytag" id="c-city"></span></div><input id="c-addr" value="ул. Маяковского, 18, кв. 7"></div>
+    <div class="field" id="field-addr"><div class="addr-top"><label>Адрес доставки</label><span class="citytag" id="c-city"></span></div><input id="c-addr" value="ул. Маяковского, 18, кв. 7"></div>
+    <div class="field" id="field-pickup-addr" style="display:none"><label>Заберите здесь</label><div class="pickup-addr-value" id="c-pickup-addr"></div></div>
     <div class="field"><label>Телефон</label><input id="c-phone" value="+7 928 000-00-00"></div>
-    <div class="field"><label>Комментарий к заказу</label><input id="c-comment" placeholder="Подъезд, этаж, домофон…"></div>
+    <div class="field"><label>Комментарий к заказу</label><input id="c-comment"></div>
     <div class="panel" id="c-items"></div>
     <div class="trust"><span class="ic">🛡️</span><p>Оплата защищена. Не примет ресторан — вернём деньги.</p></div>
-    <p class="delivery-note">Доставку организует ресторан. YAAM принимает оплату только за еду. <a href="legal/delivery.html" target="_blank" rel="noopener">Подробнее</a></p>
+    <p class="delivery-note" id="delivery-note">Доставку организует ресторан. YAAM принимает оплату только за еду. <a href="legal/delivery.html" target="_blank" rel="noopener">Подробнее</a></p>
     <div id="legal-consent"></div>
     <button class="pay" onclick="openQR()">Оплатить еду по СБП · <span id="c-total"></span></button>
     <p class="offer-accept-note">Нажимая «Оплатить», вы принимаете условия <a href="legal/offer.html" target="_blank" rel="noopener">оферты YAAM</a>.</p>

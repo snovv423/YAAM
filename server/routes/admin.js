@@ -84,6 +84,7 @@ router.get('/restaurants/new', (req, res) => {
       <label>Кухня (для карточки)</label><input name="cuisine" placeholder="Шашлык · Чеченская кухня">
       <label>Фото (URL)</label><input name="photo_url" placeholder="https://...">
       <label>Города (через запятую)</label><input name="cities" placeholder="Грозный, Аргун" required>
+      <label>Адрес точки (виден клиенту при выборе "Самовывоз")</label><input name="address" placeholder="г. Грозный, ул. ..., д. ...">
       <label>Часы работы</label><input name="hours" placeholder="10:00–23:00">
       <label>Телефон (виден клиенту после оформления заказа)</label><input name="phone" placeholder="+7 928 000-00-00">
       <div class="row">
@@ -97,13 +98,13 @@ router.get('/restaurants/new', (req, res) => {
 });
 
 router.post('/restaurants', (req, res) => {
-  const { name, cuisine, photo_url, cities, hours, phone, delivery_price, min_order, default_cook_minutes } = req.body;
+  const { name, cuisine, photo_url, cities, address, hours, phone, delivery_price, min_order, default_cook_minutes } = req.body;
   const connectCode = crypto.randomBytes(3).toString('hex').toUpperCase();
   const citiesJson = JSON.stringify(String(cities || '').split(',').map((c) => c.trim()).filter(Boolean));
   const info = db.prepare(`
-    INSERT INTO restaurants (name, cuisine, photo_url, cities, hours, phone, delivery_price, min_order, default_cook_minutes, connect_code)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(name, cuisine || '', photo_url || '', citiesJson, hours || '', phone || '', Number(delivery_price) || 0, Number(min_order) || 0, Number(default_cook_minutes) || 40, connectCode);
+    INSERT INTO restaurants (name, cuisine, photo_url, cities, address, hours, phone, delivery_price, min_order, default_cook_minutes, connect_code)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(name, cuisine || '', photo_url || '', citiesJson, address || '', hours || '', phone || '', Number(delivery_price) || 0, Number(min_order) || 0, Number(default_cook_minutes) || 40, connectCode);
   res.redirect(`/admin/restaurants/${info.lastInsertRowid}/edit`);
 });
 
@@ -121,6 +122,7 @@ router.get('/restaurants/:id/edit', (req, res) => {
       <label>Кухня</label><input name="cuisine" value="${esc(r.cuisine)}">
       <label>Фото (URL)</label><input name="photo_url" value="${esc(r.photo_url)}">
       <label>Города (через запятую)</label><input name="cities" value="${esc(JSON.parse(r.cities || '[]').join(', '))}">
+      <label>Адрес точки (виден клиенту при выборе "Самовывоз")</label><input name="address" value="${esc(r.address)}" placeholder="г. Грозный, ул. ..., д. ...">
       <label>Часы работы</label><input name="hours" value="${esc(r.hours)}">
       <label>Телефон (виден клиенту после оформления заказа)</label><input name="phone" value="${esc(r.phone)}" placeholder="+7 928 000-00-00">
       <div class="row">
@@ -187,11 +189,11 @@ router.get('/restaurants/:id/edit', (req, res) => {
 
 router.post('/restaurants/:id/', (req, res) => res.redirect(307, `/admin/restaurants/${req.params.id}`));
 router.post('/restaurants/:id', (req, res) => {
-  const { name, cuisine, photo_url, cities, hours, phone, delivery_price, min_order, default_cook_minutes } = req.body;
+  const { name, cuisine, photo_url, cities, address, hours, phone, delivery_price, min_order, default_cook_minutes } = req.body;
   const citiesJson = JSON.stringify(String(cities || '').split(',').map((c) => c.trim()).filter(Boolean));
   db.prepare(`
-    UPDATE restaurants SET name=?, cuisine=?, photo_url=?, cities=?, hours=?, phone=?, delivery_price=?, min_order=?, default_cook_minutes=? WHERE id=?
-  `).run(name, cuisine || '', photo_url || '', citiesJson, hours || '', phone || '', Number(delivery_price) || 0, Number(min_order) || 0, Number(default_cook_minutes) || 40, req.params.id);
+    UPDATE restaurants SET name=?, cuisine=?, photo_url=?, cities=?, address=?, hours=?, phone=?, delivery_price=?, min_order=?, default_cook_minutes=? WHERE id=?
+  `).run(name, cuisine || '', photo_url || '', citiesJson, address || '', hours || '', phone || '', Number(delivery_price) || 0, Number(min_order) || 0, Number(default_cook_minutes) || 40, req.params.id);
   res.redirect(`/admin/restaurants/${req.params.id}/edit`);
 });
 
@@ -236,11 +238,12 @@ router.get('/orders', (req, res) => {
   res.send(layout('Заказы', `
     <h1>Заказы (последние 100)</h1>
     <table>
-      <tr><th>Код</th><th>Ресторан</th><th>Сумма</th><th>Комиссия</th><th>Статус</th><th>Создан</th></tr>
+      <tr><th>Код</th><th>Ресторан</th><th>Сумма</th><th>Комиссия</th><th>Тип</th><th>Статус</th><th>Создан</th></tr>
       ${orders.map((o) => `<tr>
         <td>${esc(o.public_code)}</td><td>${esc(o.restaurant_name)}</td><td>${o.items_total} ₽</td><td>${o.commission_amount} ₽</td>
+        <td>${o.fulfillment_type === 'pickup' ? 'Самовывоз' : 'Доставка'}</td>
         <td>${esc(o.status)}</td><td>${esc(o.created_at)}</td>
-      </tr>`).join('') || '<tr><td colspan="6" style="color:var(--txt2)">Заказов пока нет</td></tr>'}
+      </tr>`).join('') || '<tr><td colspan="7" style="color:var(--txt2)">Заказов пока нет</td></tr>'}
     </table>
   `));
 });
