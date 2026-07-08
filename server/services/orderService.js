@@ -40,8 +40,21 @@ async function createOrder({ restaurantId, city, customerName, customerPhone, ad
 
   const restaurant = db.prepare('SELECT * FROM restaurants WHERE id = ?').get(restaurantId);
   if (!restaurant) throw new Error('ресторан не найден');
+  if (!restaurant.is_open) throw new Error('ресторан сейчас закрыт — заказ невозможен');
 
-  const itemsTotal = items.reduce((sum, i) => sum + i.price * i.qty, 0);
+  // Клиент присылает name/price вместе с корзиной для удобства — но это его
+  // собственные данные, а не источник истины. Для блюд с известным menuItemId
+  // берём актуальную цену и стоп-лист из БД, а не то, что прислал браузер
+  // (иначе можно было бы отредактировать сумму в devtools перед оплатой).
+  const trustedItems = items.map((i) => {
+    if (!i.menuItemId) return i;
+    const real = db.prepare('SELECT * FROM menu_items WHERE id = ? AND restaurant_id = ?').get(i.menuItemId, restaurantId);
+    if (!real) throw new Error(`блюдо не найдено: ${i.name}`);
+    if (!real.is_available) throw new Error(`блюдо «${real.name}» сейчас в стоп-листе`);
+    return { ...i, name: real.name, price: real.price };
+  });
+
+  const itemsTotal = trustedItems.reduce((sum, i) => sum + i.price * i.qty, 0);
   if (itemsTotal < restaurant.min_order) {
     throw new Error(`сумма заказа ${itemsTotal} меньше минимальной ${restaurant.min_order}`);
   }
@@ -69,7 +82,7 @@ async function createOrder({ restaurantId, city, customerName, customerPhone, ad
       items_total: itemsTotal,
       commission_amount: commission,
     });
-    for (const it of items) {
+    for (const it of trustedItems) {
       insertItem.run(info.lastInsertRowid, it.menuItemId || null, it.name, it.price, it.qty);
     }
     return info.lastInsertRowid;

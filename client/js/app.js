@@ -18,7 +18,7 @@ function normalizeRestaurant(r){
     id:r.id, name:r.name, cui:r.cuisine||'', photoUrl:r.photo_url||'', phone:r.phone||'', address:r.address||'',
     e:'🍽️', g:'linear-gradient(135deg,#3d6b4e,#1e4630)', im:null,
     rate:r.rating||0, votes:r.rating_count||0, ordersCount:r.orders_count??null,
-    time:r.time||'30–40 мин', hours:r.hours||'', deliv:r.delivery_price||0, min:r.min_order||0,
+    hours:r.hours||'', deliv:r.delivery_price||0, min:r.min_order||0,
     open:!!r.is_open, isNew:!!r.is_new, cities:r.cities||[],
     menu:(r.menu||[]).map(cat=>({
       cat:cat.name,
@@ -209,19 +209,23 @@ function showRestaurantPhone(phone){
 // Реальное время готовки приходит с бэкенда (ресторан выбирает в боте);
 // в демо-режиме — фиксированная заглушка.
 let curEstimatedMinutes=null;
+// ratingSubmitted — источник истины "у этого заказа уже есть оценка" (синхронизируется
+// с order.rating с бэкенда при каждом пуле, см. pollOrderOnce). ratingJustNow — только
+// для текста: отличаем "только что поставили" от "оценка была раньше" после восстановления сессии.
 let ratingSubmitted=false;
+let ratingJustNow=false;
 
 function renderRatingStars(){
   const el=document.getElementById('st-rating-wrap');
   if(!el)return;
-  if(ratingSubmitted){el.innerHTML='<p class="rating-thanks">Спасибо за оценку!</p>';return;}
+  if(ratingSubmitted){el.innerHTML=`<p class="rating-thanks">${ratingJustNow?'Спасибо за оценку!':'Вы уже оценили этот заказ'}</p>`;return;}
   el.innerHTML=`<div class="rating-wrap"><p>Оцените ресторан</p><div class="rating-stars" id="rating-stars">${[1,2,3,4,5].map(n=>`<button class="rating-star" data-n="${n}" onclick="submitRating(${n})">★</button>`).join('')}</div></div>`;
 }
 async function submitRating(n){
   document.querySelectorAll('#rating-stars .rating-star').forEach(b=>b.classList.toggle('on',Number(b.dataset.n)<=n));
   try{
     if(USE_API&&currentOrderCode)await api.rateOrder(currentOrderCode,n);
-    ratingSubmitted=true;
+    ratingSubmitted=true;ratingJustNow=true;
     setTimeout(renderRatingStars,350); // короткая пауза, чтобы увидеть подсветку звёзд перед "спасибо"
   }catch(err){
     showToast(err.message||'Не удалось сохранить оценку');
@@ -279,9 +283,10 @@ async function doOpenRest(id){
     const img=new Image();img.src=heroSrc;img.onerror=function(){h.classList.add('nophoto');this.remove()};h.insertBefore(img,h.firstChild);
   }
   document.getElementById('m-name').textContent=curRest.name;
-  document.getElementById('m-meta').innerHTML=`<span>★ ${curRest.rate} · ${curRest.votes}</span><span>🕐 ${curRest.hours}</span>`;
+  const showRating=curRest.votes>=RATING_MIN_VOTES;
+  document.getElementById('m-meta').innerHTML=`${showRating?`<span>★ ${curRest.rate} · ${curRest.votes}</span>`:''}<span>🕐 ${curRest.hours}</span>`;
   document.getElementById('msb-name').textContent=curRest.name;
-  document.getElementById('msb-rate').textContent=`★ ${curRest.rate}`;
+  document.getElementById('msb-rate').textContent=showRating?`★ ${curRest.rate}`:'';
   // Таб/секцию "Популярное" показываем только если реально есть отмеченные
   // блюда — в админке пока нет поля is_popular, так что у любого реального
   // ресторана из бэкенда список будет пуст и таб вёл бы в пустоту.
@@ -479,9 +484,10 @@ function openCart(){
   const{sum}=totals();
   document.getElementById('c-rest').textContent=curRest.name;
   document.getElementById('c-city').textContent=selectedCity;
-  document.getElementById('c-addr').value=`г. ${selectedCity}, ул. Маяковского, 18, кв. 7`;
+  const addrField=document.getElementById('c-addr');
+  if(!addrField.value.trim())addrField.value=`г. ${selectedCity}, ул. Маяковского, 18, кв. 7`;
   document.getElementById('c-pickup-addr').textContent=curRest.address||'Адрес уточняется';
-  setFulfillment('delivery');
+  setFulfillment(fulfillmentType);
   document.getElementById('c-items').innerHTML=
     orderItemsHTML()
     +`<div class="sumrow total"><span>К оплате сейчас (СБП)</span><span>${sum} ₽</span></div>`;
@@ -636,7 +642,7 @@ function startResponseTimer(){
 // Общий пролог обоих режимов статус-экрана (демо-шаги и реальный поллинг),
 // расходятся только после него — демо крутит статусы кнопкой, реальный ждёт сервер.
 function initStatusScreen(){
-  statusStep=0;inPreStatus=true;curEstimatedMinutes=null;ratingSubmitted=false;setOrderTime();showOrderDot(true);
+  statusStep=0;inPreStatus=true;curEstimatedMinutes=null;ratingSubmitted=false;ratingJustNow=false;setOrderTime();showOrderDot(true);
   document.getElementById('st-items').innerHTML=orderItemsHTML();
   document.getElementById('statusbg').style.display='block';
   showStatusSpinner(true);
@@ -720,6 +726,11 @@ function stopOrderPolling(){clearInterval(orderPollTimer);orderPollTimer=null;}
 async function pollOrderOnce(){
   let order;
   try{order=await api.getOrder(currentOrderCode);}catch(err){return;} // сеть моргнула — попробуем на следующем тике
+  // Источник истины для "уже оценено" — order.rating с бэкенда, а не локальный
+  // флаг: после обновления страницы ratingSubmitted сбрасывается в false
+  // (initStatusScreen), и без этой синхронизации звёзды показались бы снова
+  // для уже оценённого заказа, хотя повторная отправка всё равно отклонится сервером.
+  ratingSubmitted=order.rating!=null;
   currentFulfillment=order.fulfillment_type==='pickup'?'pickup':'delivery';
   document.getElementById('st-num').textContent=order.public_code;
   if(order.estimated_ready_minutes)curEstimatedMinutes=order.estimated_ready_minutes;

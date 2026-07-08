@@ -88,7 +88,7 @@ router.get('/restaurants/new', (req, res) => {
       <label>Часы работы</label><input name="hours" placeholder="10:00–23:00">
       <label>Телефон (виден клиенту после оформления заказа)</label><input name="phone" placeholder="+7 928 000-00-00">
       <div class="row">
-        <div><label>Доставка, ₽</label><input name="delivery_price" type="number" value="150"></div>
+        <div><label>Доставка, ₽ (справочно для клиента, в онлайн-оплату не входит)</label><input name="delivery_price" type="number" value="150"></div>
         <div><label>Мин. заказ, ₽</label><input name="min_order" type="number" value="500"></div>
       </div>
       <label>Время готовки по умолчанию, мин (бот предложит его и ±10/+15 на выбор)</label><input name="default_cook_minutes" type="number" value="40">
@@ -126,7 +126,7 @@ router.get('/restaurants/:id/edit', (req, res) => {
       <label>Часы работы</label><input name="hours" value="${esc(r.hours)}">
       <label>Телефон (виден клиенту после оформления заказа)</label><input name="phone" value="${esc(r.phone)}" placeholder="+7 928 000-00-00">
       <div class="row">
-        <div><label>Доставка, ₽</label><input name="delivery_price" type="number" value="${r.delivery_price}"></div>
+        <div><label>Доставка, ₽ (справочно для клиента, в онлайн-оплату не входит)</label><input name="delivery_price" type="number" value="${r.delivery_price}"></div>
         <div><label>Мин. заказ, ₽</label><input name="min_order" type="number" value="${r.min_order}"></div>
       </div>
       <label>Время готовки по умолчанию, мин</label><input name="default_cook_minutes" type="number" value="${r.default_cook_minutes}">
@@ -224,6 +224,7 @@ router.post('/restaurants/:id/menu-items', (req, res) => {
 
 router.post('/menu-items/:id/toggle-available', (req, res) => {
   const item = db.prepare('SELECT * FROM menu_items WHERE id = ?').get(req.params.id);
+  if (!item) return res.status(404).send('Не найдено');
   db.prepare('UPDATE menu_items SET is_available = 1 - is_available WHERE id = ?').run(req.params.id);
   res.redirect(`/admin/restaurants/${item.restaurant_id}/edit`);
 });

@@ -3,7 +3,8 @@
 // без реальных ресторанов. Запуск: npm run seed (перезаписывает текущие данные).
 const db = require('./index');
 
-db.exec('DELETE FROM menu_items; DELETE FROM categories; DELETE FROM restaurants; DELETE FROM orders; DELETE FROM order_items; DELETE FROM payments;');
+// Порядок важен — сначала таблицы, ссылающиеся на другие (FK), потом те, на кого они ссылаются.
+db.exec('DELETE FROM payments; DELETE FROM order_items; DELETE FROM orders; DELETE FROM menu_items; DELETE FROM categories; DELETE FROM restaurants;');
 
 const insertRestaurant = db.prepare(`
   INSERT INTO restaurants (name, cuisine, photo_url, cities, address, hours, phone, delivery_price, min_order, default_cook_minutes, is_open, is_new, rating, rating_count)
