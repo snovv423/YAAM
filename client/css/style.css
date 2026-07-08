@@ -6,6 +6,14 @@
     --red:#FF7059;--green:#34D38C;
   }
   *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+  /* iOS Safari трактует два быстрых тапа по одному элементу как жест
+     double-tap-zoom, даже когда во viewport стоит user-scalable=no (начиная
+     с iOS 10 Safari это игнорирует). Правильная защита — touch-action на
+     самих интерактивных элементах: manipulation отключает double-tap-zoom
+     и 300мс-задержку клика именно на них, не трогая pinch-zoom страницы. */
+  button,.citychip,.vote-chip,.mtab,.thumb,.card,.dish,.fulfill-chip,.rating-star{
+    touch-action:manipulation;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;
+  }
   html{min-height:100%;background-color:#0A2417;background:
     radial-gradient(880px circle at 8% -2%,#1B5639,transparent 54%),
     radial-gradient(680px circle at 98% 8%,#13674A,transparent 50%),
