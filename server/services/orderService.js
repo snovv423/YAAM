@@ -293,6 +293,14 @@ function rateOrder(orderId, rating) {
   const order = getOrder(orderId);
   if (!order) throw new Error('заказ не найден');
   if (order.status !== RATING_ELIGIBLE_STATUS) throw new Error('оценить можно только доставленный заказ');
+  // Явная перепроверка оплаты по таблице payments — defense-in-depth поверх
+  // state machine (delivered и так недостижим без markPaid, см. ADVANCE_MAP),
+  // но перед подключением реальной ЮKassa лучше не полагаться только на это
+  // неявное свойство статусной модели, а проверять факт оплаты напрямую.
+  const paidPayment = db.prepare(
+    "SELECT id FROM payments WHERE order_id = ? AND status = 'succeeded' ORDER BY id DESC LIMIT 1"
+  ).get(orderId);
+  if (!paidPayment) throw new Error('заказ не оплачен');
   if (order.rating != null) throw new Error('вы уже оценили этот заказ');
   if (!Number.isInteger(rating) || rating < 1 || rating > 5) throw new Error('оценка должна быть 1..5');
 

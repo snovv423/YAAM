@@ -231,8 +231,8 @@ let ratingJustNow=false;
 function renderRatingStars(){
   const el=document.getElementById('st-rating-wrap');
   if(!el)return;
-  if(ratingSubmitted){el.innerHTML=`<p class="rating-thanks">${ratingJustNow?'Спасибо за оценку!':'Вы уже оценили этот заказ'}</p>`;return;}
-  el.innerHTML=`<div class="rating-wrap"><p>Оцените ресторан</p><div class="rating-stars" id="rating-stars">${[1,2,3,4,5].map(n=>`<button class="rating-star" data-n="${n}" onclick="submitRating(${n})">★</button>`).join('')}</div></div>`;
+  if(ratingSubmitted){el.innerHTML=`<p class="rating-thanks">${ratingJustNow?'Спасибо. Оценка учтена.':'Вы уже оценили этот заказ.'}</p>`;return;}
+  el.innerHTML=`<div class="rating-wrap"><p>Как вам заказ?</p><div class="rating-stars" id="rating-stars">${[1,2,3,4,5].map(n=>`<button class="rating-star" data-n="${n}" onclick="submitRating(${n})">★</button>`).join('')}</div></div>`;
 }
 async function submitRating(n){
   document.querySelectorAll('#rating-stars .rating-star').forEach(b=>b.classList.toggle('on',Number(b.dataset.n)<=n));
