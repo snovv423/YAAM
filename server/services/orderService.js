@@ -90,16 +90,24 @@ async function createOrder({ restaurantId, city, customerName, customerPhone, ad
     }
   }
 
-  // Клиент присылает name/price вместе с корзиной для удобства — но это его
-  // собственные данные, а не источник истины. Для блюд с известным menuItemId
-  // берём актуальную цену и стоп-лист из БД, а не то, что прислал браузер
-  // (иначе можно было бы отредактировать сумму в devtools перед оплатой).
+  // Клиент присылает name/price/menuItemId вместе с корзиной, но это его
+  // собственные данные, а не источник истины — их нельзя доверять напрямую.
+  // menuItemId обязателен для КАЖДОЙ позиции: у нас нет ни одного легитимного
+  // сценария заказа без него (UI всегда знает id блюда из меню, которое само
+  // получено с бэкенда). Раньше отсутствие menuItemId просто пропускало
+  // проверку и позиция уходила в заказ с ценой/названием как есть от клиента —
+  // прямой вызов API в обход браузера мог занизить сумму до чего угодно.
   const trustedItems = items.map((i) => {
-    if (!i.menuItemId) return i;
-    const real = db.prepare('SELECT * FROM menu_items WHERE id = ? AND restaurant_id = ?').get(i.menuItemId, restaurantId);
-    if (!real) throw new Error(`блюдо не найдено: ${i.name}`);
+    const menuItemId = Number(i.menuItemId);
+    if (!Number.isInteger(menuItemId) || menuItemId <= 0) {
+      throw new Error('в заказе есть позиция без корректного блюда из меню');
+    }
+    const real = db.prepare('SELECT * FROM menu_items WHERE id = ? AND restaurant_id = ?').get(menuItemId, restaurantId);
+    if (!real) throw new Error(`блюдо не найдено: ${i.name || menuItemId}`);
     if (!real.is_available) throw new Error(`блюдо «${real.name}» сейчас в стоп-листе`);
-    return { ...i, name: real.name, price: real.price };
+    const qty = Number(i.qty);
+    if (!Number.isInteger(qty) || qty <= 0) throw new Error(`некорректное количество для «${real.name}»`);
+    return { menuItemId, name: real.name, price: real.price, qty };
   });
 
   const itemsTotal = trustedItems.reduce((sum, i) => sum + i.price * i.qty, 0);
@@ -138,7 +146,7 @@ async function createOrder({ restaurantId, city, customerName, customerPhone, ad
     const newId = info.lastInsertRowid;
     db.prepare('UPDATE orders SET public_code = ? WHERE id = ?').run(formatPublicCode(newId), newId);
     for (const it of trustedItems) {
-      insertItem.run(newId, it.menuItemId || null, it.name, it.price, it.qty);
+      insertItem.run(newId, it.menuItemId, it.name, it.price, it.qty);
     }
     // Резервируем строку платежа СИНХРОННО, в той же транзакции, что и заказ —
     // а не только после ответа провайдера. Иначе окно между "заказ создан" и

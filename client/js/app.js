@@ -803,7 +803,16 @@ function nextStatus(){
   if(statusStep<stepSet().steps.length-1){statusStep++;renderStatus();saveOrderState();}
 }
 
+// Реальный номер заказа на экране отказа/ошибки — раньше тут был захардкожен
+// статичный "YAAM-00001", который никогда не обновлялся и показывался на
+// любой реальной ошибке. Показываем код, только если он реально есть.
+function setRejOrderCode(code){
+  const wrap=document.getElementById('rej-order-id-wrap');
+  if(code){document.getElementById('rej-order-code').textContent=code;wrap.style.display='block';}
+  else{wrap.style.display='none';}
+}
 function openRejected(reason){
+  const orderCodeForDisplay=currentOrderCode; // захватываем до очистки ниже
   clearInterval(preTimer);clearTimeout(preAutoTimer);stopOrderPolling();
   showStatusSpinner(false);
   showOrderDot(false);
@@ -812,6 +821,7 @@ function openRejected(reason){
   // состояние без пути назад, поэтому не держим его "активным": иначе refresh
   // на этом экране заново находил бы его и не давал вернуться к обычному меню.
   currentOrderCode=null;currentProviderPaymentId=null;saveOrderState();
+  setRejOrderCode(orderCodeForDisplay);
   document.getElementById('rej-explain').style.display='';
   document.getElementById('rej-refund-line').style.display='';
   const btn=document.getElementById('rej-action-btn');
@@ -828,6 +838,7 @@ function openRejected(reason){
 // в отличие от отказа ресторана деньги тут не возвращаются, их и не списывали.
 function openPaymentFailed(){
   stopOrderPolling();showStatusSpinner(false);showOrderDot(false);showRestaurantPhone(null);
+  setRejOrderCode(currentOrderCode); // не очищаем currentOrderCode здесь — payment_failed можно повторить
   document.getElementById('rej-title').textContent='Оплата не прошла';
   document.getElementById('rej-explain').textContent='Банк отклонил платёж или соединение прервалось — деньги не списаны.';
   document.getElementById('rej-refund-line').style.display='none';
@@ -897,9 +908,11 @@ function resumeExistingPayment(){
 // Заказ пропал с бэкенда (устаревшая ссылка, БД пересоздана и т.п.) — явно
 // объясняем и даём вернуться, вместо того чтобы вечно опрашивать 404 молча.
 function openOrderNotFound(){
+  const orderCodeForDisplay=currentOrderCode; // захватываем до очистки ниже
   stopOrderPolling();
   showStatusSpinner(false);showOrderDot(false);showRestaurantPhone(null);
   currentOrderCode=null;currentProviderPaymentId=null;saveOrderState();
+  setRejOrderCode(orderCodeForDisplay);
   document.getElementById('rej-title').textContent='Не удалось найти заказ';
   document.getElementById('rej-explain').textContent='Возможно, он отменён или устарел. Если это ошибка — напишите в поддержку.';
   document.getElementById('rej-refund-line').style.display='none';
@@ -971,6 +984,18 @@ function startOrderPolling(){
   pollOrderOnce();
   orderPollTimer=setInterval(pollOrderOnce,POLL_INTERVAL_MS);
 }
+// Возврат из фона/bfcache (свернули браузер, переключили вкладку, iOS
+// заморозил и разморозил страницу) — статус мог устареть за это время сильнее,
+// чем за один обычный интервал поллинга (мобильный Safari троттлит таймеры
+// неактивных вкладок). Форсируем один немедленный опрос, не трогая сам
+// интервал/экран — pollOrderOnce() лишь безопасно перерисовывает то, что
+// реально пришло с сервера. Гейт на orderPollTimer: если поллинг уже не идёт
+// (заказ доставлен/отменён/его нет вовсе), лишний сетевой запрос не нужен.
+function refreshActiveOrderIfVisible(){
+  if(USE_API&&currentOrderCode&&orderPollTimer)pollOrderOnce();
+}
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshActiveOrderIfVisible();});
+window.addEventListener('pageshow',(e)=>{if(e.persisted)refreshActiveOrderIfVisible();});
 
 function cur(id){return document.getElementById(id).classList.contains('active');}
 function go(id){document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));document.getElementById(id).classList.add('active');document.querySelector('.dish-add').style.display=(id==='dish')?'block':'none';if(id!=='status'&&id!=='rejected')document.getElementById('statusbg').style.display='none';window.scrollTo(0,0);updateBar();if(id==='home'&&introFadeHandler)introFadeHandler();try{if(id!=='home')history.pushState({screen:id},'');else history.replaceState({screen:'home'},'');}catch(e){}}
