@@ -433,6 +433,9 @@ function restoreDemoOrder(saved){
   fulfillmentType=currentFulfillment;
   demoStage=saved.demoStage||'status';
   if(demoStage==='qr'){
+    // Оплата ещё не подтверждена (демо-эквивалент pending_payment) — точка
+    // активного заказа означает только "оплачен и в работе", здесь рано.
+    showOrderDot(false);
     const{sum}=totals();
     document.getElementById('qr-amt').textContent=sum+' ₽';
     document.getElementById('cartbar').style.display='none';
@@ -481,15 +484,21 @@ async function tryRestoreSession(){
     }
     if(!rest)return false;
     if(savedCart.city)selectedCity=savedCart.city;
-    curRest=rest; // выставляем заранее — doOpenRest увидит "тот же ресторан" и не сотрёт корзину
+    // Корзина восстанавливается в память (и как нижняя панель "продолжить
+    // заказ" на главной), но экран ресторана НЕ открывается автоматически —
+    // ручной вход на yaam.su без активного заказа всегда ведёт на главную.
+    // curRest выставляем заранее без навигации: клик по нижней панели
+    // (openCartBar) или обычный тап по карточке этого же ресторана попадут
+    // в "тот же ресторан" (см. doOpenRest/openRest) и не сотрут корзину.
+    curRest=rest;
     cart=savedCart.cart||{};
-    await doOpenRest(rest.id);
-    // Черновик оформления — поля пока не видны (мы на экране меню, не корзины),
+    // Черновик оформления — поля пока не видны (мы на главной, не в корзине),
     // но openCart() их не тронет: она только дозаполняет пустые поля (см. её код).
     if(savedCart.fulfillmentType)fulfillmentType=savedCart.fulfillmentType;
     if(savedCart.address)document.getElementById('c-addr').value=savedCart.address;
     if(savedCart.phone)document.getElementById('c-phone').value=savedCart.phone;
     if(savedCart.comment)document.getElementById('c-comment').value=savedCart.comment;
+    updateBar();
     return true;
   }
   return false;
@@ -541,7 +550,15 @@ function plural(n,a,b,c){n=Math.abs(n)%100;const n1=n%10;if(n>10&&n<20)return c;
 // Нижняя панель корзины не должна звать оформить ЕЩЁ заказ, пока есть
 // незавершённый активный — иначе это выглядит как приглашение создать дубль.
 function updateBar(){const{sum,cnt}=totals();const bar=document.getElementById('cartbar');
-  if(cnt>0&&cur('menu')&&!currentOrderCode){bar.style.display='block';document.getElementById('cb-count').textContent=cnt+' '+plural(cnt,'блюдо','блюда','блюд');document.getElementById('cb-sum').textContent=sum+' ₽';}else bar.style.display='none';}
+  if(cnt>0&&(cur('menu')||cur('home'))&&!currentOrderCode){bar.style.display='block';document.getElementById('cb-count').textContent=cnt+' '+plural(cnt,'блюдо','блюда','блюд');document.getElementById('cb-sum').textContent=sum+' ₽';}else bar.style.display='none';}
+// Нижняя панель — единственное место, откуда восстановленная (но ещё не
+// открытая) корзина превращается в открытый экран ресторана. На экране меню
+// просто открывает мини-корзину как раньше; на главной сперва открывает
+// ресторан этой корзины (doOpenRest увидит "тот же ресторан" и не сотрёт её).
+async function openCartBar(){
+  if(!cur('menu')&&curRest)await doOpenRest(curRest.id);
+  openSheet();
+}
 // Строки заказа "N × Блюдо — сумма" — используются в корзине и на двух экранах статуса.
 function orderItemsHTML(){
   return Object.values(cart).map(c=>`<div class="sumrow"><span>${c.q} × ${c.n}</span><span>${c.p*c.q} ₽</span></div>`).join('');
@@ -689,6 +706,10 @@ async function openQR(){
       demoStage='qr';
       saveOrderState();
     }
+    // Точка активного заказа означает "оплачен и в работе" — заказ только что
+    // создан и ещё не оплачен (pending_payment/QR), поэтому здесь точка не
+    // включается; см. openStatus()/pollOrderOnce() — включается только после
+    // подтверждённой оплаты.
     document.getElementById('qr-amt').textContent=sum+' ₽';
     document.getElementById('cartbar').style.display='none';
     drawQR();startQRTimer();go('qr');
@@ -750,8 +771,12 @@ function startResponseTimer(){
 }
 // Общий пролог обоих режимов статус-экрана (демо-шаги и реальный поллинг),
 // расходятся только после него — демо крутит статусы кнопкой, реальный ждёт сервер.
+// Точку активного заказа здесь НЕ включаем: initStatusScreen вызывается и из
+// startOrderPolling() при restore на refresh, когда реальный статус заказа
+// (может оказаться ещё awaiting_payment) неизвестен до ответа сервера — см.
+// pollOrderOnce(), которая включает/выключает точку по факту оплаты.
 function initStatusScreen(){
-  statusStep=0;inPreStatus=true;curEstimatedMinutes=null;ratingSubmitted=false;ratingJustNow=false;setOrderTime();showOrderDot(true);
+  statusStep=0;inPreStatus=true;curEstimatedMinutes=null;ratingSubmitted=false;ratingJustNow=false;setOrderTime();
   document.getElementById('st-items').innerHTML=orderItemsHTML();
   document.getElementById('statusbg').style.display='block';
   showStatusSpinner(true);
@@ -760,6 +785,7 @@ function openStatus(){
   currentFulfillment=fulfillmentType;
   demoStage='status';saveOrderState(); // демо "оплачен" — дальше опрашивать нечего, но состояние переживает refresh
   initStatusScreen();
+  showOrderDot(true); // демо-оплата уже подтверждена (мы прошли QR) — заказ реально в работе
   showRestaurantPhone(curRest.phone);
   go('status');
   clearTimeout(preAutoTimer);
@@ -901,8 +927,10 @@ async function pollOrderOnce(){
   document.getElementById('st-pending-pay-wrap').style.display='none';
 
   if(order.status==='awaiting_payment'){
+    showOrderDot(false); // ещё не оплачен — точка "оплачен и в работе" здесь не показывается
     renderAwaitingPayment(order);
   }else if(order.status==='awaiting_restaurant'){
+    showOrderDot(true); // оплата подтверждена, заказ реально пошёл в работу
     showStatusSpinner(false);
     document.getElementById('st-progress').style.display='none';
     document.getElementById('st-state').textContent='Заказ отправлен, ждём ответа ресторана';
@@ -922,6 +950,7 @@ async function pollOrderOnce(){
     document.getElementById('st-next').style.display='none'; // статус двигает ресторан по-настоящему, не демо-кнопка
     document.getElementById('st-demowrap').style.display='none';
     document.getElementById('st-cancel-wrap').style.display='none';
+    showOrderDot(true); // accepted/preparing/courier — renderStatus сам выключит на delivered
     renderStatus();
     if(order.status==='delivered')stopOrderPolling();
   }else if(order.status==='declined'){
@@ -945,7 +974,7 @@ function startOrderPolling(){
 
 function cur(id){return document.getElementById(id).classList.contains('active');}
 function go(id){document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));document.getElementById(id).classList.add('active');document.querySelector('.dish-add').style.display=(id==='dish')?'block':'none';if(id!=='status'&&id!=='rejected')document.getElementById('statusbg').style.display='none';window.scrollTo(0,0);updateBar();if(id==='home'&&introFadeHandler)introFadeHandler();try{if(id!=='home')history.pushState({screen:id},'');else history.replaceState({screen:'home'},'');}catch(e){}}
-function resetAll(){clearInterval(preTimer);clearTimeout(preAutoTimer);stopOrderPolling();showRestaurantPhone(null);cart={};curRest=null;currentOrderCode=null;currentProviderPaymentId=null;demoStage='qr';saveCartState();saveOrderState();document.getElementById('statusbg').style.display='none';go('home');renderList();}
+function resetAll(){clearInterval(preTimer);clearTimeout(preAutoTimer);stopOrderPolling();showRestaurantPhone(null);showOrderDot(false);cart={};curRest=null;currentOrderCode=null;currentProviderPaymentId=null;demoStage='qr';saveCartState();saveOrderState();document.getElementById('statusbg').style.display='none';go('home');renderList();}
 // Своё окно подтверждения (замена заблокированного confirm)
 function yaamConfirm(text,onYes){
   const ov=document.getElementById('confirm-overlay');
