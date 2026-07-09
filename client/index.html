@@ -151,6 +151,16 @@
         </div>
         <div id="st-demowrap"><button class="demolink" onclick="openRejected()">Демо: а если ресторан отклонит →</button></div>
         <div id="st-cancel-wrap" style="display:none"><button class="demolink" onclick="cancelOrderFlow()">Отменить заказ</button></div>
+        <!-- Заказ создан, но оплата ещё не завершена (payment pending) — например,
+             пользователь вернулся назад с экрана QR, обновил страницу или закрыл
+             вкладку. Отдельное явное состояние вместо пустого/неопределённого экрана. -->
+        <div id="st-pending-pay-wrap" style="display:none">
+          <button class="pay" onclick="resumeExistingPayment()">Вернуться к оплате</button>
+          <div class="center-wrap">
+            <button class="ghost" onclick="cancelOrderFlow()">Отменить заказ</button>
+            <a class="ghost" href="https://t.me/yaam_help" target="_blank" rel="noopener">Написать в поддержку</a>
+          </div>
+        </div>
       </div>
     </div>
   </div>

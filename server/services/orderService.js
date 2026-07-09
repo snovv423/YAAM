@@ -21,6 +21,20 @@ function formatPublicCode(id) {
   return `YAAM-${String(id).padStart(5, '0')}`;
 }
 
+// Короткое ожидание provider_payment_id у платежа, который параллельный
+// запрос уже зарезервировал, но ещё не дождался ответа провайдера (см.
+// createOrder). 20мс×15 = максимум 300мс — с mock-провайдером (и в норме с
+// реальным тоже) ответ приходит на порядки быстрее, это подстраховка на
+// самый край гонки, а не обычный путь выполнения.
+async function waitForProviderPaymentId(paymentRowId) {
+  for (let i = 0; i < 15; i += 1) {
+    const row = db.prepare('SELECT provider_payment_id FROM payments WHERE id = ?').get(paymentRowId);
+    if (row && row.provider_payment_id) return row.provider_payment_id;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return null;
+}
+
 function getOrder(idOrCode) {
   const row = Number.isInteger(idOrCode)
     ? db.prepare(`
@@ -43,6 +57,38 @@ async function createOrder({ restaurantId, city, customerName, customerPhone, ad
   const restaurant = db.prepare('SELECT * FROM restaurants WHERE id = ?').get(restaurantId);
   if (!restaurant) throw new Error('ресторан не найден');
   if (!restaurant.is_open) throw new Error('ресторан сейчас закрыт — заказ невозможен');
+
+  // Защита от дублей на бэкенде (в дополнение к фронтенду): если у этого
+  // телефона уже есть свой неоплаченный заказ в этом ресторане — не создаём
+  // второй (двойной клик, кнопка "назад" и повторное "Оплатить", повтор
+  // запроса медленной сетью), а возвращаем существующий заказ и его же
+  // платёж, ничего заново не создавая. Нет собственной аутентификации/сессий,
+  // поэтому телефон+ресторан+статус — практичный, минимально достаточный ключ.
+  if (customerPhone) {
+    const existingOrder = db.prepare(`
+      SELECT * FROM orders WHERE restaurant_id = ? AND customer_phone = ? AND status = 'awaiting_payment'
+      ORDER BY id DESC LIMIT 1
+    `).get(restaurantId, customerPhone);
+    if (existingOrder) {
+      const existingPayment = db.prepare(`
+        SELECT * FROM payments WHERE order_id = ? AND status = 'pending' ORDER BY id DESC LIMIT 1
+      `).get(existingOrder.id);
+      if (existingPayment) {
+        // provider_payment_id может на короткое время быть ещё пуст — см.
+        // комментарий у "резервируем платёж" ниже: пока первый (настоящий)
+        // запрос ждёт ответ провайдера, второй уже видит строку платежа, но
+        // не сам id. Ждём совсем недолго вместо того, чтобы плодить второй заказ.
+        const providerPaymentId = existingPayment.provider_payment_id
+          || await waitForProviderPaymentId(existingPayment.id);
+        if (providerPaymentId) {
+          return {
+            order: getOrder(existingOrder.id),
+            payment: { providerPaymentId },
+          };
+        }
+      }
+    }
+  }
 
   // Клиент присылает name/price вместе с корзиной для удобства — но это его
   // собственные данные, а не источник истины. Для блюд с известным menuItemId
@@ -71,7 +117,7 @@ async function createOrder({ restaurantId, city, customerName, customerPhone, ad
     INSERT INTO order_items (order_id, menu_item_id, name, price, qty) VALUES (?, ?, ?, ?, ?)
   `);
 
-  const orderId = db.transaction(() => {
+  const { orderId, paymentRowId } = db.transaction(() => {
     // public_code зависит от id, который SQLite присвоит только при вставке —
     // сначала пишем временный уникальный плейсхолдер (чтобы пройти NOT NULL
     // UNIQUE), затем в той же транзакции сразу заменяем его на настоящий код.
@@ -94,7 +140,16 @@ async function createOrder({ restaurantId, city, customerName, customerPhone, ad
     for (const it of trustedItems) {
       insertItem.run(newId, it.menuItemId || null, it.name, it.price, it.qty);
     }
-    return newId;
+    // Резервируем строку платежа СИНХРОННО, в той же транзакции, что и заказ —
+    // а не только после ответа провайдера. Иначе окно между "заказ создан" и
+    // "платёж создан" (await ниже) — это ровно та щель, где параллельный
+    // повторный запрос (двойной клик с двух вкладок, ретрай сети) успевает
+    // не увидеть платёж дедуп-проверкой выше и создать свой отдельный заказ.
+    const payInfo = db.prepare(`
+      INSERT INTO payments (order_id, provider, provider_payment_id, amount, status)
+      VALUES (?, ?, NULL, ?, 'pending')
+    `).run(newId, payments.providerName, itemsTotal);
+    return { orderId: newId, paymentRowId: payInfo.lastInsertRowid };
   })();
 
   const order = getOrder(orderId);
@@ -103,10 +158,7 @@ async function createOrder({ restaurantId, city, customerName, customerPhone, ad
     amount: itemsTotal,
     description: `Заказ ${order.public_code}`,
   });
-  db.prepare(`
-    INSERT INTO payments (order_id, provider, provider_payment_id, amount, status)
-    VALUES (?, ?, ?, ?, 'pending')
-  `).run(orderId, payments.providerName, payment.providerPaymentId, itemsTotal);
+  db.prepare('UPDATE payments SET provider_payment_id = ? WHERE id = ?').run(payment.providerPaymentId, paymentRowId);
 
   return { order, payment };
 }

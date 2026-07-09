@@ -364,10 +364,19 @@ function dec(k){cart[k].q--;if(cart[k].q<=0)delete cart[k];refreshAll(k);}
 function refreshAll(k){document.querySelectorAll('[data-ctrl-key="'+k+'"]').forEach(el=>{const c=cart[k];el.innerHTML=(c&&c.q>0)?qtyHtml(k,c.q):`<button class="add" onclick="addItem('${k}',event)">+</button>`;});updateBar();saveCartState();}
 
 // Персист корзины — переживает обновление/закрытие вкладки (см. tryRestoreSession).
+// Заодно сохраняем черновик оформления (способ получения/адрес/телефон/
+// комментарий) — если ещё не дошли до оплаты, эти поля не должны стираться
+// при случайном refresh/закрытии вкладки.
 function saveCartState(){
   try{
     if(curRest&&Object.keys(cart).length){
-      localStorage.setItem(CART_STORAGE_KEY,JSON.stringify({restId:curRest.id,city:selectedCity,cart}));
+      localStorage.setItem(CART_STORAGE_KEY,JSON.stringify({
+        restId:curRest.id,city:selectedCity,cart,
+        fulfillmentType,
+        address:document.getElementById('c-addr')?.value||'',
+        phone:document.getElementById('c-phone')?.value||'',
+        comment:document.getElementById('c-comment')?.value||'',
+      }));
     }else{
       localStorage.removeItem(CART_STORAGE_KEY);
     }
@@ -413,6 +422,12 @@ async function tryRestoreSession(){
     curRest=rest; // выставляем заранее — doOpenRest увидит "тот же ресторан" и не сотрёт корзину
     cart=savedCart.cart||{};
     await doOpenRest(rest.id);
+    // Черновик оформления — поля пока не видны (мы на экране меню, не корзины),
+    // но openCart() их не тронет: она только дозаполняет пустые поля (см. её код).
+    if(savedCart.fulfillmentType)fulfillmentType=savedCart.fulfillmentType;
+    if(savedCart.address)document.getElementById('c-addr').value=savedCart.address;
+    if(savedCart.phone)document.getElementById('c-phone').value=savedCart.phone;
+    if(savedCart.comment)document.getElementById('c-comment').value=savedCart.comment;
     return true;
   }
   return false;
@@ -467,9 +482,10 @@ function updateBar(){const{sum,cnt}=totals();const bar=document.getElementById('
 function orderItemsHTML(){
   return Object.values(cart).map(c=>`<div class="sumrow"><span>${c.q} × ${c.n}</span><span>${c.p*c.q} ₽</span></div>`).join('');
 }
-// Доставка/самовывоз — выбор клиента при оформлении. По умолчанию всегда
-// доставка (см. setFulfillment), сбрасывается при каждом новом открытии
-// checkout, чтобы не тащить выбор из прошлого заказа в другом ресторане.
+// Доставка/самовывоз — выбор клиента при оформлении. По умолчанию доставка,
+// но дальше сохраняется между открытиями корзины (openCart передаёт текущее
+// значение, а не сбрасывает на 'delivery') и переживает refresh/закрытие
+// вкладки — см. saveCartState/tryRestoreSession.
 let fulfillmentType='delivery';
 function setFulfillment(type){
   fulfillmentType=type;
@@ -479,6 +495,7 @@ function setFulfillment(type){
   document.getElementById('field-addr').style.display=type==='delivery'?'':'none';
   document.getElementById('field-pickup-addr').style.display=type==='pickup'?'':'none';
   document.getElementById('delivery-note').style.display=type==='delivery'?'':'none';
+  saveCartState();
 }
 function openCart(){
   const{sum}=totals();
@@ -563,14 +580,25 @@ function buildOrderPayload(){
     total:sum
   };
 }
+// Заказ этого чекаута уже существует (например, вернулись назад на форму,
+// пока заказ ждёт оплаты) — не плодим второй, просто продолжаем существующий.
+function resumeExistingOrderFlow(){
+  if(USE_API)startOrderPolling();else go('status');
+}
+let checkoutInFlight=false;
 async function openQR(){
+  if(currentOrderCode)return resumeExistingOrderFlow();
+  if(checkoutInFlight)return; // защита от двойного тапа/клика по "Оплатить"
   if(!validateCheckout())return;
   if(!validateLegalConsent())return;
+  checkoutInFlight=true;
+  const payBtn=document.querySelector('#cart .pay');
+  const payBtnHTML=payBtn?payBtn.innerHTML:'';
+  if(payBtn){payBtn.disabled=true;payBtn.style.opacity='.6';payBtn.textContent='Оформляем заказ…';}
   const payload=buildOrderPayload();
   const{sum}=totals();
-
-  if(USE_API){
-    try{
+  try{
+    if(USE_API){
       const{order,payment}=await api.createOrder({
         restaurantId:curRest.id, city:selectedCity,
         customerName:payload.name, customerPhone:payload.phone,
@@ -580,15 +608,16 @@ async function openQR(){
       currentOrderCode=order.public_code;
       currentProviderPaymentId=payment.providerPaymentId;
       saveOrderState();
-    }catch(err){
-      showToast(err.message||'Не удалось оформить заказ');
-      return;
     }
+    document.getElementById('qr-amt').textContent=sum+' ₽';
+    document.getElementById('cartbar').style.display='none';
+    drawQR();startQRTimer();go('qr');
+  }catch(err){
+    showToast(err.message||'Не удалось оформить заказ');
+  }finally{
+    checkoutInFlight=false;
+    if(payBtn){payBtn.disabled=false;payBtn.style.opacity='';payBtn.innerHTML=payBtnHTML;}
   }
-
-  document.getElementById('qr-amt').textContent=sum+' ₽';
-  document.getElementById('cartbar').style.display='none';
-  drawQR();startQRTimer();go('qr');
 }
 function drawQR(){
   const box=document.getElementById('qrcode');const N=21;let html='';
@@ -722,10 +751,53 @@ function cancelOrderFlow(){
 
 // --- Поллинг реального статуса заказа (только в режиме API) ---
 let orderPollTimer=null;
+let lastKnownOrder=null; // нужен resumeExistingPayment() — сумма/код заказа без обращения к (возможно уже пустой после reload) корзине
 function stopOrderPolling(){clearInterval(orderPollTimer);orderPollTimer=null;}
+// Заказ создан, но оплата ещё не подтверждена — например, вернулись назад с
+// экрана QR, обновили страницу или закрыли вкладку и открыли снова. Отдельное
+// явное состояние вместо неопределённого экрана (раньше этот статус вообще
+// не обрабатывался ни одной веткой ниже).
+function renderAwaitingPayment(order){
+  showStatusSpinner(false);
+  document.getElementById('st-progress').style.display='none';
+  document.getElementById('st-state').textContent=`Заказ ${order.public_code} создан`;
+  document.getElementById('st-substate').textContent='Оплата пока не завершена.';
+  document.getElementById('st-substate').style.display='block';
+  const ic=document.getElementById('st-icon');ic.textContent='💳';ic.style.animation='none';
+  document.getElementById('st-next').style.display='none';
+  document.getElementById('st-demowrap').style.display='none';
+  document.getElementById('st-cancel-wrap').style.display='none';
+  document.getElementById('st-final').style.display='none';
+  document.getElementById('st-pending-pay-wrap').style.display='flex';
+}
+function resumeExistingPayment(){
+  stopOrderPolling();
+  const amt=lastKnownOrder?lastKnownOrder.items_total:totals().sum;
+  document.getElementById('qr-amt').textContent=amt+' ₽';
+  document.getElementById('cartbar').style.display='none';
+  drawQR();startQRTimer();go('qr');
+}
+// Заказ пропал с бэкенда (устаревшая ссылка, БД пересоздана и т.п.) — явно
+// объясняем и даём вернуться, вместо того чтобы вечно опрашивать 404 молча.
+function openOrderNotFound(){
+  stopOrderPolling();
+  showStatusSpinner(false);showOrderDot(false);showRestaurantPhone(null);
+  currentOrderCode=null;currentProviderPaymentId=null;saveOrderState();
+  document.getElementById('rej-title').textContent='Не удалось найти заказ';
+  document.getElementById('rej-explain').textContent='Возможно, он отменён или устарел. Если это ошибка — напишите в поддержку.';
+  document.getElementById('rej-refund-line').style.display='none';
+  const btn=document.getElementById('rej-action-btn');
+  btn.textContent='На главную';btn.onclick=resetAll;
+  document.getElementById('statusbg').style.display='none';
+  go('rejected');
+}
 async function pollOrderOnce(){
   let order;
-  try{order=await api.getOrder(currentOrderCode);}catch(err){return;} // сеть моргнула — попробуем на следующем тике
+  try{order=await api.getOrder(currentOrderCode);}catch(err){
+    if(err.status===404){openOrderNotFound();return;}
+    return; // сеть моргнула — попробуем на следующем тике
+  }
+  lastKnownOrder=order;
   // Источник истины для "уже оценено" — order.rating с бэкенда, а не локальный
   // флаг: после обновления страницы ratingSubmitted сбрасывается в false
   // (initStatusScreen), и без этой синхронизации звёзды показались бы снова
@@ -735,8 +807,11 @@ async function pollOrderOnce(){
   document.getElementById('st-num').textContent=order.public_code;
   if(order.estimated_ready_minutes)curEstimatedMinutes=order.estimated_ready_minutes;
   showRestaurantPhone(order.restaurant_phone);
+  document.getElementById('st-pending-pay-wrap').style.display='none';
 
-  if(order.status==='awaiting_restaurant'){
+  if(order.status==='awaiting_payment'){
+    renderAwaitingPayment(order);
+  }else if(order.status==='awaiting_restaurant'){
     showStatusSpinner(false);
     document.getElementById('st-progress').style.display='none';
     document.getElementById('st-state').textContent='Заказ отправлен, ждём ответа ресторана';
@@ -872,7 +947,14 @@ document.addEventListener('touchend',()=>{if(ptrActive){renderList();setTimeout(
 
 // History API
 window.addEventListener('popstate',e=>{try{
-  const s=(e.state&&e.state.screen)||'home';
+  let s=(e.state&&e.state.screen)||'home';
+  // Активный незавершённый заказ важнее истории браузера: "назад" не должен
+  // возвращать к пустой форме чекаута/корзине, из которой можно случайно
+  // создать дубль заказа (см. openQR/resumeExistingOrderFlow).
+  if(currentOrderCode&&s!=='status'&&s!=='rejected'){
+    s='status';
+    if(USE_API)pollOrderOnce();
+  }
   document.querySelectorAll('.screen').forEach(x=>x.classList.remove('active'));
   document.getElementById(s).classList.add('active');
   document.querySelector('.dish-add').style.display=(s==='dish')?'block':'none';
@@ -923,6 +1005,13 @@ function voteTouchEnd(){
   if(voteCurY<-55)closeVote();
   sh.style.transform='';
 }
+
+// Черновик оформления (адрес/телефон/комментарий) — сохраняем по мере ввода,
+// чтобы случайный refresh/закрытие вкладки до оплаты его не стирали.
+['c-addr','c-phone','c-comment'].forEach(id=>{
+  const el=document.getElementById(id);
+  if(el)el.addEventListener('input',saveCartState);
+});
 
 renderList();
 tryRestoreSession();

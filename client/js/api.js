@@ -13,7 +13,11 @@ async function apiRequest(path, options) {
     ...options,
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `Ошибка запроса: ${res.status}`);
+  if (!res.ok) {
+    const err = new Error(data.error || `Ошибка запроса: ${res.status}`);
+    err.status = res.status; // нужно отличать "заказ не найден" (404, не ретраить) от сетевого сбоя
+    throw err;
+  }
   return data;
 }
 
