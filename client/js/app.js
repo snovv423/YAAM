@@ -9,6 +9,19 @@ const TOAST_DURATION_MS=2600;
 const FLY_ANIM_MS=750;
 const CART_STORAGE_KEY='yaam_cart_state';
 const ORDER_STORAGE_KEY='yaam_active_order';
+const DEMO_SEQ_KEY='yaam_demo_order_seq';
+
+// Без бэкенда (USE_API=false, как сейчас на проде — сервер ещё не задеплоен)
+// номер заказа неоткуда взять от сервера, но активный заказ всё равно должен
+// переживать refresh/закрытие вкладки так же, как в реальном режиме — поэтому
+// у демо-режима есть свой локальный аналог: последовательный номер в
+// localStorage вместо БД, и demoStage вместо статуса с бэкенда.
+function nextDemoOrderCode(){
+  let seq=1;
+  try{seq=(parseInt(localStorage.getItem(DEMO_SEQ_KEY)||'0',10)||0)+1;localStorage.setItem(DEMO_SEQ_KEY,String(seq));}catch(e){}
+  return 'YAAM-'+String(seq).padStart(5,'0');
+}
+let demoStage='qr'; // 'qr' — создан, ждёт демо-оплаты; 'status' — оплачен, идут статусы
 
 // Приводим ответ бэкенда к той же форме, в которой всегда жили демо-данные
 // из data.js — это позволяет всем render-функциям ниже не знать, откуда
@@ -226,6 +239,7 @@ async function submitRating(n){
   try{
     if(USE_API&&currentOrderCode)await api.rateOrder(currentOrderCode,n);
     ratingSubmitted=true;ratingJustNow=true;
+    saveOrderState(); // демо: чтобы после refresh снова не показать форму оценки
     setTimeout(renderRatingStars,350); // короткая пауза, чтобы увидеть подсветку звёзд перед "спасибо"
   }catch(err){
     showToast(err.message||'Не удалось сохранить оценку');
@@ -385,7 +399,20 @@ function saveCartState(){
 function saveOrderState(){
   try{
     if(currentOrderCode){
-      localStorage.setItem(ORDER_STORAGE_KEY,JSON.stringify({orderCode:currentOrderCode,providerPaymentId:currentProviderPaymentId,restId:curRest?curRest.id:null}));
+      const state={orderCode:currentOrderCode,providerPaymentId:currentProviderPaymentId,restId:curRest?curRest.id:null};
+      if(!USE_API){
+        // Демо-режим сам себе бэкенд — сохраняем всё, что понадобится для
+        // восстановления экрана без единого сетевого запроса (см. restoreDemoOrder).
+        state.demo=true;
+        state.demoStage=demoStage;
+        state.statusStep=statusStep;
+        state.inPreStatus=inPreStatus;
+        state.currentFulfillment=currentFulfillment;
+        state.ratingSubmitted=ratingSubmitted; // ratingJustNow не сохраняем — верно только в рамках текущей загрузки страницы
+        state.curEstimatedMinutes=curEstimatedMinutes;
+        state.cartSnapshot=cart;
+      }
+      localStorage.setItem(ORDER_STORAGE_KEY,JSON.stringify(state));
     }else{
       localStorage.removeItem(ORDER_STORAGE_KEY);
     }
@@ -396,16 +423,51 @@ function saveOrderState(){
 // важнее корзины — если он есть, сразу возвращаемся на экран статуса и продолжаем
 // поллинг (актуально только в режиме реального бэкенда: у демо-статуса нет
 // серверного заказа, который имело бы смысл возобновлять).
+// Восстановление демо-заказа (без бэкенда) из localStorage — тот же приоритет,
+// что и у реального: экран заказа важнее корзины/ресторана. Не дёргает сеть,
+// просто напрямую ставит live-переменные из сохранённого снимка и рисует
+// тот же экран, на котором пользователь был до refresh/закрытия вкладки.
+function restoreDemoOrder(saved){
+  cart=saved.cartSnapshot||{};
+  currentFulfillment=saved.currentFulfillment||'delivery';
+  fulfillmentType=currentFulfillment;
+  demoStage=saved.demoStage||'status';
+  if(demoStage==='qr'){
+    const{sum}=totals();
+    document.getElementById('qr-amt').textContent=sum+' ₽';
+    document.getElementById('cartbar').style.display='none';
+    drawQR();startQRTimer();go('qr');
+    return;
+  }
+  statusStep=saved.statusStep||0;
+  inPreStatus=!!saved.inPreStatus;
+  ratingSubmitted=!!saved.ratingSubmitted;
+  ratingJustNow=false; // "только что" — только пока не было перезагрузки, см. ту же логику в pollOrderOnce
+  curEstimatedMinutes=saved.curEstimatedMinutes||null;
+  setOrderTime();showOrderDot(true);
+  document.getElementById('st-items').innerHTML=orderItemsHTML();
+  document.getElementById('st-num').textContent=currentOrderCode;
+  document.getElementById('statusbg').style.display='block';
+  showStatusSpinner(false);
+  showRestaurantPhone(curRest?curRest.phone:null);
+  document.getElementById('st-cancel-wrap').style.display=inPreStatus?'block':'none';
+  document.getElementById('st-demowrap').style.display=inPreStatus?'block':'none';
+  if(inPreStatus){renderWaitForRestaurant();}
+  else{document.getElementById('st-progress').style.display='flex';renderStatus();}
+  go('status');
+}
 async function tryRestoreSession(){
   let savedOrder=null;
   try{savedOrder=JSON.parse(localStorage.getItem(ORDER_STORAGE_KEY)||'null');}catch(e){}
-  if(USE_API&&savedOrder&&savedOrder.orderCode){
+  if(savedOrder&&savedOrder.orderCode){
     currentOrderCode=savedOrder.orderCode;
     currentProviderPaymentId=savedOrder.providerPaymentId||null;
     if(savedOrder.restId){
-      try{curRest=normalizeRestaurant(await api.getRestaurant(savedOrder.restId));}catch(e){}
+      if(USE_API){try{curRest=normalizeRestaurant(await api.getRestaurant(savedOrder.restId));}catch(e){}}
+      else{curRest=restaurants.find(r=>r.id===savedOrder.restId)||null;}
     }
-    startOrderPolling();
+    if(USE_API)startOrderPolling();
+    else if(savedOrder.demo)restoreDemoOrder(savedOrder);
     return true;
   }
   let savedCart=null;
@@ -476,8 +538,10 @@ function swapHero(id,i){const img=document.querySelector('#d-hero img');if(img)i
 
 function totals(){let sum=0,cnt=0;for(const k in cart){sum+=cart[k].p*cart[k].q;cnt+=cart[k].q;}return{sum,cnt};}
 function plural(n,a,b,c){n=Math.abs(n)%100;const n1=n%10;if(n>10&&n<20)return c;if(n1>1&&n1<5)return b;if(n1===1)return a;return c;}
+// Нижняя панель корзины не должна звать оформить ЕЩЁ заказ, пока есть
+// незавершённый активный — иначе это выглядит как приглашение создать дубль.
 function updateBar(){const{sum,cnt}=totals();const bar=document.getElementById('cartbar');
-  if(cnt>0&&cur('menu')){bar.style.display='block';document.getElementById('cb-count').textContent=cnt+' '+plural(cnt,'блюдо','блюда','блюд');document.getElementById('cb-sum').textContent=sum+' ₽';}else bar.style.display='none';}
+  if(cnt>0&&cur('menu')&&!currentOrderCode){bar.style.display='block';document.getElementById('cb-count').textContent=cnt+' '+plural(cnt,'блюдо','блюда','блюд');document.getElementById('cb-sum').textContent=sum+' ₽';}else bar.style.display='none';}
 // Строки заказа "N × Блюдо — сумма" — используются в корзине и на двух экранах статуса.
 function orderItemsHTML(){
   return Object.values(cart).map(c=>`<div class="sumrow"><span>${c.q} × ${c.n}</span><span>${c.p*c.q} ₽</span></div>`).join('');
@@ -581,9 +645,18 @@ function buildOrderPayload(){
   };
 }
 // Заказ этого чекаута уже существует (например, вернулись назад на форму,
-// пока заказ ждёт оплаты) — не плодим второй, просто продолжаем существующий.
+// пока заказ ждёт оплаты) — не плодим второй, просто продолжаем существующий,
+// с того же места (демо: QR, если ещё не "оплачен", иначе статус).
 function resumeExistingOrderFlow(){
-  if(USE_API)startOrderPolling();else go('status');
+  if(USE_API){startOrderPolling();return;}
+  if(demoStage==='qr'){
+    const{sum}=totals();
+    document.getElementById('qr-amt').textContent=sum+' ₽';
+    document.getElementById('cartbar').style.display='none';
+    drawQR();startQRTimer();go('qr');
+  }else{
+    go('status');
+  }
 }
 let checkoutInFlight=false;
 async function openQR(){
@@ -607,6 +680,13 @@ async function openQR(){
       });
       currentOrderCode=order.public_code;
       currentProviderPaymentId=payment.providerPaymentId;
+      saveOrderState();
+    }else{
+      // Демо-режим — своя "БД" в localStorage вместо реального бэкенда (см.
+      // nextDemoOrderCode/saveOrderState) — активный заказ должен переживать
+      // refresh/закрытие вкладки точно так же, как в реальном API-режиме.
+      currentOrderCode=nextDemoOrderCode();
+      demoStage='qr';
       saveOrderState();
     }
     document.getElementById('qr-amt').textContent=sum+' ₽';
@@ -678,6 +758,7 @@ function initStatusScreen(){
 }
 function openStatus(){
   currentFulfillment=fulfillmentType;
+  demoStage='status';saveOrderState(); // демо "оплачен" — дальше опрашивать нечего, но состояние переживает refresh
   initStatusScreen();
   showRestaurantPhone(curRest.phone);
   go('status');
@@ -690,9 +771,10 @@ function nextStatus(){
     inPreStatus=false;
     document.getElementById('st-progress').style.display='flex';
     renderStatus();
+    saveOrderState();
     return;
   }
-  if(statusStep<stepSet().steps.length-1){statusStep++;renderStatus();}
+  if(statusStep<stepSet().steps.length-1){statusStep++;renderStatus();saveOrderState();}
 }
 
 function openRejected(reason){
@@ -700,6 +782,10 @@ function openRejected(reason){
   showStatusSpinner(false);
   showOrderDot(false);
   showRestaurantPhone(null);
+  // Заказ окончен (отклонён рестораном/не ответил вовремя) — это терминальное
+  // состояние без пути назад, поэтому не держим его "активным": иначе refresh
+  // на этом экране заново находил бы его и не давал вернуться к обычному меню.
+  currentOrderCode=null;currentProviderPaymentId=null;saveOrderState();
   document.getElementById('rej-explain').style.display='';
   document.getElementById('rej-refund-line').style.display='';
   const btn=document.getElementById('rej-action-btn');
@@ -738,6 +824,11 @@ async function retryPaymentFlow(){
 }
 function cancelOrderFlow(){
   yaamConfirm('Отменить заказ? Деньги вернутся автоматически.',async()=>{
+    if(!USE_API){ // демо — нечего отменять на сервере, просто сбрасываем локально
+      showToast('Демо: заказ отменён, деньги вернутся автоматически');
+      resetAll();
+      return;
+    }
     try{
       await api.cancelOrder(currentOrderCode);
       stopOrderPolling();
@@ -854,7 +945,7 @@ function startOrderPolling(){
 
 function cur(id){return document.getElementById(id).classList.contains('active');}
 function go(id){document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));document.getElementById(id).classList.add('active');document.querySelector('.dish-add').style.display=(id==='dish')?'block':'none';if(id!=='status'&&id!=='rejected')document.getElementById('statusbg').style.display='none';window.scrollTo(0,0);updateBar();if(id==='home'&&introFadeHandler)introFadeHandler();try{if(id!=='home')history.pushState({screen:id},'');else history.replaceState({screen:'home'},'');}catch(e){}}
-function resetAll(){clearInterval(preTimer);clearTimeout(preAutoTimer);stopOrderPolling();showRestaurantPhone(null);cart={};curRest=null;currentOrderCode=null;currentProviderPaymentId=null;saveCartState();saveOrderState();document.getElementById('statusbg').style.display='none';go('home');renderList();}
+function resetAll(){clearInterval(preTimer);clearTimeout(preAutoTimer);stopOrderPolling();showRestaurantPhone(null);cart={};curRest=null;currentOrderCode=null;currentProviderPaymentId=null;demoStage='qr';saveCartState();saveOrderState();document.getElementById('statusbg').style.display='none';go('home');renderList();}
 // Своё окно подтверждения (замена заблокированного confirm)
 function yaamConfirm(text,onYes){
   const ov=document.getElementById('confirm-overlay');
@@ -950,10 +1041,20 @@ window.addEventListener('popstate',e=>{try{
   let s=(e.state&&e.state.screen)||'home';
   // Активный незавершённый заказ важнее истории браузера: "назад" не должен
   // возвращать к пустой форме чекаута/корзине, из которой можно случайно
-  // создать дубль заказа (см. openQR/resumeExistingOrderFlow).
-  if(currentOrderCode&&s!=='status'&&s!=='rejected'){
-    s='status';
-    if(USE_API)pollOrderOnce();
+  // создать дубль заказа (см. openQR/resumeExistingOrderFlow). Демо-заказ на
+  // стадии "qr" (ещё не "оплачен") ведёт на экран QR, а не статуса — там
+  // пока нечего показывать.
+  if(currentOrderCode&&s!=='rejected'){
+    const target=(!USE_API&&demoStage==='qr')?'qr':'status';
+    if(s!==target){
+      s=target;
+      if(USE_API)pollOrderOnce();
+      else if(target==='qr'){
+        const{sum}=totals();
+        document.getElementById('qr-amt').textContent=sum+' ₽';
+        document.getElementById('cartbar').style.display='none';
+      }
+    }
   }
   document.querySelectorAll('.screen').forEach(x=>x.classList.remove('active'));
   document.getElementById(s).classList.add('active');
