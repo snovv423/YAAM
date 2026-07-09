@@ -12,7 +12,7 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%230A2417'/%3E%3Ctext x='32' y='45' font-family='Georgia,serif' font-size='36' fill='%23FF9A2E' text-anchor='middle'%3EY%3C/text%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Cormorant+Garamond:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Cormorant+Garamond:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
@@ -129,7 +129,7 @@
 <!-- STATUS -->
 <div id="status" class="screen">
   <div class="stwrap">
-    <div class="stnum"><div class="lbl">Ваш заказ</div><div class="n" id="st-num">YAAM-1042</div><div class="order-time" id="st-time"></div></div>
+    <div class="stnum"><div class="lbl">Ваш заказ</div><div class="n order-code" id="st-num">YAAM-00001</div><div class="order-time" id="st-time"></div></div>
     <div class="st-spin" id="st-spin"></div>
     <div id="st-content">
       <div class="sticon" id="st-icon">🍽️</div>
@@ -164,7 +164,7 @@
     <p id="rej-explain">Так бывает в часы загрузки — кухня сейчас не берёт новые заказы.</p>
     <p id="rej-refund-line">Полная сумма, <b id="rej-sum">1 430 ₽</b>, уже отправлена обратно на вашу карту по СБП — она вернётся в ближайшее время.</p>
     <button class="pay rej-retry" id="rej-action-btn" onclick="resetAll()">Выбрать другой ресторан</button>
-    <p class="rej-order-id">Заказ YAAM-1042</p>
+    <p class="rej-order-id">Заказ <span class="order-code">YAAM-00001</span></p>
   </div>
 </div>
 

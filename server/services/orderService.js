@@ -14,9 +14,11 @@ const RATING_ELIGIBLE_STATUS = 'delivered';
 // Варианты «перерыва» ресторана — фиксированные пресеты, а не произвольный ввод.
 const PAUSE_PRESETS_MIN = { short: 33, medium: 3 * 60, long: 11 * 60 };
 
-function genPublicCode() {
-  const n = 1000 + Math.floor(Math.random() * 9000);
-  return `YAAM-${n}`;
+// Публичный номер заказа строится из внутреннего id (SQLite AUTOINCREMENT —
+// уникален, монотонно растёт, никогда не переиспользуется), а не из случайного
+// числа: YAAM-00001, YAAM-00002 ... минимум 5 цифр, дальше просто растёт вширь.
+function formatPublicCode(id) {
+  return `YAAM-${String(id).padStart(5, '0')}`;
 }
 
 function getOrder(idOrCode) {
@@ -70,8 +72,13 @@ async function createOrder({ restaurantId, city, customerName, customerPhone, ad
   `);
 
   const orderId = db.transaction(() => {
+    // public_code зависит от id, который SQLite присвоит только при вставке —
+    // сначала пишем временный уникальный плейсхолдер (чтобы пройти NOT NULL
+    // UNIQUE), затем в той же транзакции сразу заменяем его на настоящий код.
+    // Гонка исключена конструктивно: node:sqlite синхронный, вся эта функция
+    // выполняется одним блоком без интерливинга с другим createOrder().
     const info = insertOrder.run({
-      public_code: genPublicCode(),
+      public_code: `TMP-${process.hrtime.bigint()}`,
       restaurant_id: restaurantId,
       city,
       customer_name: customerName.trim(),
@@ -82,10 +89,12 @@ async function createOrder({ restaurantId, city, customerName, customerPhone, ad
       items_total: itemsTotal,
       commission_amount: commission,
     });
+    const newId = info.lastInsertRowid;
+    db.prepare('UPDATE orders SET public_code = ? WHERE id = ?').run(formatPublicCode(newId), newId);
     for (const it of trustedItems) {
-      insertItem.run(info.lastInsertRowid, it.menuItemId || null, it.name, it.price, it.qty);
+      insertItem.run(newId, it.menuItemId || null, it.name, it.price, it.qty);
     }
-    return info.lastInsertRowid;
+    return newId;
   })();
 
   const order = getOrder(orderId);

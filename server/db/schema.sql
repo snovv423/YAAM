@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS menu_items (
 
 CREATE TABLE IF NOT EXISTS orders (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  public_code TEXT NOT NULL UNIQUE,          -- "YAAM-1042", отдаём клиенту
+  public_code TEXT NOT NULL UNIQUE,          -- "YAAM-00001" (id с отступом минимум до 5 цифр), отдаём клиенту
   restaurant_id INTEGER NOT NULL REFERENCES restaurants(id),
   city TEXT NOT NULL,
   customer_name TEXT NOT NULL,

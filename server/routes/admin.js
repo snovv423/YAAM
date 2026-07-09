@@ -241,7 +241,7 @@ router.get('/orders', (req, res) => {
     <table>
       <tr><th>Код</th><th>Ресторан</th><th>Сумма</th><th>Комиссия</th><th>Тип</th><th>Статус</th><th>Создан</th></tr>
       ${orders.map((o) => `<tr>
-        <td>${esc(o.public_code)}</td><td>${esc(o.restaurant_name)}</td><td>${o.items_total} ₽</td><td>${o.commission_amount} ₽</td>
+        <td><span class="order-code">${esc(o.public_code)}</span></td><td>${esc(o.restaurant_name)}</td><td>${o.items_total} ₽</td><td>${o.commission_amount} ₽</td>
         <td>${o.fulfillment_type === 'pickup' ? 'Самовывоз' : 'Доставка'}</td>
         <td>${esc(o.status)}</td><td>${esc(o.created_at)}</td>
       </tr>`).join('') || '<tr><td colspan="7" style="color:var(--txt2)">Заказов пока нет</td></tr>'}
@@ -272,7 +272,7 @@ router.get('/ratings', (req, res) => {
       <h2 style="font-size:15px;margin-top:0">Последние оценённые заказы</h2>
       <table>
         <tr><th>Заказ</th><th>Ресторан</th><th>Оценка</th><th>Дата</th></tr>
-        ${rated.map((o) => `<tr><td>${esc(o.public_code)}</td><td>${esc(o.restaurant_name)}</td><td>★ ${o.rating}</td><td>${esc(o.created_at)}</td></tr>`).join('') || '<tr><td colspan="4" style="color:var(--txt2)">Оценок пока нет</td></tr>'}
+        ${rated.map((o) => `<tr><td><span class="order-code">${esc(o.public_code)}</span></td><td>${esc(o.restaurant_name)}</td><td>★ ${o.rating}</td><td>${esc(o.created_at)}</td></tr>`).join('') || '<tr><td colspan="4" style="color:var(--txt2)">Оценок пока нет</td></tr>'}
       </table>
     </div>
   `));

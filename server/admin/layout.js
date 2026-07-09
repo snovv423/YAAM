@@ -26,6 +26,7 @@ function layout(title, body) {
   button.ghost{background:rgba(255,255,255,.08);color:var(--txt)}
   button.danger{background:#c0303c;color:#fff}
   a.btn{display:inline-block;background:var(--amber);color:#3a1c00;padding:8px 14px;border-radius:8px;text-decoration:none;font-weight:700;font-size:13px}
+  .order-code{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;font-weight:600;letter-spacing:.04em}
   .badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700}
   .badge.open{background:rgba(52,211,140,.18);color:#34D38C}
   .badge.closed{background:rgba(255,112,89,.18);color:#FF7059}
