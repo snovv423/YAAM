@@ -17,6 +17,12 @@ class MockProvider extends PaymentProviderInterface {
     return {
       providerPaymentId,
       qrPayload: `yaam-demo://pay/${providerPaymentId}/${amount}`,
+      // Явно null, а не просто отсутствует — mock не умеет открывать банк
+      // напрямую, у него нет настоящей платёжной страницы. Клиент (см.
+      // currentPaymentUrl/payFromThisPhone в client/js/app.js) по этому null
+      // заставляет кнопку "Оплата с этого устройства" выполнять demo-оплату,
+      // а не фейковую ссылку, которая выглядела бы как реальная оплата.
+      paymentUrl: null,
     };
   }
 

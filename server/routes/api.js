@@ -5,26 +5,63 @@ const paymentService = require('../services/paymentService');
 
 const router = express.Router();
 
+// "Хит" — не ручной флаг, а автоматический расчёт по реальным продажам:
+// топ-3 блюда ресторана по сумме qty за оплаченные и успешно завершённые
+// заказы (отменённые/отклонённые/просроченные/неудавшаяся оплата не считаются),
+// с порогом минимум 8 проданных порций. Если блюдо перестаёт проходить условия —
+// бейдж на следующий же запрос пропадает сам, отдельного "снятия" не нужно.
+const HIT_TOP_N = 3;
+const HIT_MIN_QTY = 8;
+function hitMenuItemIds(restaurantId) {
+  const rows = db.prepare(`
+    SELECT oi.menu_item_id AS id, SUM(oi.qty) AS sold
+    FROM order_items oi
+    JOIN orders o ON o.id = oi.order_id
+    WHERE o.restaurant_id = ?
+      AND oi.menu_item_id IS NOT NULL
+      AND o.status NOT IN ('cancelled','declined','timed_out','payment_failed','awaiting_payment')
+      AND EXISTS (SELECT 1 FROM payments p WHERE p.order_id = o.id AND p.status = 'succeeded')
+    GROUP BY oi.menu_item_id
+    HAVING sold >= ?
+    ORDER BY sold DESC
+    LIMIT ?
+  `).all(restaurantId, HIT_MIN_QTY, HIT_TOP_N);
+  return new Set(rows.map((r) => r.id));
+}
+
 function restaurantWithMenu(restaurant) {
   const categories = db.prepare('SELECT * FROM categories WHERE restaurant_id = ? ORDER BY sort_order').all(restaurant.id);
   const items = db.prepare('SELECT * FROM menu_items WHERE restaurant_id = ? ORDER BY sort_order').all(restaurant.id);
+  const hits = hitMenuItemIds(restaurant.id);
   return {
     ...restaurant,
     cities: JSON.parse(restaurant.cities || '[]'),
     menu: categories.map((c) => ({
       id: c.id,
       name: c.name,
-      items: items.filter((i) => i.category_id === c.id),
+      items: items.filter((i) => i.category_id === c.id).map((i) => ({ ...i, is_popular: hits.has(i.id) ? 1 : 0 })),
     })),
   };
 }
+
+// orders_count — источник истины для "уже заказали N раз" на карточке ресторана
+// (см. .ordcnt в client/js/app.js). Считаются только заказы с реально успешной
+// оплатой (payments.status='succeeded') и статусом не из терминального "плохого"
+// списка — т.е. paid/awaiting_restaurant/accepted/preparing/courier/delivered.
+// Корзина и awaiting_payment сюда никогда не попадают: это агрегат по таблице
+// orders, а не что-то, что клиент может увеличить сам.
+const ORDERS_COUNT_JOIN = `
+  LEFT JOIN orders o ON o.restaurant_id = r.id
+    AND o.status NOT IN ('cancelled','declined','timed_out','payment_failed','awaiting_payment')
+    AND EXISTS (SELECT 1 FROM payments p WHERE p.order_id = o.id AND p.status = 'succeeded')
+`;
 
 router.get('/restaurants', (req, res) => {
   const city = req.query.city;
   const all = db.prepare(`
     SELECT r.*, COUNT(o.id) AS orders_count
     FROM restaurants r
-    LEFT JOIN orders o ON o.restaurant_id = r.id AND o.status NOT IN ('cancelled','declined','timed_out','payment_failed','awaiting_payment')
+    ${ORDERS_COUNT_JOIN}
     GROUP BY r.id
   `).all()
     .map((r) => ({ ...r, cities: JSON.parse(r.cities || '[]') }))
@@ -36,7 +73,7 @@ router.get('/restaurants/:id', (req, res) => {
   const r = db.prepare(`
     SELECT r.*, COUNT(o.id) AS orders_count
     FROM restaurants r
-    LEFT JOIN orders o ON o.restaurant_id = r.id AND o.status NOT IN ('cancelled','declined','timed_out','payment_failed','awaiting_payment')
+    ${ORDERS_COUNT_JOIN}
     WHERE r.id = ? GROUP BY r.id
   `).get(req.params.id);
   if (!r) return res.status(404).json({ error: 'ресторан не найден' });

@@ -70,9 +70,8 @@ function cardHTML(r){
       <span class="mj">${r.e}</span>${photo}
       <div class="chip st ${r.open?'open':'shut'}"><span class="bdot"></span>${r.open?'Открыто':'Закрыто'}</div>
       ${r.votes>=RATING_MIN_VOTES?`<div class="chip rt">★ ${r.rate} · ${r.votes}</div>`:''}
-      <div class="info"><div class="cname">${r.name}${r.open&&r.isNew?' <span class="newtag">NEW</span>':''}</div><div class="ccui">${r.cui}</div>
-        <div class="ordcnt">уже заказали ${r.ordersCount??(r.votes*3)} раз</div>
-        <div class="cmeta"><span><b>мин.</b> ${r.min} ₽</span><span>🕐 ${r.hours}</span></div></div>
+      <div class="info"><div class="itop"><div class="cname">${r.name}${r.open&&r.isNew?' <span class="newtag">NEW</span>':''}</div>${r.ordersCount?`<div class="ordcnt">уже заказали ${r.ordersCount} раз</div>`:''}</div><div class="ccui">${r.cui}</div>
+        <div class="cmeta"><span><b>мин.</b> ${r.min} ₽</span><span>${r.hours}</span></div></div>
     </div></div>`;
 }
 
@@ -301,11 +300,7 @@ async function doOpenRest(id){
   document.getElementById('m-meta').innerHTML=`${showRating?`<span>★ ${curRest.rate} · ${curRest.votes}</span>`:''}<span>🕐 ${curRest.hours}</span>`;
   document.getElementById('msb-name').textContent=curRest.name;
   document.getElementById('msb-rate').textContent=showRating?`★ ${curRest.rate}`:'';
-  // Таб/секцию "Популярное" показываем только если реально есть отмеченные
-  // блюда — в админке пока нет поля is_popular, так что у любого реального
-  // ресторана из бэкенда список будет пуст и таб вёл бы в пустоту.
-  const hasPopular=curRest.menu.some(c=>c.items.some(d=>d.pop));
-  const tabs=[...(hasPopular?['Популярное']:[]),...curRest.menu.map(c=>c.cat)];
+  const tabs=curRest.menu.map(c=>c.cat);
   document.getElementById('m-tabs').innerHTML=tabs.map((t,i)=>`<div class="mtab ${i===0?'on':''}" onclick="document.getElementById('sec${i}').scrollIntoView({behavior:'smooth'})">${t}</div>`).join('');
   renderMenuBody(); go('menu'); updateBar();
   window.scrollTo(0,0);
@@ -347,28 +342,18 @@ function initMenuScrollFX(){
 }
 function key(ci,ii){return ci+'_'+ii;}
 function findItem(k){const[ci,ii]=k.split('_').map(Number);const d=curRest.menu[ci].items[ii];return{n:d.n.replace(/'/g,''),p:d.p,id:d.id||null};}
-// data-ctrl-key вместо id: популярное блюдо рендерится дважды (в "Популярное"
-// и в своей категории) — одинаковый id на двух узлах был невалидным HTML.
 function dishCard(d,ci,ii){
   const k=key(ci,ii);const q=cart[k]?cart[k].q:0;const so=SOLD_OUT[k]||d.available===false;
   const hasSrc=!!(d.photoUrl||d.im);
   const photo=hasSrc?`<img src="${d.photoUrl||U(d.im,700)}" loading="lazy" onerror="this.closest('.dphoto').classList.add('nophoto');this.remove()">`:'';
   return `<div class="dish ${so?'dis':''}" ${so?'':`onclick="openDish('${k}')"`}>
     <div class="dphoto ${hasSrc?'':'nophoto'}" style="background:${d.g}"><span class="mj">${d.e}</span>${photo}
-    <div class="dplate"><div class="dname">${d.n}${d.pop?' <span class="hit">Хит</span>':''}</div><div class="ddesc">${d.d}</div>
-    <div class="dbot"><div class="dprice">${d.p} ₽</div>${so?'<span class="soldout">Нет в наличии</span>':`<div data-ctrl-key="${k}" onclick="event.stopPropagation()">${q>0?qtyHtml(k,q):`<button class="add" onclick="addItem('${k}',event)">+</button>`}</div>`}</div></div></div></div>`;
+    <div class="dplate"><div class="dname">${d.n}${d.pop?' <span class="hit">Хит</span>':''}</div><div class="ddesc">${d.d}</div></div>
+    <div class="dactions"><div class="dprice">${d.p} ₽</div>${so?'<span class="soldout">Нет в наличии</span>':`<div data-ctrl-key="${k}" onclick="event.stopPropagation()">${q>0?qtyHtml(k,q):`<button class="add" onclick="addItem('${k}',event)">+</button>`}</div>`}</div></div></div>`;
 }
 function renderMenuBody(){
   let html='';
-  let secIdx=0;
-  // "Популярное" — только если реально есть отмеченные блюда (см. doOpenRest,
-  // нумерация sec-ID должна совпадать с табами один в один).
-  const pops=[];curRest.menu.forEach((c,ci)=>c.items.forEach((d,ii)=>{if(d.pop)pops.push([d,ci,ii]);}));
-  if(pops.length){
-    html+=`<div class="cat-h" id="sec${secIdx}">Популярное</div>`+pops.map(([d,ci,ii])=>dishCard(d,ci,ii)).join('');
-    secIdx++;
-  }
-  curRest.menu.forEach((c,ci)=>{html+=`<div class="cat-h" id="sec${secIdx}">${c.cat}</div>`+c.items.map((d,ii)=>dishCard(d,ci,ii)).join('');secIdx++;});
+  curRest.menu.forEach((c,ci)=>{html+=`<div class="cat-h" id="sec${ci}">${c.cat}</div>`+c.items.map((d,ii)=>dishCard(d,ci,ii)).join('');});
   document.getElementById('m-body').innerHTML=html;
 }
 function qtyHtml(k,q){return `<div class="qty"><button onclick="dec('${k}')">−</button><span>${q}</span><button onclick="inc('${k}',event)">+</button></div>`;}
@@ -399,7 +384,7 @@ function saveCartState(){
 function saveOrderState(){
   try{
     if(currentOrderCode){
-      const state={orderCode:currentOrderCode,providerPaymentId:currentProviderPaymentId,restId:curRest?curRest.id:null};
+      const state={orderCode:currentOrderCode,providerPaymentId:currentProviderPaymentId,paymentUrl:currentPaymentUrl,restId:curRest?curRest.id:null};
       if(!USE_API){
         // Демо-режим сам себе бэкенд — сохраняем всё, что понадобится для
         // восстановления экрана без единого сетевого запроса (см. restoreDemoOrder).
@@ -439,6 +424,7 @@ function restoreDemoOrder(saved){
     const{sum}=totals();
     document.getElementById('qr-amt').textContent=sum+' ₽';
     document.getElementById('cartbar').style.display='none';
+    renderQRPaymentOptions();
     drawQR();startQRTimer();go('qr');
     return;
   }
@@ -465,6 +451,7 @@ async function tryRestoreSession(){
   if(savedOrder&&savedOrder.orderCode){
     currentOrderCode=savedOrder.orderCode;
     currentProviderPaymentId=savedOrder.providerPaymentId||null;
+    currentPaymentUrl=savedOrder.paymentUrl||null;
     if(savedOrder.restId){
       if(USE_API){try{curRest=normalizeRestaurant(await api.getRestaurant(savedOrder.restId));}catch(e){}}
       else{curRest=restaurants.find(r=>r.id===savedOrder.restId)||null;}
@@ -646,7 +633,25 @@ function validateLegalConsent(){
 }
 // Собранные данные оформления заказа. Без бэкенда (USE_API=false) остаются
 // только в браузере — ровно то же самое, что отправится в API, когда он появится.
-let currentOrderCode=null, currentProviderPaymentId=null;
+// currentPaymentUrl — ссылка провайдера на оплату (paymentUrl/confirmationUrl),
+// одна и та же для кнопки "Оплата с этого устройства" и для QR. У mock-провайдера
+// (сейчас) её нет — null; когда подключится реальный провайдер (ЮKassa и т.п.),
+// он будет отдавать её в payment.paymentUrl, и кнопка сама начнёт вести на неё
+// вместо demo-оплаты, без правок здесь (см. payFromThisPhone).
+let currentOrderCode=null, currentProviderPaymentId=null, currentPaymentUrl=null;
+// Показывает реальную кнопку оплаты, если у платежа есть настоящая ссылка
+// провайдера, иначе — явно подписанный demo-блок. Никогда не показывает кнопку,
+// которая выглядит как реальная оплата, если paymentUrl на самом деле нет.
+function renderQRPaymentOptions(){
+  document.getElementById('qr-order-code').textContent=currentOrderCode||'';
+  // Основная кнопка оплаты видна всегда — единственное, что меняется, это
+  // куда она ведёт (см. payFromThisPhone) и есть ли рядом DEMO-тег.
+  document.getElementById('qr-demo-tag-wrap').style.display=currentPaymentUrl?'none':'block';
+}
+function payFromThisPhone(){
+  if(currentPaymentUrl){window.location.href=currentPaymentUrl;return;}
+  afterPay(); // demo — реальной ссылки нет, кнопка сама завершает demo-оплату
+}
 function buildOrderPayload(){
   const{sum}=totals();
   return{
@@ -670,6 +675,7 @@ function resumeExistingOrderFlow(){
     const{sum}=totals();
     document.getElementById('qr-amt').textContent=sum+' ₽';
     document.getElementById('cartbar').style.display='none';
+    renderQRPaymentOptions();
     drawQR();startQRTimer();go('qr');
   }else{
     go('status');
@@ -697,12 +703,14 @@ async function openQR(){
       });
       currentOrderCode=order.public_code;
       currentProviderPaymentId=payment.providerPaymentId;
+      currentPaymentUrl=payment.paymentUrl||null;
       saveOrderState();
     }else{
       // Демо-режим — своя "БД" в localStorage вместо реального бэкенда (см.
       // nextDemoOrderCode/saveOrderState) — активный заказ должен переживать
       // refresh/закрытие вкладки точно так же, как в реальном API-режиме.
       currentOrderCode=nextDemoOrderCode();
+      currentPaymentUrl=null; // demo — реальной ссылки на оплату нет и не будет
       demoStage='qr';
       saveOrderState();
     }
@@ -712,6 +720,7 @@ async function openQR(){
     // подтверждённой оплаты.
     document.getElementById('qr-amt').textContent=sum+' ₽';
     document.getElementById('cartbar').style.display='none';
+    renderQRPaymentOptions();
     drawQR();startQRTimer();go('qr');
   }catch(err){
     showToast(err.message||'Не удалось оформить заказ');
@@ -820,7 +829,7 @@ function openRejected(reason){
   // Заказ окончен (отклонён рестораном/не ответил вовремя) — это терминальное
   // состояние без пути назад, поэтому не держим его "активным": иначе refresh
   // на этом экране заново находил бы его и не давал вернуться к обычному меню.
-  currentOrderCode=null;currentProviderPaymentId=null;saveOrderState();
+  currentOrderCode=null;currentProviderPaymentId=null;currentPaymentUrl=null;saveOrderState();
   setRejOrderCode(orderCodeForDisplay);
   document.getElementById('rej-explain').style.display='';
   document.getElementById('rej-refund-line').style.display='';
@@ -851,9 +860,11 @@ async function retryPaymentFlow(){
   try{
     const{payment}=await api.retryPayment(currentOrderCode);
     currentProviderPaymentId=payment.providerPaymentId;
+    currentPaymentUrl=payment.paymentUrl||null;
     saveOrderState();
     const{sum}=totals();
     document.getElementById('qr-amt').textContent=sum+' ₽';
+    renderQRPaymentOptions();
     drawQR();startQRTimer();go('qr');
   }catch(err){
     showToast(err.message||'Не удалось создать новый платёж');
@@ -903,6 +914,7 @@ function resumeExistingPayment(){
   const amt=lastKnownOrder?lastKnownOrder.items_total:totals().sum;
   document.getElementById('qr-amt').textContent=amt+' ₽';
   document.getElementById('cartbar').style.display='none';
+  renderQRPaymentOptions();
   drawQR();startQRTimer();go('qr');
 }
 // Заказ пропал с бэкенда (устаревшая ссылка, БД пересоздана и т.п.) — явно
@@ -911,7 +923,7 @@ function openOrderNotFound(){
   const orderCodeForDisplay=currentOrderCode; // захватываем до очистки ниже
   stopOrderPolling();
   showStatusSpinner(false);showOrderDot(false);showRestaurantPhone(null);
-  currentOrderCode=null;currentProviderPaymentId=null;saveOrderState();
+  currentOrderCode=null;currentProviderPaymentId=null;currentPaymentUrl=null;saveOrderState();
   setRejOrderCode(orderCodeForDisplay);
   document.getElementById('rej-title').textContent='Не удалось найти заказ';
   document.getElementById('rej-explain').textContent='Возможно, он отменён или устарел. Если это ошибка — напишите в поддержку.';
@@ -999,7 +1011,7 @@ window.addEventListener('pageshow',(e)=>{if(e.persisted)refreshActiveOrderIfVisi
 
 function cur(id){return document.getElementById(id).classList.contains('active');}
 function go(id){document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));document.getElementById(id).classList.add('active');document.querySelector('.dish-add').style.display=(id==='dish')?'block':'none';if(id!=='status'&&id!=='rejected')document.getElementById('statusbg').style.display='none';window.scrollTo(0,0);updateBar();if(id==='home'&&introFadeHandler)introFadeHandler();try{if(id!=='home')history.pushState({screen:id},'');else history.replaceState({screen:'home'},'');}catch(e){}}
-function resetAll(){clearInterval(preTimer);clearTimeout(preAutoTimer);stopOrderPolling();showRestaurantPhone(null);showOrderDot(false);cart={};curRest=null;currentOrderCode=null;currentProviderPaymentId=null;demoStage='qr';saveCartState();saveOrderState();document.getElementById('statusbg').style.display='none';go('home');renderList();}
+function resetAll(){clearInterval(preTimer);clearTimeout(preAutoTimer);stopOrderPolling();showRestaurantPhone(null);showOrderDot(false);cart={};curRest=null;currentOrderCode=null;currentProviderPaymentId=null;currentPaymentUrl=null;demoStage='qr';saveCartState();saveOrderState();document.getElementById('statusbg').style.display='none';go('home');renderList();}
 // Своё окно подтверждения (замена заблокированного confirm)
 function yaamConfirm(text,onYes){
   const ov=document.getElementById('confirm-overlay');

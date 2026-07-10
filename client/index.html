@@ -115,14 +115,24 @@
 <div id="qr" class="screen">
   <div class="hero bare-hero"><button class="back" onclick="go('cart')">← Назад</button></div>
   <div class="qrwrap">
-    <h2>Оплата заказа</h2><div class="sbpttl">по СБП</div>
-    <div id="qrcode"></div>
+    <h2>Оплатите заказ</h2>
+    <div class="qr-order-code">Заказ <span id="qr-order-code"></span></div>
     <div class="amt" id="qr-amt">0 ₽</div>
     <div class="qr-timer">Оплатите в течение <span id="qr-time">10:00</span></div>
-    <div class="hint">Отсканируйте код в приложении вашего банка<br>и подтвердите оплату. После оплаты страница обновится автоматически.</div>
-    <div class="qr-screenshot-hint">Сделайте скриншот экрана — это ваш чек об оплате.</div>
+
+    <!-- Кнопка всегда видна — основной способ оплаты. Куда она ведёт, решает
+         currentPaymentUrl/payFromThisPhone() в app.js: если провайдер вернул
+         реальную paymentUrl/confirmationUrl — открывает её; если нет (сейчас,
+         mock) — выполняет demo-оплату. DEMO-тег показывается только во втором
+         случае, чтобы явно отделить demo от реальной оплаты. -->
+    <div class="qr-demo-tag-wrap" id="qr-demo-tag-wrap" style="display:none"><span class="demo-tag">DEMO</span></div>
+    <button id="qr-pay-btn" class="pay" onclick="payFromThisPhone()">Оплата с этого устройства</button>
+
+    <div class="qr-or-scan">Или отсканируйте QR-код с другого телефона</div>
+    <div id="qrcode"></div>
+
     <p class="legal-inline-link"><a href="legal/payment-refund.html" target="_blank" rel="noopener">Условия оплаты и возврата</a></p>
-    <div class="qr-demo-wrap"><button class="ghost" onclick="afterPay()">Демо: оплата прошла →</button></div>
+    <div class="center-wrap"><button class="ghost" onclick="cancelOrderFlow()">Отменить заказ</button></div>
   </div>
 </div>
 

@@ -6,9 +6,14 @@
  * не требует правок ни в orderService, ни в API, ни в клиенте.
  *
  * createPayment({orderId, amount, description})
- *   -> { providerPaymentId, qrPayload?, redirectUrl? }
+ *   -> { providerPaymentId, qrPayload?, paymentUrl? }
  *   Создаёт платёж во внешней системе. qrPayload — то, что рисуем как QR
- *   (для СБП), redirectUrl — если провайдер вместо QR даёt ссылку на оплату.
+ *   (для СБП). paymentUrl (у ЮKassa это confirmation.confirmation_url) —
+ *   единая ссылка на оплату: клиент использует ОДНУ и ту же ссылку и для
+ *   кнопки "Оплата с этого устройства" (window.location.href=paymentUrl),
+ *   и для QR — оплата с текущего телефона и с другого телефона по QR ведут
+ *   на одну и ту же платёжную сессию. null/отсутствует, если у провайдера
+ *   нет прямой ссылки (сейчас — mock).
  *
  * getStatus(providerPaymentId)
  *   -> 'pending' | 'succeeded' | 'failed'
