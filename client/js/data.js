@@ -109,12 +109,5 @@ const restaurants=[
 const CANDIDATE_RESTAURANTS=[
  {name:'KFC',votes:342},
  {name:'Домино\'с Пицца',votes:268},
- {name:'Пекарня «Хлебный двор»',votes:201},
- {name:'Суши-бар Токио',votes:184},
- {name:'Шаверма Плюс',votes:142},
- {name:'Кофейня «Утро»',votes:119},
- {name:'Пельменная №2',votes:97},
- {name:'Стейк Хаус',votes:78},
- {name:'Вок-бар',votes:64},
- {name:'Детокс Бар',votes:52}
+ {name:'Пекарня «Хлебный двор»',votes:201}
 ];
