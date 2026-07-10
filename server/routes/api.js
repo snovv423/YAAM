@@ -1,9 +1,40 @@
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const db = require('../db');
 const orderService = require('../services/orderService');
 const paymentService = require('../services/paymentService');
 
 const router = express.Router();
+
+// При срабатывании лимита логируем IP/endpoint/время/user-agent — пригодится
+// для мониторинга попыток спама (см. запрос на эту фичу). Лимиты щедрые
+// специально, чтобы не мешать обычному клиенту и demo/локальной разработке —
+// это защита от злоупотребления, а не троттлинг нормального использования.
+function rateLimitHandler(message) {
+  return (req, res) => {
+    console.warn(
+      `[rate-limit] ip=${req.ip} endpoint=${req.method} ${req.originalUrl} `
+      + `time=${new Date().toISOString()} ua="${req.get('user-agent') || ''}"`,
+    );
+    res.status(429).json({ error: message });
+  };
+}
+
+const orderCreateLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: rateLimitHandler('Слишком много попыток оформить заказ — попробуйте через несколько минут'),
+});
+
+const rateOrderLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: rateLimitHandler('Слишком много запросов — попробуйте чуть позже'),
+});
 
 // "Хит" — не ручной флаг, а автоматический расчёт по реальным продажам:
 // топ-3 блюда ресторана по сумме qty за оплаченные и успешно завершённые
@@ -80,7 +111,7 @@ router.get('/restaurants/:id', (req, res) => {
   res.json(restaurantWithMenu(r));
 });
 
-router.post('/orders', async (req, res) => {
+router.post('/orders', orderCreateLimiter, async (req, res) => {
   try {
     const { order, payment } = await orderService.createOrder(req.body);
     res.status(201).json({ order, payment });
@@ -117,7 +148,7 @@ router.post('/orders/:code/retry-payment', async (req, res) => {
   }
 });
 
-router.post('/orders/:code/rate', (req, res) => {
+router.post('/orders/:code/rate', rateOrderLimiter, (req, res) => {
   try {
     const order = orderService.getOrder(req.params.code);
     if (!order) return res.status(404).json({ error: 'заказ не найден' });

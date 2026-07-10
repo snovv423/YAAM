@@ -21,6 +21,20 @@ function formatPublicCode(id) {
   return `YAAM-${String(id).padStart(5, '0')}`;
 }
 
+// Зеркало normalizeRuPhone() из client/js/app.js — общего бандлера между
+// клиентом и сервером нет, поэтому логика продублирована; при правке одной
+// стороны обязательно поправить и вторую. Приводит российский номер к виду
+// "+7XXXXXXXXXX" (11 цифр после +, начинается на 7); null — если номер битый
+// или заведомо не российский. Не доверяем фронту — сервер валидирует и
+// нормализует заново, а не просто принимает то, что прислал клиент.
+function normalizeRuPhone(raw) {
+  let d = String(raw || '').replace(/\D/g, '');
+  if (d.length === 11 && d[0] === '8') d = `7${d.slice(1)}`;
+  else if (d.length === 10) d = `7${d}`;
+  if (d.length !== 11 || d[0] !== '7') return null;
+  return `+${d}`;
+}
+
 // Короткое ожидание provider_payment_id у платежа, который параллельный
 // запрос уже зарезервировал, но ещё не дождался ответа провайдера (см.
 // createOrder). 20мс×15 = максимум 300мс — с mock-провайдером (и в норме с
@@ -52,6 +66,8 @@ function getOrder(idOrCode) {
 
 async function createOrder({ restaurantId, city, customerName, customerPhone, address, comment, items, fulfillmentType }) {
   if (!customerName || !customerName.trim()) throw new Error('customerName обязателен');
+  const normalizedPhone = normalizeRuPhone(customerPhone);
+  if (!normalizedPhone) throw new Error('укажите корректный номер телефона');
   if (!items || !items.length) throw new Error('корзина пуста');
 
   const restaurant = db.prepare('SELECT * FROM restaurants WHERE id = ?').get(restaurantId);
@@ -64,11 +80,11 @@ async function createOrder({ restaurantId, city, customerName, customerPhone, ad
   // запроса медленной сетью), а возвращаем существующий заказ и его же
   // платёж, ничего заново не создавая. Нет собственной аутентификации/сессий,
   // поэтому телефон+ресторан+статус — практичный, минимально достаточный ключ.
-  if (customerPhone) {
+  if (normalizedPhone) {
     const existingOrder = db.prepare(`
       SELECT * FROM orders WHERE restaurant_id = ? AND customer_phone = ? AND status = 'awaiting_payment'
       ORDER BY id DESC LIMIT 1
-    `).get(restaurantId, customerPhone);
+    `).get(restaurantId, normalizedPhone);
     if (existingOrder) {
       const existingPayment = db.prepare(`
         SELECT * FROM payments WHERE order_id = ? AND status = 'pending' ORDER BY id DESC LIMIT 1
@@ -136,7 +152,7 @@ async function createOrder({ restaurantId, city, customerName, customerPhone, ad
       restaurant_id: restaurantId,
       city,
       customer_name: customerName.trim(),
-      customer_phone: customerPhone || '',
+      customer_phone: normalizedPhone,
       address: address || '',
       fulfillment_type: normalizedFulfillment,
       comment: comment || '',

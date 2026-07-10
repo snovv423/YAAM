@@ -591,6 +591,17 @@ function openCart(){
 }
 function backToMenu(){go('menu');updateBar();}
 
+// Зеркало normalizeRuPhone() из server/services/orderService.js — общего
+// бандлера между клиентом и сервером нет, логика продублирована; при правке
+// одной стороны обязательно поправить и вторую. Приводит российский номер
+// к виду "+7XXXXXXXXXX"; null — если номер битый/пустой/слишком короткий.
+function normalizeRuPhone(raw){
+  let d=String(raw||'').replace(/\D/g,'');
+  if(d.length===11&&d[0]==='8')d='7'+d.slice(1);
+  else if(d.length===10)d='7'+d;
+  if(d.length!==11||d[0]!=='7')return null;
+  return '+'+d;
+}
 function validateCheckout(){
   const nameField=document.getElementById('c-name');
   const nameWrap=nameField.closest('.field');
@@ -600,6 +611,14 @@ function validateCheckout(){
     return false;
   }
   nameWrap.classList.remove('err');
+  const phoneField=document.getElementById('c-phone');
+  const phoneWrap=phoneField.closest('.field');
+  if(!normalizeRuPhone(phoneField.value)){
+    phoneWrap.classList.remove('err');void phoneWrap.offsetWidth;phoneWrap.classList.add('err');
+    phoneField.focus();
+    return false;
+  }
+  phoneWrap.classList.remove('err');
   return true;
 }
 
@@ -671,7 +690,8 @@ function buildOrderPayload(){
   const{sum}=totals();
   return{
     name:document.getElementById('c-name').value.trim(),
-    phone:document.getElementById('c-phone').value.trim(),
+    // validateCheckout() уже гарантировал валидный номер до вызова этой функции
+    phone:normalizeRuPhone(document.getElementById('c-phone').value),
     address:fulfillmentType==='pickup'?(curRest.address||''):document.getElementById('c-addr').value.trim(),
     fulfillmentType,
     comment:document.getElementById('c-comment').value.trim(),
