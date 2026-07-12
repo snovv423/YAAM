@@ -8,7 +8,7 @@
 
 **Phase:** Production infrastructure preparation *(рабочее название этапа — в проекте пока нет утверждённой сквозной нумерации фаз, номер не присваивается)*
 
-**Status:** Not started — backend по-прежнему работает только локально, VPS не выбран, миграция на PostgreSQL не начата.
+**Status:** Ready to start — payment timer persistence fix закрыт (закоммичен `7adbdf4`, запушен в `origin/main`, подтверждён на production через Chromium Playwright A–D); backend по-прежнему работает только локально, VPS не выбран, миграция на PostgreSQL не начата.
 
 **Current approved task:** Развернуть backend на Timeweb VPS.
 
@@ -91,6 +91,19 @@
 - Тестовая ЮKassa
 - Аудит реального поведения webhook/провайдера
 
+### 2026-07-12 — Payment timer persistence model
+
+**Status:** Approved
+
+**Decision:** платёжный таймер (`qrDeadline`) — один абсолютный дедлайн, persisted в `localStorage` вместе с состоянием заказа.
+
+**Behavior:**
+- refresh, restore сессии, уход/возврат на экран оплаты и pageshow/bfcache-ресинк переиспользуют существующий дедлайн, никогда не продлевают и не пересоздают его
+- новый дедлайн создаётся только для новой попытки оплаты — новый заказ (`openQR()`) или новый `providerPaymentId` после `payment_failed` (`retryPaymentFlow()`)
+- истёкший дедлайн остаётся в прошлом — повторный restore не создаёт новые 10 минут
+- явная отмена и успешная оплата обнуляют дедлайн (`resetAll()`, `afterPay()`)
+- модель одинакова для demo и API-режима — сохраняется вне `if(!USE_API)`
+
 ### 2026-07-12 — Infrastructure order
 
 **Status:** Approved
@@ -116,6 +129,10 @@
 - Security hardening (предыдущий этап) — валидация телефона, CORS allowlist, rate limiting
 - Server-side валидация заказа — `menuItemId`/цена/qty только из БД, не доверяются клиенту
 - Точечный commit `77154e9` создан и **запушен в `origin/main`** — объединяет всё перечисленное выше из этого этапа
+- Payment timer persistence fix — `qrDeadline` теперь переживает refresh/restore/уход-возврат (см. Decisions → Payment timer persistence model)
+- 13 детерминированных frontend-regression-тестов на таймер (`client/test/qrTimerPersistence.test.js`, реальный `app.js` через `node:vm`, без новых зависимостей) — 13/13 PASS, 5 последовательных прогонов + parallel run
+- Production Chromium Playwright check (A–D) на `https://yaam.su` — refresh, уход/возврат, 3×reload, отмена+новый заказ — все PASS после подтверждённого деплоя
+- Точечный commit `7adbdf4` создан и **запушен в `origin/main`** — payment timer persistence fix + regression-тесты
 
 ## 3. Critical (обязательно до Production)
 
@@ -220,6 +237,16 @@
 
 **Production blocker:** Для demo — нет. Для production — желательно обязательный quality gate.
 
+### Medium — Safari/WebKit quality gate not closed
+
+**Current impact:** payment timer fix (A–D) production-check пройден только в Chromium (Playwright MCP по умолчанию запускает Chromium, не Safari/WebKit) — движок явно зафиксирован в PDF-отчёте, не выдавался за Safari.
+
+**Why open:** реальный Safari/WebKit прогон этой сессией не выполнялся; iOS Safari — основной браузер целевой аудитории (мобильный трафик), специфичные тайминги (bfcache, throttling фоновых вкладок) в Chromium не воспроизводятся один в один.
+
+**Resolution:** отдельный ручной или Playwright-WebKit прогон сценариев A–D перед объявлением timer-fix полностью закрытым для всех браузеров.
+
+**Production blocker:** Для текущего этапа (Timeweb VPS) — нет. Перед полным production launch — да.
+
 ## 6. Ideas
 
 Непроверенные идеи, без обязательств по реализации — переезжают в план только через явное решение CTO:
@@ -281,6 +308,11 @@
 - backend cancellation tests
 - 30 backend tests
 - commit `77154e9` created and pushed to `origin/main`
+- payment timer persistence fix (`qrDeadline` survives refresh/restore/back)
+- 13 frontend timer regression tests (5× sequential + parallel run, all PASS)
+- commit `7adbdf4` created and pushed to `origin/main` at 2026-07-12T10:11:57Z
+- GitHub Pages deploy confirmed at 2026-07-12T10:13:07Z (`last-modified` header, `startNewQRTimer`/`qrDeadline` present in production `app.js`)
+- production Chromium Playwright check A–D: all PASS (refresh, back/return, 3×reload, cancel+new order)
 
 ## 9. Next milestone
 
