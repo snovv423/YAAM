@@ -104,7 +104,7 @@ async function renderList(instant){
   if(instant){return;}           // смена города — сразу видимы, без анимации
   setTimeout(applyStagger,10);
 }
-function shut(n){showToast(n+' сейчас закрыт — загляните позже 🙂');}
+function shut(n){showToast(n+' сейчас закрыт — загляните позже');}
 function showToast(msg){
   let t=document.getElementById('toast');
   if(!t){t=document.createElement('div');t.id='toast';t.className='toast';document.body.appendChild(t);}
@@ -783,7 +783,12 @@ let statusStep=0;
 // на проде), затем единственный реальный шаг ожидания: ответ ресторана (окно 3 мин).
 const RESTAURANT_RESPONSE_WINDOW_SEC=180;
 const BANK_CONFIRM_DELAY_MS=1400;
-let inPreStatus=true,preTimer=null,preAutoTimer=null;
+let inPreStatus=true,preTimer=null,preAutoTimer=null,preDeadline=null;
+// Общий расчёт остатка секунд от абсолютного дедлайна, а не декрементом счётчика —
+// декремент "теряет" время, пока setInterval заморожен/затроттлен браузером
+// (свёрнутая вкладка, bfcache, блокировка телефона), и после возврата показывает
+// больше времени, чем реально осталось. От Date.now() таймер всегда самокорректируется.
+function remainingSecs(deadline){return Math.max(0,Math.ceil((deadline-Date.now())/1000));}
 
 function showStatusSpinner(on){
   document.getElementById('st-spin').classList.toggle('on',on);
@@ -803,17 +808,18 @@ function renderWaitForRestaurant(){
   document.getElementById('st-final').style.display='none';
   document.getElementById('st-demowrap').style.display='block';
 }
+function responseTimerTick(){
+  const sub=document.getElementById('st-substate');
+  const secs=remainingSecs(preDeadline);
+  const m=Math.floor(secs/60),s=secs%60;
+  if(sub)sub.textContent=`Ответ ресторана в течение ${m}:${s<10?'0':''}${s}`;
+  if(secs<=0){clearInterval(preTimer);preTimer=null;openRejected('timeout');}
+}
 function startResponseTimer(){
   clearInterval(preTimer);
-  let secs=RESTAURANT_RESPONSE_WINDOW_SEC;
-  const sub=document.getElementById('st-substate');
-  const tick=()=>{const m=Math.floor(secs/60),s=secs%60;sub.textContent=`Ответ ресторана в течение ${m}:${s<10?'0':''}${s}`;};
-  tick();
-  preTimer=setInterval(()=>{
-    secs--;
-    if(secs<=0){clearInterval(preTimer);openRejected('timeout');return;}
-    tick();
-  },1000);
+  preDeadline=Date.now()+RESTAURANT_RESPONSE_WINDOW_SEC*1000;
+  responseTimerTick();
+  preTimer=setInterval(responseTimerTick,1000);
 }
 // Общий пролог обоих режимов статус-экрана (демо-шаги и реальный поллинг),
 // расходятся только после него — демо крутит статусы кнопкой, реальный ждёт сервер.
@@ -918,26 +924,37 @@ async function retryPaymentFlow(){
     showToast(err.message||'Не удалось создать новый платёж');
   }
 }
-function cancelOrderFlow(){
-  yaamConfirm('Отменить заказ? Деньги вернутся автоматически.',async()=>{
+// unpaid=true — вызов с экрана QR или "оплата не завершена" (awaiting_payment,
+// см. #qr и #st-pending-pay-wrap в index.html): деньги ещё не списаны, и
+// backend (cancelByCustomer()) для этого статуса не вызывает refund вообще —
+// текст не должен обещать возврат того, чего не было. unpaid=false/не задан —
+// вызов из #st-cancel-wrap (реальная отмена уже оплаченного заказа, ожидание
+// ответа ресторана) — там возврат денег действительно происходит, текст как был.
+function cancelOrderFlow(unpaid){
+  const confirmText=unpaid
+    ?'Отменить неоплаченный заказ?\nКорзина будет очищена, и вы вернётесь на главный экран.'
+    :'Отменить заказ? Деньги вернутся автоматически.';
+  const labels=unpaid?{yes:'Да, отменить',no:'Не отменять'}:undefined;
+  yaamConfirm(confirmText,async()=>{
     if(!USE_API){ // демо — нечего отменять на сервере, просто сбрасываем локально
-      showToast('Демо: заказ отменён, деньги вернутся автоматически');
+      showToast(unpaid?'Заказ отменён':'Демо: заказ отменён, деньги вернутся автоматически');
       resetAll();
       return;
     }
     try{
       await api.cancelOrder(currentOrderCode);
       stopOrderPolling();
-      showToast('Заказ отменён, деньги вернутся автоматически');
+      showToast(unpaid?'Заказ отменён':'Заказ отменён, деньги вернутся автоматически');
       resetAll();
     }catch(err){
       showToast(err.message||'Не удалось отменить заказ');
     }
-  });
+  },labels);
 }
 
 // --- Поллинг реального статуса заказа (только в режиме API) ---
 let orderPollTimer=null;
+let pollInFlight=false; // защита от наложения: visibilitychange/pageshow/setInterval могут вызвать pollOrderOnce() почти одновременно (особенно при возврате из фона на мобильном Safari) — без гейта два параллельных запроса могут прийти не по порядку и откатить UI на более старый статус
 let lastKnownOrder=null; // нужен resumeExistingPayment() — сумма/код заказа без обращения к (возможно уже пустой после reload) корзине
 function stopOrderPolling(){clearInterval(orderPollTimer);orderPollTimer=null;}
 // Заказ создан, но оплата ещё не подтверждена — например, вернулись назад с
@@ -982,6 +999,9 @@ function openOrderNotFound(){
   go('rejected');
 }
 async function pollOrderOnce(){
+  if(pollInFlight)return; // уже есть запрос в полёте — не дублируем, следующий тик/событие подхватит
+  pollInFlight=true;
+  try{
   let order;
   try{order=await api.getOrder(currentOrderCode);}catch(err){
     if(err.status===404){openOrderNotFound();return;}
@@ -1036,6 +1056,7 @@ async function pollOrderOnce(){
   }else if(order.status==='payment_failed'){
     openPaymentFailed();
   }
+  }finally{pollInFlight=false;}
 }
 function startOrderPolling(){
   initStatusScreen();
@@ -1055,19 +1076,24 @@ function startOrderPolling(){
 function refreshActiveOrderIfVisible(){
   if(USE_API&&currentOrderCode&&orderPollTimer)pollOrderOnce();
 }
-document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshActiveOrderIfVisible();});
-window.addEventListener('pageshow',(e)=>{if(e.persisted)refreshActiveOrderIfVisible();});
+document.addEventListener('visibilitychange',()=>{if(!document.hidden){refreshActiveOrderIfVisible();resyncVisibleTimers();}});
+window.addEventListener('pageshow',(e)=>{if(e.persisted){refreshActiveOrderIfVisible();resyncVisibleTimers();}});
 
 function cur(id){return document.getElementById(id).classList.contains('active');}
 function go(id){document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));document.getElementById(id).classList.add('active');document.querySelector('.dish-add').style.display=(id==='dish')?'block':'none';if(id!=='status'&&id!=='rejected')document.getElementById('statusbg').style.display='none';window.scrollTo(0,0);updateBar();if(id==='home'&&introFadeHandler)introFadeHandler();try{if(id!=='home')history.pushState({screen:id},'');else history.replaceState({screen:'home'},'');}catch(e){}}
-function resetAll(){clearInterval(preTimer);clearTimeout(preAutoTimer);stopOrderPolling();showRestaurantPhone(null);showOrderDot(false);cart={};curRest=null;currentOrderCode=null;currentProviderPaymentId=null;currentPaymentUrl=null;currentOrderAmount=null;demoStage='qr';saveCartState();saveOrderState();document.getElementById('statusbg').style.display='none';go('home');renderList();}
+function resetAll(){clearInterval(preTimer);clearTimeout(preAutoTimer);stopQRTimer();stopOrderPolling();showRestaurantPhone(null);showOrderDot(false);cart={};curRest=null;currentOrderCode=null;currentProviderPaymentId=null;currentPaymentUrl=null;currentOrderAmount=null;demoStage='qr';saveCartState();saveOrderState();document.getElementById('statusbg').style.display='none';go('home');renderList();}
 // Своё окно подтверждения (замена заблокированного confirm)
-function yaamConfirm(text,onYes){
+function yaamConfirm(text,onYes,labels){
   const ov=document.getElementById('confirm-overlay');
   document.getElementById('confirm-text').textContent=text;
   ov.classList.add('on');
   const yes=document.getElementById('confirm-yes');
   const no=document.getElementById('confirm-no');
+  // labels — необязательный override подписей кнопок для конкретного вызова
+  // (например, "Да, отменить"/"Не отменять" для отмены заказа); без него —
+  // обычные "Да"/"Отмена", как и раньше для смены ресторана/очистки корзины.
+  yes.textContent=labels?.yes||'Да';
+  no.textContent=labels?.no||'Отмена';
   const close=()=>{ov.classList.remove('on');yes.onclick=null;no.onclick=null;};
   yes.onclick=()=>{close();onYes&&onYes();};
   no.onclick=close;
@@ -1091,7 +1117,7 @@ function openSheet(){
 
 // После оплаты — сразу к статусу
 async function afterPay(){
-  clearInterval(qrInterval);
+  stopQRTimer();
   if(USE_API){
     try{await api.devMarkPaid(currentProviderPaymentId);}
     catch(err){showToast(err.message||'Оплата не прошла');return;}
@@ -1119,11 +1145,31 @@ function flyAnim(e){
 }
 
 // Таймер QR
-let qrInterval=null;
+let qrInterval=null,qrDeadline=null;
+function stopQRTimer(){clearInterval(qrInterval);qrInterval=null;}
+function qrTimerTick(){
+  const el=document.getElementById('qr-time');
+  const secs=remainingSecs(qrDeadline);
+  const m=Math.floor(secs/60),s=secs%60;
+  if(el)el.textContent=m+':'+(s<10?'0':'')+s;
+  if(secs<=0)stopQRTimer();
+}
 function startQRTimer(){
-  let secs=QR_TIMER_SEC;const el=document.getElementById('qr-time');
-  clearInterval(qrInterval);
-  qrInterval=setInterval(()=>{secs--;const m=Math.floor(secs/60),s=secs%60;el.textContent=m+':'+(s<10?'0':'')+s;if(secs<=0)clearInterval(qrInterval);},1000);
+  stopQRTimer();
+  qrDeadline=Date.now()+QR_TIMER_SEC*1000;
+  qrTimerTick();
+  qrInterval=setInterval(qrTimerTick,1000);
+}
+// Уход с экрана QR кнопкой "Назад" — заказ и currentOrderCode НЕ трогаем (пользователь
+// должен суметь вернуться к той же оплате), но фоновый таймер обязан остановиться,
+// иначе он молча тикает и обновляет уже скрытый #qr-time до следующей точки очистки.
+function backFromQR(){stopQRTimer();go('cart');}
+// Возврат из фона/bfcache не должен ждать следующего тика setInterval, чтобы
+// показать верный остаток — форсируем немедленный пересчёт видимых таймеров
+// (гейт на сам interval: значит, экран/таймер сейчас реально активен).
+function resyncVisibleTimers(){
+  if(qrInterval)qrTimerTick();
+  if(preTimer)responseTimerTick();
 }
 
 // Время заказа

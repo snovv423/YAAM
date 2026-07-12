@@ -120,10 +120,15 @@ router.post('/orders', orderCreateLimiter, async (req, res) => {
   }
 });
 
+// Публичный эндпоинт (без авторизации) — отдаёт только toPublicOrderDTO(),
+// НЕ полный объект заказа. public_code последовательный и перебираемый, поэтому
+// customer_name/phone/address и прочие внутренние поля здесь недопустимы (см.
+// orderService.toPublicOrderDTO). Бот/админка используют orderService.getOrder()
+// напрямую в процессе, этот эндпоинт их не затрагивает.
 router.get('/orders/:code', (req, res) => {
   const order = orderService.getOrder(req.params.code);
   if (!order) return res.status(404).json({ error: 'заказ не найден' });
-  res.json(order);
+  res.json(orderService.toPublicOrderDTO(order));
 });
 
 router.post('/orders/:code/cancel', async (req, res) => {

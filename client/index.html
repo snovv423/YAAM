@@ -113,7 +113,7 @@
 
 <!-- QR -->
 <div id="qr" class="screen">
-  <div class="hero bare-hero"><button class="back" onclick="go('cart')">← Назад</button></div>
+  <div class="hero bare-hero"><button class="back" onclick="backFromQR()">← Назад</button></div>
   <div class="qrwrap">
     <h2>Оплатите заказ</h2>
     <div class="qr-order-code">Заказ <span id="qr-order-code"></span></div>
@@ -132,7 +132,7 @@
     <div id="qrcode"></div>
 
     <p class="legal-inline-link"><a href="legal/payment-refund.html" target="_blank" rel="noopener">Условия оплаты и возврата</a></p>
-    <div class="center-wrap"><button class="ghost" onclick="cancelOrderFlow()">Отменить заказ</button></div>
+    <div class="center-wrap"><button class="ghost" onclick="cancelOrderFlow(true)">Отменить заказ</button></div>
   </div>
 </div>
 
@@ -149,7 +149,7 @@
       <div class="stitems" id="st-items"></div>
       <div class="st-phone-wrap" id="st-phone-wrap" style="display:none">
         <p id="st-phone-note">Вопрос по заказу? Свяжитесь с рестораном напрямую — это быстрее, чем через поддержку.</p>
-        <a class="ghost st-phone-btn" id="st-phone-link" href="tel:">📞 Позвонить в ресторан</a>
+        <a class="ghost st-phone-btn" id="st-phone-link" href="tel:">Позвонить в ресторан</a>
       </div>
       <div class="demobar">
         <button class="pay" id="st-next" onclick="nextStatus()">Следующий статус →</button>
@@ -167,7 +167,7 @@
         <div id="st-pending-pay-wrap" style="display:none">
           <button class="pay" onclick="resumeExistingPayment()">Вернуться к оплате</button>
           <div class="center-wrap">
-            <button class="ghost" onclick="cancelOrderFlow()">Отменить заказ</button>
+            <button class="ghost" onclick="cancelOrderFlow(true)">Отменить заказ</button>
             <a class="ghost" href="https://t.me/yaam_help" target="_blank" rel="noopener">Написать в поддержку</a>
           </div>
         </div>

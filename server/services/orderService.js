@@ -11,6 +11,15 @@ const orderEvents = new EventEmitter();
 const RESTAURANT_RESPONSE_WINDOW_SEC = 180;
 const RATING_ELIGIBLE_STATUS = 'delivered';
 
+// Временная demo-логика: у awaiting_payment пока нет полноценного серверного
+// payment_expires_at (это отдельная задача для этапа реальной ЮKassa — там же
+// появится и sweep). До тех пор дедуп в createOrder() ниже не должен считать
+// брошенный неоплаченный заказ бессрочно активным, иначе один и тот же телефон
+// навсегда блокируется от новой попытки заказа в этом ресторане. 15 минут —
+// продуктовое решение (уточнено после 30 минут), с запасом над QR_TIMER_SEC
+// (10 мин, то, что реально видит покупатель на экране оплаты).
+const AWAITING_PAYMENT_DEDUP_TTL_SEC = 15 * 60;
+
 // Варианты «перерыва» ресторана — фиксированные пресеты, а не произвольный ввод.
 const PAUSE_PRESETS_MIN = { short: 33, medium: 3 * 60, long: 11 * 60 };
 
@@ -64,6 +73,27 @@ function getOrder(idOrCode) {
   return { ...row, items };
 }
 
+// Публичная проекция заказа — единственный источник для того, что уходит по
+// сети незалогиненному клиенту (см. GET /api/orders/:code в routes/api.js).
+// public_code последовательный и перебираемый (YAAM-00001, 00002...), поэтому
+// здесь сознательно НЕ отдаются customer_name/customer_phone/address/comment
+// (ПДн), commission_amount (внутренняя бизнес-цифра), внутренний id/restaurant_id
+// и прочие поля, не используемые текущим клиентом (client/js/app.js:
+// pollOrderOnce()/resumeExistingPayment()). Использовать ТОЛЬКО в публичном
+// HTTP-обработчике — orderService.getOrder() для бота/админки/внутренних
+// вызовов остаётся полным, им нужен полный объект (см. bot/index.js).
+function toPublicOrderDTO(order) {
+  if (!order) return null;
+  const {
+    public_code, status, status_updated_at, items_total,
+    estimated_ready_minutes, restaurant_phone, fulfillment_type, rating,
+  } = order;
+  return {
+    public_code, status, status_updated_at, items_total,
+    estimated_ready_minutes, restaurant_phone, fulfillment_type, rating,
+  };
+}
+
 async function createOrder({ restaurantId, city, customerName, customerPhone, address, comment, items, fulfillmentType }) {
   if (!customerName || !customerName.trim()) throw new Error('customerName обязателен');
   const normalizedPhone = normalizeRuPhone(customerPhone);
@@ -81,10 +111,17 @@ async function createOrder({ restaurantId, city, customerName, customerPhone, ad
   // платёж, ничего заново не создавая. Нет собственной аутентификации/сессий,
   // поэтому телефон+ресторан+статус — практичный, минимально достаточный ключ.
   if (normalizedPhone) {
+    // Дедуп применяется только к ещё "свежему" awaiting_payment (см.
+    // AWAITING_PAYMENT_DEDUP_TTL_SEC выше) — иначе брошенный неоплаченный
+    // заказ блокировал бы этот телефон+ресторан от нового заказа навсегда.
+    // Граница включительно: возраст ровно TTL секунд ещё считается свежим,
+    // строго больше TTL — уже нет. Старый заказ никак не меняется, просто
+    // перестаёт участвовать в дедупе.
     const existingOrder = db.prepare(`
       SELECT * FROM orders WHERE restaurant_id = ? AND customer_phone = ? AND status = 'awaiting_payment'
+        AND (strftime('%s','now') - strftime('%s', created_at)) <= ?
       ORDER BY id DESC LIMIT 1
-    `).get(restaurantId, normalizedPhone);
+    `).get(restaurantId, normalizedPhone, AWAITING_PAYMENT_DEDUP_TTL_SEC);
     if (existingOrder) {
       const existingPayment = db.prepare(`
         SELECT * FROM payments WHERE order_id = ? AND status = 'pending' ORDER BY id DESC LIMIT 1
@@ -325,17 +362,27 @@ function rateOrder(orderId, rating) {
     "SELECT id FROM payments WHERE order_id = ? AND status = 'succeeded' ORDER BY id DESC LIMIT 1"
   ).get(orderId);
   if (!paidPayment) throw new Error('заказ не оплачен');
-  if (order.rating != null) throw new Error('вы уже оценили этот заказ');
   if (!Number.isInteger(rating) || rating < 1 || rating > 5) throw new Error('оценка должна быть 1..5');
 
-  db.transaction(() => {
-    db.prepare('UPDATE orders SET rating = ? WHERE id = ?').run(rating, orderId);
+  // Быстрый, но не единственный барьер: сам по себе order.rating != null не
+  // защищает от двух почти одновременных запросов (оба могут прочитать ещё
+  // пустой rating до того, как любой из них запишет). Настоящая защита —
+  // conditional UPDATE ниже (WHERE rating IS NULL) внутри транзакции: если
+  // конкурентный запрос уже проставил оценку между этой проверкой и UPDATE,
+  // info.changes будет 0, и агрегат ресторана здесь не тронется.
+  if (order.rating != null) throw new Error('вы уже оценили этот заказ');
+
+  const rated = db.transaction(() => {
+    const info = db.prepare('UPDATE orders SET rating = ? WHERE id = ? AND rating IS NULL').run(rating, orderId);
+    if (info.changes === 0) return false; // проиграли гонку — кто-то уже оценил этот заказ
     const r = db.prepare('SELECT rating, rating_count FROM restaurants WHERE id = ?').get(order.restaurant_id);
     const newCount = r.rating_count + 1;
     const newRating = (r.rating * r.rating_count + rating) / newCount;
     db.prepare('UPDATE restaurants SET rating = ?, rating_count = ? WHERE id = ?')
       .run(Math.round(newRating * 10) / 10, newCount, order.restaurant_id);
+    return true;
   })();
+  if (!rated) throw new Error('вы уже оценили этот заказ');
   return getOrder(orderId);
 }
 
@@ -360,6 +407,7 @@ module.exports = {
   orderEvents,
   createOrder,
   getOrder,
+  toPublicOrderDTO,
   markPaid,
   markPaymentFailed,
   retryPayment,
@@ -375,4 +423,5 @@ module.exports = {
   sweepPauseExpiry,
   PAUSE_PRESETS_MIN,
   RESTAURANT_RESPONSE_WINDOW_SEC,
+  AWAITING_PAYMENT_DEDUP_TTL_SEC,
 };
