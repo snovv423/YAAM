@@ -2,3 +2,6 @@ node_modules/
 .env
 db/*.db
 db/*.db-*
+db/backups/
+db/pre-restore-*.db
+db/*.pid

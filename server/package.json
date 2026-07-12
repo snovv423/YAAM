@@ -8,6 +8,8 @@
     "start": "node server.js",
     "dev": "node --watch server.js",
     "seed": "node db/seed.js",
+    "backup": "node scripts/backup-db.js",
+    "restore": "node scripts/restore-db.js",
     "test": "node --test test/*.test.js"
   },
   "engines": {

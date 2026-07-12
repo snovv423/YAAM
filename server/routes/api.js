@@ -166,18 +166,24 @@ router.post('/orders/:code/rate', rateOrderLimiter, (req, res) => {
 
 // Реальный вебхук платёжного провайдера (ЮKassa и т.п.). Подпись проверяется
 // внутри paymentService.verifyWebhook — если невалидна, 400 и ничего не меняем.
-router.post('/webhooks/payment', express.raw({ type: '*/*' }), async (req, res) => {
-  const event = paymentService.verifyWebhook(req.body.toString('utf8'), req.headers);
-  if (!event) return res.status(400).json({ error: 'invalid webhook signature' });
+// Роут существует только при реальном провайдере: mockProvider.verifyWebhook()
+// не проверяет подпись (доверяет любому JSON), поэтому при PAYMENT_PROVIDER=mock
+// маршрут вообще не регистрируется — иначе внешний запрос мог бы менять статус
+// оплаты произвольного заказа без всякой аутентификации.
+if (process.env.PAYMENT_PROVIDER === 'yookassa') {
+  router.post('/webhooks/payment', express.raw({ type: '*/*' }), async (req, res) => {
+    const event = paymentService.verifyWebhook(req.body.toString('utf8'), req.headers);
+    if (!event) return res.status(400).json({ error: 'invalid webhook signature' });
 
-  const payment = db.prepare('SELECT * FROM payments WHERE provider_payment_id = ?').get(event.providerPaymentId);
-  if (!payment) return res.status(404).json({ error: 'payment not found' });
+    const payment = db.prepare('SELECT * FROM payments WHERE provider_payment_id = ?').get(event.providerPaymentId);
+    if (!payment) return res.status(404).json({ error: 'payment not found' });
 
-  if (event.status === 'succeeded') await orderService.markPaid(payment.order_id);
-  else if (event.status === 'failed') orderService.markPaymentFailed(payment.order_id);
+    if (event.status === 'succeeded') await orderService.markPaid(payment.order_id);
+    else if (event.status === 'failed') orderService.markPaymentFailed(payment.order_id);
 
-  res.json({ ok: true });
-});
+    res.json({ ok: true });
+  });
+}
 
 // --- DEV-ONLY: имитация оплаты без реального провайдера (замена "Демо: оплата прошла") ---
 if (process.env.PAYMENT_PROVIDER !== 'yookassa') {

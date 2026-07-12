@@ -7,6 +7,24 @@ const apiRoutes = require('./routes/api');
 const adminRoutes = require('./routes/admin');
 const orderService = require('./services/orderService');
 const { buildCorsOptions } = require('./config/cors');
+const { acquireLock, releaseLock } = require('./singleInstanceLock');
+
+// orderService/автосвипы полагаются на единственный процесс (см.
+// singleInstanceLock.js) — отказываемся стартовать, если другой экземпляр уже жив.
+let lockPath;
+try {
+  lockPath = acquireLock();
+} catch (err) {
+  console.error(`[server] ${err.message}`);
+  process.exit(1);
+}
+
+function shutdown() {
+  releaseLock(lockPath);
+  process.exit(0);
+}
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
 
 const app = express();
 const PORT = process.env.PORT || 3000;

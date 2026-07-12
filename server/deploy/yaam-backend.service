@@ -1,0 +1,42 @@
+# systemd unit для YAAM backend (Timeweb VPS — заготовка, НЕ применяется автоматически).
+#
+# Установка (вручную, на самом VPS, не отсюда):
+#   sudo cp server/deploy/yaam-backend.service /etc/systemd/system/yaam-backend.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now yaam-backend
+#
+# Важно про единственный экземпляр (C3, см. server/docs/single-instance.md):
+# - Юнит намеренно НЕ templated (без "@" в имени) и не использует ExecStart с
+#   несколькими воркерами/кластером — только один процесс.
+# - Не создавайте копии этого файла под другим именем для "ещё одного backend" —
+#   на один DB_PATH может безопасно писать только один процесс одновременно.
+#   Рантайм сам откажется стартовать вторым (PID-lock, singleInstanceLock.js) —
+#   этот юнит-файл лишь описывает штатный (единственный, ожидаемый) способ запуска.
+# - Не добавляйте сюда WantedBy=multi-user.target для нескольких инстансов и не
+#   меняйте Type= на forking/notify без пересмотра acquireLock()/graceful shutdown.
+
+[Unit]
+Description=YAAM backend API (single instance)
+After=network.target
+
+[Service]
+Type=simple
+User=yaam
+WorkingDirectory=/opt/yaam/server
+EnvironmentFile=/opt/yaam/server/.env
+ExecStart=/usr/bin/node server.js
+Restart=on-failure
+RestartSec=5
+
+# graceful shutdown: server.js слушает SIGTERM и освобождает PID-lock перед
+# выходом (releaseLock() в process.on('SIGTERM', ...)) — TimeoutStopSec с
+# запасом на этот случай, но обычно завершается почти мгновенно.
+TimeoutStopSec=10
+
+# Ограничение на всякий случай: даже если что-то в конфигурации Timeweb
+# попытается запустить несколько копий юнита, systemd сам по себе однократен
+# для нешаблонных unit-файлов — второй `systemctl start yaam-backend` не
+# создаст второй процесс, если первый уже Active.
+
+[Install]
+WantedBy=multi-user.target
