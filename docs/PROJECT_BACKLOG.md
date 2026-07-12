@@ -8,7 +8,7 @@
 
 **Phase:** Production infrastructure preparation *(рабочее название этапа — в проекте пока нет утверждённой сквозной нумерации фаз, номер не присваивается)*
 
-**Status:** Ready to start — payment timer persistence fix закрыт (закоммичен `7adbdf4`, запушен в `origin/main`, подтверждён на production через Chromium Playwright A–D); backend по-прежнему работает только локально, VPS не выбран, миграция на PostgreSQL не начата.
+**Status:** Ready to start — payment timer persistence fix закрыт (закоммичен `7adbdf4`) и restaurant response timer persistence fix закрыт (закоммичен `10e1ae2`), оба запушены в `origin/main`, оба подтверждены на production через Chromium Playwright; backend по-прежнему работает только локально, VPS не выбран, миграция на PostgreSQL не начата.
 
 **Current approved task:** Развернуть backend на Timeweb VPS.
 
@@ -104,6 +104,18 @@
 - явная отмена и успешная оплата обнуляют дедлайн (`resetAll()`, `afterPay()`)
 - модель одинакова для demo и API-режима — сохраняется вне `if(!USE_API)`
 
+### 2026-07-12 — Restaurant response timer persistence model
+
+**Status:** Approved
+
+**Decision:** таймер ожидания ответа ресторана (`preDeadline`, demo-режим) — тот же принцип, что и `qrDeadline`: один абсолютный дедлайн, persisted в `localStorage` вместе с состоянием заказа.
+
+**Behavior:**
+- refresh, restore сессии, back-навигация (popstate) и bfcache/pageshow/visibilitychange-ресинк переиспользуют существующий дедлайн, никогда не продлевают и не пересоздают его
+- новый дедлайн создаётся только для по-настоящему нового ожидания (`openStatus()` → `renderWaitForRestaurant()` после свежей оплаты)
+- явный переход дальше (`nextStatus()`), отказ/таймаут (`openRejected()`) и отмена (`resetAll()`) обнуляют дедлайн — следующий заказ в той же вкладке не наследует чужой/истёкший
+- API-режим не затронут: `pollOrderOnce()` считает остаток от серверного `order.status_updated_at`, отдельная, не тронутая этим фиксом ветка
+
 ### 2026-07-12 — Infrastructure order
 
 **Status:** Approved
@@ -133,6 +145,10 @@
 - 13 детерминированных frontend-regression-тестов на таймер (`client/test/qrTimerPersistence.test.js`, реальный `app.js` через `node:vm`, без новых зависимостей) — 13/13 PASS, 5 последовательных прогонов + parallel run
 - Production Chromium Playwright check (A–D) на `https://yaam.su` — refresh, уход/возврат, 3×reload, отмена+новый заказ — все PASS после подтверждённого деплоя
 - Точечный commit `7adbdf4` создан и **запушен в `origin/main`** — payment timer persistence fix + regression-тесты
+- Restaurant response timer persistence fix — `preDeadline` (экран «ждём ответа ресторана», demo-режим) теперь переживает refresh/restore/back-навигацию/переход к следующему статусу, тот же класс бага, что был у `qrDeadline`, но в отдельной, ранее не тронутой переменной (см. Decisions → Restaurant response timer persistence model)
+- 18 детерминированных frontend-regression-тестов на этот таймер (`client/test/restaurantResponseTimerPersistence.test.js`, реальный `app.js` через `node:vm`, без новых зависимостей) — 31/31 (18 новых + 13 существующих qrDeadline) PASS, 5 последовательных прогонов + parallel run
+- Production Chromium Playwright check A–F на `https://yaam.su` — refresh, back-навигация/возврат, 3×reload, переход дальше (nextStatus), demo decline, отмена+новый заказ — все PASS после подтверждённого деплоя
+- Точечный commit `10e1ae2` создан и **запушен в `origin/main`** — restaurant response timer persistence fix + regression-тесты
 
 ## 3. Critical (обязательно до Production)
 
@@ -239,13 +255,23 @@
 
 ### Medium — Safari/WebKit quality gate not closed
 
-**Current impact:** payment timer fix (A–D) production-check пройден только в Chromium (Playwright MCP по умолчанию запускает Chromium, не Safari/WebKit) — движок явно зафиксирован в PDF-отчёте, не выдавался за Safari.
+**Current impact:** и payment timer fix (A–D), и restaurant response timer fix (A–F) production-check пройдены только в Chromium (Playwright MCP по умолчанию запускает Chromium, не Safari/WebKit) — движок явно зафиксирован в обоих PDF-отчётах, не выдавался за Safari.
 
-**Why open:** реальный Safari/WebKit прогон этой сессией не выполнялся; iOS Safari — основной браузер целевой аудитории (мобильный трафик), специфичные тайминги (bfcache, throttling фоновых вкладок) в Chromium не воспроизводятся один в один.
+**Why open:** реальный Safari/WebKit прогон этой сессией не выполнялся ни для одного из двух timer-фиксов; iOS Safari — основной браузер целевой аудитории (мобильный трафик), специфичные тайминги (bfcache, throttling фоновых вкладок) в Chromium не воспроизводятся один в один.
 
-**Resolution:** отдельный ручной или Playwright-WebKit прогон сценариев A–D перед объявлением timer-fix полностью закрытым для всех браузеров.
+**Resolution:** отдельный ручной или Playwright-WebKit прогон сценариев обоих таймеров перед объявлением timer-фиксов полностью закрытыми для всех браузеров.
 
 **Production blocker:** Для текущего этапа (Timeweb VPS) — нет. Перед полным production launch — да.
+
+### Low — Separate qrDeadline/preDeadline models (не объединены намеренно)
+
+**Current impact:** нет — оба таймера (`qrDeadline`, `preDeadline`) реализуют один и тот же принцип абсолютного persisted deadline независимыми парами функций (`startQRTimer`/`startNewQRTimer` и guarded `startResponseTimer`), с небольшим дублированием паттерна.
+
+**Why open:** сознательное решение при restaurant response timer fix — широкое объединение в общий deadline-менеджер прямо исключено из scope этой задачи, чтобы не расширять blast radius точечного бага-фикса непроверенным рефакторингом.
+
+**Resolution:** возможный будущий рефакторинг в общий deadline-менеджер — только отдельной задачей с собственным анализом/тестами, не заодно с багфиксом.
+
+**Production blocker:** Нет.
 
 ## 6. Ideas
 
@@ -313,6 +339,11 @@
 - commit `7adbdf4` created and pushed to `origin/main` at 2026-07-12T10:11:57Z
 - GitHub Pages deploy confirmed at 2026-07-12T10:13:07Z (`last-modified` header, `startNewQRTimer`/`qrDeadline` present in production `app.js`)
 - production Chromium Playwright check A–D: all PASS (refresh, back/return, 3×reload, cancel+new order)
+- restaurant response timer persistence fix (`preDeadline` survives refresh/restore/back/nextStatus)
+- 18 frontend restaurant-timer regression tests (31/31 total with existing qrDeadline tests, 5× sequential + parallel run, all PASS)
+- commit `10e1ae2` created and pushed to `origin/main` at 2026-07-12T11:22:19Z
+- GitHub Pages deploy confirmed at 2026-07-12T11:22:34Z (`last-modified` header, `savedOrder.preDeadline`/guard/clear-points present in production `app.js`)
+- production Chromium Playwright check A–F: all PASS (refresh, back-navigation/return, 3×reload, nextStatus clears deadline, demo decline clears deadline, cancel+new order gets fresh deadline)
 
 ## 9. Next milestone
 
