@@ -394,7 +394,7 @@ function saveOrderState(){
       // preDeadline — тот же принцип, что и qrDeadline: абсолютный дедлайн окна
       // ожидания ответа ресторана, сохраняется всегда, иначе refresh на этом
       // экране каждый раз показывал бы заново почти полные 3:00.
-      const state={orderCode:currentOrderCode,providerPaymentId:currentProviderPaymentId,paymentUrl:currentPaymentUrl,amount:currentOrderAmount,restId:curRest?curRest.id:null,qrDeadline,preDeadline};
+      const state={orderCode:currentOrderCode,providerPaymentId:currentProviderPaymentId,paymentUrl:currentPaymentUrl,amount:currentOrderAmount,restId:curRest?curRest.id:null,qrDeadline,preDeadline,orderCreatedAtMs};
       if(!USE_API){
         // Демо-режим сам себе бэкенд — сохраняем всё, что понадобится для
         // восстановления экрана без единого сетевого запроса (см. restoreDemoOrder).
@@ -443,7 +443,7 @@ function restoreDemoOrder(saved){
   ratingSubmitted=!!saved.ratingSubmitted;
   ratingJustNow=false; // "только что" — только пока не было перезагрузки, см. ту же логику в pollOrderOnce
   curEstimatedMinutes=saved.curEstimatedMinutes||null;
-  setOrderTime();showOrderDot(true);
+  setOrderTime(orderCreatedAtMs);showOrderDot(true);
   document.getElementById('st-items').innerHTML=orderItemsHTML();
   document.getElementById('st-num').textContent=currentOrderCode;
   document.getElementById('statusbg').style.display='block';
@@ -465,6 +465,7 @@ async function tryRestoreSession(){
     currentOrderAmount=savedOrder.amount||null;
     qrDeadline=savedOrder.qrDeadline||null; // восстанавливаем ДО любого возможного startQRTimer() ниже — иначе он не найдёт дедлайн и создаст новый через fallback
     preDeadline=savedOrder.preDeadline||null; // тот же принцип — восстанавливаем ДО restoreDemoOrder()/renderWaitForRestaurant() ниже
+    orderCreatedAtMs=savedOrder.orderCreatedAtMs||null; // тот же принцип — восстанавливаем ДО restoreDemoOrder()/startOrderPolling() ниже
     if(savedOrder.restId){
       if(USE_API){try{curRest=normalizeRestaurant(await api.getRestaurant(savedOrder.restId));}catch(e){}}
       else{curRest=restaurants.find(r=>r.id===savedOrder.restId)||null;}
@@ -683,6 +684,12 @@ function validateLegalConsent(){
 // что брать сумму оттуда небезопасно. Обновляется из order.items_total в
 // pollOrderOnce() (API-режим) — это и есть backend-данные заказа.
 let currentOrderCode=null, currentProviderPaymentId=null, currentPaymentUrl=null, currentOrderAmount=null;
+// orderCreatedAtMs — момент фактического создания заказа (не оплаты), один раз
+// зафиксированный в openQR(). Персистится и восстанавливается тем же принципом,
+// что qrDeadline/preDeadline, но не очищается на nextStatus()/переходах статуса —
+// это ORDER-scoped значение, живёт весь жизненный цикл заказа, а не только
+// платёжное окно или фазу ожидания ответа ресторана.
+let orderCreatedAtMs=null;
 // Показывает реальную кнопку оплаты, если у платежа есть настоящая ссылка
 // провайдера, иначе — явно подписанный demo-блок. Никогда не показывает кнопку,
 // которая выглядит как реальная оплата, если paymentUrl на самом деле нет.
@@ -739,6 +746,11 @@ async function openQR(){
   const payload=buildOrderPayload();
   const{sum}=totals();
   try{
+    // Единственная точка создания orderCreatedAtMs — сюда попадаем только для
+    // ГЕНУИННО нового заказа (currentOrderCode гарантированно null, см. guard
+    // выше), одинаково для demo и API — момент реального оформления заказа,
+    // не оплаты.
+    orderCreatedAtMs=Date.now();
     if(USE_API){
       const{order,payment}=await api.createOrder({
         restaurantId:curRest.id, city:selectedCity,
@@ -844,7 +856,7 @@ function startResponseTimer(){
 // (может оказаться ещё awaiting_payment) неизвестен до ответа сервера — см.
 // pollOrderOnce(), которая включает/выключает точку по факту оплаты.
 function initStatusScreen(){
-  statusStep=0;inPreStatus=true;curEstimatedMinutes=null;ratingSubmitted=false;ratingJustNow=false;setOrderTime();
+  statusStep=0;inPreStatus=true;curEstimatedMinutes=null;ratingSubmitted=false;ratingJustNow=false;setOrderTime(orderCreatedAtMs);
   document.getElementById('st-num').textContent=currentOrderCode; // и demo (openStatus), и API (startOrderPolling/pollOrderOnce) — один и тот же реальный код, не HTML-заглушка
   document.getElementById('st-items').innerHTML=orderItemsHTML();
   document.getElementById('statusbg').style.display='block';
@@ -890,7 +902,7 @@ function openRejected(reason){
   // Заказ окончен (отклонён рестораном/не ответил вовремя) — это терминальное
   // состояние без пути назад, поэтому не держим его "активным": иначе refresh
   // на этом экране заново находил бы его и не давал вернуться к обычному меню.
-  currentOrderCode=null;currentProviderPaymentId=null;currentPaymentUrl=null;currentOrderAmount=null;saveOrderState();
+  currentOrderCode=null;currentProviderPaymentId=null;currentPaymentUrl=null;currentOrderAmount=null;orderCreatedAtMs=null;saveOrderState();
   setRejOrderCode(orderCodeForDisplay);
   document.getElementById('rej-explain').style.display='';
   // Сумма возврата — только из данных заказа, никогда из захардкоженной
@@ -1004,7 +1016,7 @@ function openOrderNotFound(){
   const orderCodeForDisplay=currentOrderCode; // захватываем до очистки ниже
   stopOrderPolling();
   showStatusSpinner(false);showOrderDot(false);showRestaurantPhone(null);
-  currentOrderCode=null;currentProviderPaymentId=null;currentPaymentUrl=null;currentOrderAmount=null;saveOrderState();
+  currentOrderCode=null;currentProviderPaymentId=null;currentPaymentUrl=null;currentOrderAmount=null;orderCreatedAtMs=null;saveOrderState();
   setRejOrderCode(orderCodeForDisplay);
   document.getElementById('rej-title').textContent='Не удалось найти заказ';
   document.getElementById('rej-explain').textContent='Возможно, он отменён или устарел. Если это ошибка — напишите в поддержку.';
@@ -1097,7 +1109,7 @@ window.addEventListener('pageshow',(e)=>{if(e.persisted){refreshActiveOrderIfVis
 
 function cur(id){return document.getElementById(id).classList.contains('active');}
 function go(id){document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));document.getElementById(id).classList.add('active');document.querySelector('.dish-add').style.display=(id==='dish')?'block':'none';if(id!=='status'&&id!=='rejected')document.getElementById('statusbg').style.display='none';window.scrollTo(0,0);updateBar();if(id==='home'&&introFadeHandler)introFadeHandler();try{if(id!=='home')history.pushState({screen:id},'');else history.replaceState({screen:'home'},'');}catch(e){}}
-function resetAll(){clearInterval(preTimer);clearTimeout(preAutoTimer);preDeadline=null;stopQRTimer();qrDeadline=null;stopOrderPolling();showRestaurantPhone(null);showOrderDot(false);cart={};curRest=null;currentOrderCode=null;currentProviderPaymentId=null;currentPaymentUrl=null;currentOrderAmount=null;demoStage='qr';saveCartState();saveOrderState();document.getElementById('statusbg').style.display='none';go('home');renderList();}
+function resetAll(){clearInterval(preTimer);clearTimeout(preAutoTimer);preDeadline=null;stopQRTimer();qrDeadline=null;stopOrderPolling();showRestaurantPhone(null);showOrderDot(false);cart={};curRest=null;currentOrderCode=null;currentProviderPaymentId=null;currentPaymentUrl=null;currentOrderAmount=null;orderCreatedAtMs=null;demoStage='qr';saveCartState();saveOrderState();document.getElementById('statusbg').style.display='none';go('home');renderList();}
 // Своё окно подтверждения (замена заблокированного confirm)
 function yaamConfirm(text,onYes,labels){
   const ov=document.getElementById('confirm-overlay');
@@ -1204,9 +1216,13 @@ function resyncVisibleTimers(){
   if(preTimer)responseTimerTick();
 }
 
-// Время заказа
-function setOrderTime(){
-  const now=new Date();const h=now.getHours(),m=now.getMinutes();
+// Время заказа — форматирует ПЕРЕДАННЫЙ момент создания заказа (orderCreatedAtMs),
+// а не "сейчас": иначе каждый restore/render показывал бы время последнего
+// открытия экрана вместо реального времени оформления. Fallback на Date.now()
+// — защита на случай отсутствия значения (не должно происходить в норме, см.
+// openQR()/tryRestoreSession()).
+function setOrderTime(ms){
+  const now=new Date(ms||Date.now());const h=now.getHours(),m=now.getMinutes();
   document.getElementById('st-time').textContent='Заказ оформлен в '+h+':'+(m<10?'0':'')+m;
 }
 

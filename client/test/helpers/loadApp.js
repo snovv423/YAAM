@@ -35,6 +35,7 @@ function makeFakeElement(id) {
     animate() {},
     focus() {},
     click() {},
+    closest() { return this; }, // достаточно для validateCheckout() (toggle .err на "ближайшем" поле)
   };
 }
 
