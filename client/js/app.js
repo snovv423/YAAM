@@ -391,7 +391,10 @@ function saveOrderState(){
       // один и тот же QR-экран с одним и тем же отсчётом — без этого поля
       // refresh/restore каждый раз создавал бы новые 10 минут вместо того,
       // чтобы продолжить уже идущий отсчёт.
-      const state={orderCode:currentOrderCode,providerPaymentId:currentProviderPaymentId,paymentUrl:currentPaymentUrl,amount:currentOrderAmount,restId:curRest?curRest.id:null,qrDeadline};
+      // preDeadline — тот же принцип, что и qrDeadline: абсолютный дедлайн окна
+      // ожидания ответа ресторана, сохраняется всегда, иначе refresh на этом
+      // экране каждый раз показывал бы заново почти полные 3:00.
+      const state={orderCode:currentOrderCode,providerPaymentId:currentProviderPaymentId,paymentUrl:currentPaymentUrl,amount:currentOrderAmount,restId:curRest?curRest.id:null,qrDeadline,preDeadline};
       if(!USE_API){
         // Демо-режим сам себе бэкенд — сохраняем всё, что понадобится для
         // восстановления экрана без единого сетевого запроса (см. restoreDemoOrder).
@@ -461,6 +464,7 @@ async function tryRestoreSession(){
     currentPaymentUrl=savedOrder.paymentUrl||null;
     currentOrderAmount=savedOrder.amount||null;
     qrDeadline=savedOrder.qrDeadline||null; // восстанавливаем ДО любого возможного startQRTimer() ниже — иначе он не найдёт дедлайн и создаст новый через fallback
+    preDeadline=savedOrder.preDeadline||null; // тот же принцип — восстанавливаем ДО restoreDemoOrder()/renderWaitForRestaurant() ниже
     if(savedOrder.restId){
       if(USE_API){try{curRest=normalizeRestaurant(await api.getRestaurant(savedOrder.restId));}catch(e){}}
       else{curRest=restaurants.find(r=>r.id===savedOrder.restId)||null;}
@@ -821,9 +825,15 @@ function responseTimerTick(){
   if(sub)sub.textContent=`Ответ ресторана в течение ${m}:${s<10?'0':''}${s}`;
   if(secs<=0){clearInterval(preTimer);preTimer=null;openRejected('timeout');}
 }
+// Единственная точка входа и для нового ожидания (openStatus() -> preAutoTimer
+// -> renderWaitForRestaurant()), и для восстановления после refresh
+// (restoreDemoOrder() -> renderWaitForRestaurant()) — поэтому дедлайн создаётся
+// только если его ещё нет (guard), иначе просто переиспользуется и
+// продолжается. preDeadline гарантированно null к моменту нового заказа —
+// см. очистку в nextStatus()/openRejected()/resetAll().
 function startResponseTimer(){
   clearInterval(preTimer);
-  preDeadline=Date.now()+RESTAURANT_RESPONSE_WINDOW_SEC*1000;
+  if(!preDeadline){preDeadline=Date.now()+RESTAURANT_RESPONSE_WINDOW_SEC*1000;saveOrderState();}
   responseTimerTick();
   preTimer=setInterval(responseTimerTick,1000);
 }
@@ -852,7 +862,7 @@ function openStatus(){
 }
 function nextStatus(){
   if(inPreStatus){
-    clearInterval(preTimer);clearTimeout(preAutoTimer);
+    clearInterval(preTimer);clearTimeout(preAutoTimer);preDeadline=null; // ресторан принял — окно ожидания больше не актуально, не даём его случайно переиспользовать
     inPreStatus=false;
     document.getElementById('st-progress').style.display='flex';
     renderStatus();
@@ -873,7 +883,7 @@ function setRejOrderCode(code){
 function openRejected(reason){
   const orderCodeForDisplay=currentOrderCode; // захватываем до очистки ниже
   const amountForDisplay=currentOrderAmount; // источник истины — сумма ЗАКАЗА, не текущей (возможно уже пустой после refresh) корзины
-  clearInterval(preTimer);clearTimeout(preAutoTimer);stopOrderPolling();
+  clearInterval(preTimer);clearTimeout(preAutoTimer);preDeadline=null;stopOrderPolling(); // отклонён/не ответил вовремя — терминально, окно ожидания больше не актуально
   showStatusSpinner(false);
   showOrderDot(false);
   showRestaurantPhone(null);
@@ -1087,7 +1097,7 @@ window.addEventListener('pageshow',(e)=>{if(e.persisted){refreshActiveOrderIfVis
 
 function cur(id){return document.getElementById(id).classList.contains('active');}
 function go(id){document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));document.getElementById(id).classList.add('active');document.querySelector('.dish-add').style.display=(id==='dish')?'block':'none';if(id!=='status'&&id!=='rejected')document.getElementById('statusbg').style.display='none';window.scrollTo(0,0);updateBar();if(id==='home'&&introFadeHandler)introFadeHandler();try{if(id!=='home')history.pushState({screen:id},'');else history.replaceState({screen:'home'},'');}catch(e){}}
-function resetAll(){clearInterval(preTimer);clearTimeout(preAutoTimer);stopQRTimer();qrDeadline=null;stopOrderPolling();showRestaurantPhone(null);showOrderDot(false);cart={};curRest=null;currentOrderCode=null;currentProviderPaymentId=null;currentPaymentUrl=null;currentOrderAmount=null;demoStage='qr';saveCartState();saveOrderState();document.getElementById('statusbg').style.display='none';go('home');renderList();}
+function resetAll(){clearInterval(preTimer);clearTimeout(preAutoTimer);preDeadline=null;stopQRTimer();qrDeadline=null;stopOrderPolling();showRestaurantPhone(null);showOrderDot(false);cart={};curRest=null;currentOrderCode=null;currentProviderPaymentId=null;currentPaymentUrl=null;currentOrderAmount=null;demoStage='qr';saveCartState();saveOrderState();document.getElementById('statusbg').style.display='none';go('home');renderList();}
 // Своё окно подтверждения (замена заблокированного confirm)
 function yaamConfirm(text,onYes,labels){
   const ov=document.getElementById('confirm-overlay');
