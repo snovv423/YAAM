@@ -386,7 +386,12 @@ function saveCartState(){
 function saveOrderState(){
   try{
     if(currentOrderCode){
-      const state={orderCode:currentOrderCode,providerPaymentId:currentProviderPaymentId,paymentUrl:currentPaymentUrl,amount:currentOrderAmount,restId:curRest?curRest.id:null};
+      // qrDeadline — абсолютный дедлайн платёжного окна (см. "Таймер QR" ниже).
+      // Сохраняется всегда, не только в demo: и API-, и demo-режим показывают
+      // один и тот же QR-экран с одним и тем же отсчётом — без этого поля
+      // refresh/restore каждый раз создавал бы новые 10 минут вместо того,
+      // чтобы продолжить уже идущий отсчёт.
+      const state={orderCode:currentOrderCode,providerPaymentId:currentProviderPaymentId,paymentUrl:currentPaymentUrl,amount:currentOrderAmount,restId:curRest?curRest.id:null,qrDeadline};
       if(!USE_API){
         // Демо-режим сам себе бэкенд — сохраняем всё, что понадобится для
         // восстановления экрана без единого сетевого запроса (см. restoreDemoOrder).
@@ -455,6 +460,7 @@ async function tryRestoreSession(){
     currentProviderPaymentId=savedOrder.providerPaymentId||null;
     currentPaymentUrl=savedOrder.paymentUrl||null;
     currentOrderAmount=savedOrder.amount||null;
+    qrDeadline=savedOrder.qrDeadline||null; // восстанавливаем ДО любого возможного startQRTimer() ниже — иначе он не найдёт дедлайн и создаст новый через fallback
     if(savedOrder.restId){
       if(USE_API){try{curRest=normalizeRestaurant(await api.getRestaurant(savedOrder.restId));}catch(e){}}
       else{curRest=restaurants.find(r=>r.id===savedOrder.restId)||null;}
@@ -758,7 +764,7 @@ async function openQR(){
     document.getElementById('qr-amt').textContent=sum+' ₽';
     document.getElementById('cartbar').style.display='none';
     renderQRPaymentOptions();
-    drawQR();startQRTimer();go('qr');
+    drawQR();startNewQRTimer();go('qr');
   }catch(err){
     showToast(err.message||'Не удалось оформить заказ');
   }finally{
@@ -919,7 +925,7 @@ async function retryPaymentFlow(){
     const{sum}=totals();
     document.getElementById('qr-amt').textContent=sum+' ₽';
     renderQRPaymentOptions();
-    drawQR();startQRTimer();go('qr');
+    drawQR();startNewQRTimer();go('qr'); // новая попытка оплаты после payment_failed — новый providerPaymentId, значит и новый дедлайн
   }catch(err){
     showToast(err.message||'Не удалось создать новый платёж');
   }
@@ -1081,7 +1087,7 @@ window.addEventListener('pageshow',(e)=>{if(e.persisted){refreshActiveOrderIfVis
 
 function cur(id){return document.getElementById(id).classList.contains('active');}
 function go(id){document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));document.getElementById(id).classList.add('active');document.querySelector('.dish-add').style.display=(id==='dish')?'block':'none';if(id!=='status'&&id!=='rejected')document.getElementById('statusbg').style.display='none';window.scrollTo(0,0);updateBar();if(id==='home'&&introFadeHandler)introFadeHandler();try{if(id!=='home')history.pushState({screen:id},'');else history.replaceState({screen:'home'},'');}catch(e){}}
-function resetAll(){clearInterval(preTimer);clearTimeout(preAutoTimer);stopQRTimer();stopOrderPolling();showRestaurantPhone(null);showOrderDot(false);cart={};curRest=null;currentOrderCode=null;currentProviderPaymentId=null;currentPaymentUrl=null;currentOrderAmount=null;demoStage='qr';saveCartState();saveOrderState();document.getElementById('statusbg').style.display='none';go('home');renderList();}
+function resetAll(){clearInterval(preTimer);clearTimeout(preAutoTimer);stopQRTimer();qrDeadline=null;stopOrderPolling();showRestaurantPhone(null);showOrderDot(false);cart={};curRest=null;currentOrderCode=null;currentProviderPaymentId=null;currentPaymentUrl=null;currentOrderAmount=null;demoStage='qr';saveCartState();saveOrderState();document.getElementById('statusbg').style.display='none';go('home');renderList();}
 // Своё окно подтверждения (замена заблокированного confirm)
 function yaamConfirm(text,onYes,labels){
   const ov=document.getElementById('confirm-overlay');
@@ -1117,7 +1123,7 @@ function openSheet(){
 
 // После оплаты — сразу к статусу
 async function afterPay(){
-  stopQRTimer();
+  stopQRTimer();qrDeadline=null; // оплата подтверждена — платёжное окно больше не актуально, не даём его случайно переиспользовать
   if(USE_API){
     try{await api.devMarkPaid(currentProviderPaymentId);}
     catch(err){showToast(err.message||'Оплата не прошла');return;}
@@ -1154,11 +1160,27 @@ function qrTimerTick(){
   if(el)el.textContent=m+':'+(s<10?'0':'')+s;
   if(secs<=0)stopQRTimer();
 }
+// Возобновляет отсчёт от УЖЕ существующего qrDeadline (восстановлен из
+// localStorage при refresh, или просто пережил SPA-навигацию в памяти) — не
+// создаёт новый дедлайн. Используется при любом ПОВТОРНОМ показе экрана QR
+// для уже существующего платежа: restoreDemoOrder(), resumeExistingOrderFlow(),
+// resumeExistingPayment(). Fallback ниже — защита на случай, если дедлайна
+// почему-то нет вовсе (не должно происходить в норме).
 function startQRTimer(){
   stopQRTimer();
-  qrDeadline=Date.now()+QR_TIMER_SEC*1000;
+  if(!qrDeadline)qrDeadline=Date.now()+QR_TIMER_SEC*1000;
   qrTimerTick();
   qrInterval=setInterval(qrTimerTick,1000);
+}
+// Единственное место, где дедлайн платежа реально создаётся заново — только
+// для действительно НОВОЙ платёжной попытки (новый заказ в openQR(), новый
+// providerPaymentId после payment_failed в retryPaymentFlow()). Сразу
+// сохраняет дедлайн вместе с состоянием заказа, чтобы следующий refresh/
+// restore корректно восстановил именно его, а не начал заново с 10 минут.
+function startNewQRTimer(){
+  qrDeadline=Date.now()+QR_TIMER_SEC*1000;
+  saveOrderState();
+  startQRTimer();
 }
 // Уход с экрана QR кнопкой "Назад" — заказ и currentOrderCode НЕ трогаем (пользователь
 // должен суметь вернуться к той же оплате), но фоновый таймер обязан остановиться,
