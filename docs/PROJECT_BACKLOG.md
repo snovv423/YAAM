@@ -1,6 +1,6 @@
 # YAAM Project Backlog
 
-Обновлено: 2026-07-12.
+Обновлено: 2026-07-13.
 
 Это внутренний living-документ команды — roadmap, архитектурная память и production checklist. Он не заменяет `README.md` (там — как запустить проект) и не заменяет `docs/PROJECT_STATUS.md` (там — снимок последних коммитов на конкретную дату). Этот файл — единственное место, где фиксируются задачи, решения, риски и правила между этапами разработки, чтобы ничего не терялось между сессиями.
 
@@ -8,7 +8,7 @@
 
 **Phase:** Production infrastructure preparation *(рабочее название этапа — в проекте пока нет утверждённой сквозной нумерации фаз, номер не присваивается)*
 
-**Status:** Ready to start — payment timer persistence fix закрыт (закоммичен `7adbdf4`), restaurant response timer persistence fix закрыт (закоммичен `10e1ae2`) и order creation time persistence fix закрыт (закоммичен `e13e52d`), все три запушены в `origin/main`, все три подтверждены на production через Chromium Playwright; backend по-прежнему работает только локально, VPS не выбран, миграция на PostgreSQL не начата.
+**Status:** Ready to start — payment timer persistence fix закрыт (закоммичен `7adbdf4`), restaurant response timer persistence fix закрыт (закоммичен `10e1ae2`) и order creation time persistence fix закрыт (закоммичен `e13e52d`), все три запушены в `origin/main`, все три подтверждены на production через Chromium Playwright; read-only аудит готовности к Timeweb VPS проведён (`yaam-timeweb-vps-readiness-audit.pdf`), все три найденных Critical-риска (C1 — незащищённый webhook, C2 — нет бэкапов, C3 — нет защиты от нескольких процессов) закрыты и запушены (`26067fb`); backend по-прежнему работает только локально, VPS не выбран, миграция на PostgreSQL не начата.
 
 **Current approved task:** Развернуть backend на Timeweb VPS.
 
@@ -32,7 +32,7 @@
 
 **Database:**
 - SQLite (`node:sqlite`, `server/db/yaam.db`)
-- Бэкапов нет, миграция на PostgreSQL — в планах
+- Backup/restore механизм реализован и протестирован (`npm run backup`/`npm run restore`, `server/scripts/backup-db.js`/`restore-db.js`, round-trip покрыт тестами) — на реальном сервере по расписанию ещё не запускался, потому что VPS ещё не выбран; миграция на PostgreSQL — в планах
 
 **Production:**
 - Ещё не развёрнут (нет VPS, нет production ENV, нет мониторинга/логирования)
@@ -166,15 +166,22 @@
 - 20 детерминированных frontend-regression-тестов на это значение (`client/test/orderCreatedTimePersistence.test.js`, реальный `app.js` через `node:vm`, включая реальный прогон `openQR()`, минимальное расширение helper — `closest()` в fake DOM-элементе) — 51/51 (20 новых + 31 существующих) PASS, 5 последовательных прогонов + parallel run
 - Production Chromium Playwright check A–F на `https://yaam.su` — refresh через границу часа, back-навигация, 3×reload, переход через все статусы до "Доставлен", demo decline, отмена+новый заказ — все PASS после подтверждённого деплоя
 - Точечный commit `e13e52d` создан и **запушен в `origin/main`** — order creation time persistence fix + regression-тесты
+- Read-only аудит готовности backend к деплою на Timeweb VPS (`yaam-timeweb-vps-readiness-audit.pdf`) — 30 вопросов, риски разбиты на Critical/High/Can-do-during-deploy/Can-postpone/Demo-only/Production-required, рекомендованная архитектура (GitHub Pages → `api.yaam.su` → Nginx/TLS → Node systemd single-instance → SQLite → PostgreSQL позже)
+- C1 — webhook-роут (`/api/webhooks/payment`) теперь регистрируется только при `PAYMENT_PROVIDER=yookassa`; в demo/mock-режиме (текущее состояние проекта) недоступен извне — `mockProvider.verifyWebhook()` не проверял подпись
+- C2 — production-ready backup/restore для SQLite через встроенный `node:sqlite` (`backup()` + `readOnly`), без внешних зависимостей — `server/scripts/backup-db.js`/`restore-db.js`, ротация (14 последних), safety-копия перед restore, `server/docs/backup-restore.md`
+- C3 — гарантия единственного экземпляра backend через PID-lock (`server/singleInstanceLock.js`) — второй процесс отказывается стартовать, если первый жив; `SIGTERM`/`SIGINT` освобождают lock; systemd unit-заготовка `server/deploy/yaam-backend.service`; `server/docs/single-instance.md`
+- 19 новых backend-тестов на C1–C3 (4 + 5 + 10), полный набор — 49/49 PASS
+- Живая проверка C3 на реальных процессах Node (не только юнит-тесты): второй процесс отказывается стартовать с понятной ошибкой, `SIGTERM` освобождает lock в пределах секунды, третий процесс после этого стартует нормально
+- Точечный commit `26067fb` создан и **запушен в `origin/main`** — C1–C3 fixes + 19 тестов; ничего не задеплоено на Timeweb, DNS не менялся, VPS не создавался
 
 ## 3. Critical (обязательно до Production)
 
 - Развернуть backend на VPS (Timeweb или аналог) — сейчас нигде не задеплоен
 - Миграция SQLite → PostgreSQL
 - Production ENV (секреты, `.env`, `trust proxy` под реальный reverse-proxy)
-- Backup-стратегия для БД и автоматические бэкапы (cron + хранение вне сервера) — сейчас бэкапов нет вообще
+- Подключить cron/systemd-timer для регулярных бэкапов на VPS + offsite-копию — сам механизм уже реализован и протестирован (`server/scripts/backup-db.js`/`restore-db.js`, `server/docs/backup-restore.md`), осталось только включить по расписанию при появлении реального сервера
 - ЮKassa — реальная интеграция вместо mock-провайдера
-- Реальные webhooks с проверкой подписи
+- Реальные webhooks ЮKassa с проверкой подписи — сам маршрут `/api/webhooks/payment` больше не доступен извне при `PAYMENT_PROVIDER=mock` (закрыто, commit `26067fb`), но полноценная интеграция (`YookassaProvider`) всё ещё не реализована (заглушка, бросает `not implemented`)
 - Refund state machine — см. Known risks (Critical — Refund state machine)
 - Security audit — отдельно: `public_code` последовательный и перебираемый, для продакшена нужен непереборный access token/signed link
 - Production monitoring (Sentry или аналог)
@@ -240,15 +247,15 @@
 
 **Production blocker:** Yes.
 
-### High — Backups absent
+### Medium — Backup mechanism ready, not yet scheduled on a real server
 
-**Current impact:** автоматические резервные копии БД отсутствуют.
+**Current impact:** backup/restore реализованы и протестированы локально (round-trip: бэкап → порча данных → restore → проверка; ротация; safety-копия перед перезаписью) — `server/scripts/backup-db.js`/`restore-db.js`, 5 автотестов. Ни разу не запускались по расписанию на реальном сервере, потому что реального сервера ещё нет.
 
-**Why open:** не приоритизировано до появления реального сервера, который нужно бэкапить.
+**Why open:** VPS ещё не выбран — сам механизм больше не блокер, осталось подключить cron/systemd-timer и offsite-копию при деплое (см. `server/docs/backup-restore.md`).
 
-**Resolution:** backup policy + restore test.
+**Resolution:** cron/systemd-timer на VPS при деплое.
 
-**Production blocker:** Yes.
+**Production blocker:** До первого деплоя — нет (механизм готов и проверен). До полноценного production launch — да, расписание должно реально работать, не только существовать в коде.
 
 ### Medium — Sequential public_code
 
@@ -376,6 +383,17 @@
 - commit `e13e52d` created and pushed to `origin/main` at 2026-07-12T14:49:39Z
 - GitHub Pages deploy confirmed at 2026-07-12T14:49:51Z (`last-modified` header, `orderCreatedAtMs` capture/persist/restore/clear-points present in production `app.js`)
 - production Chromium Playwright check A–F: all PASS (refresh across hour boundary, back-navigation, 3×reload, full status walk to delivered, demo decline, cancel+new order gets fresh timestamp)
+
+### 2026-07-13
+
+**Completed:**
+- Read-only аудит готовности backend к деплою на Timeweb VPS (`yaam-timeweb-vps-readiness-audit.pdf`)
+- C1: webhook-роут гейтится по `PAYMENT_PROVIDER=yookassa`, недоступен извне в mock-режиме
+- C2: backup/restore для SQLite (`node:sqlite backup()`, без внешних зависимостей), round-trip проверен тестами
+- C3: PID-lock guard единственного экземпляра backend, `SIGTERM`/`SIGINT` graceful shutdown, systemd unit-заготовка
+- 19 новых backend-тестов (49/49 всего)
+- Живая проверка C3 на реальных процессах (не только юнит-тесты)
+- commit `26067fb` создан и **запушен в `origin/main`** at 2026-07-13; Timeweb/DNS/VPS не затронуты
 
 ## 9. Next milestone
 
