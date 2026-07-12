@@ -8,7 +8,7 @@
 
 **Phase:** Production infrastructure preparation *(рабочее название этапа — в проекте пока нет утверждённой сквозной нумерации фаз, номер не присваивается)*
 
-**Status:** Ready to start — payment timer persistence fix закрыт (закоммичен `7adbdf4`) и restaurant response timer persistence fix закрыт (закоммичен `10e1ae2`), оба запушены в `origin/main`, оба подтверждены на production через Chromium Playwright; backend по-прежнему работает только локально, VPS не выбран, миграция на PostgreSQL не начата.
+**Status:** Ready to start — payment timer persistence fix закрыт (закоммичен `7adbdf4`), restaurant response timer persistence fix закрыт (закоммичен `10e1ae2`) и order creation time persistence fix закрыт (закоммичен `e13e52d`), все три запушены в `origin/main`, все три подтверждены на production через Chromium Playwright; backend по-прежнему работает только локально, VPS не выбран, миграция на PostgreSQL не начата.
 
 **Current approved task:** Развернуть backend на Timeweb VPS.
 
@@ -116,6 +116,19 @@
 - явный переход дальше (`nextStatus()`), отказ/таймаут (`openRejected()`) и отмена (`resetAll()`) обнуляют дедлайн — следующий заказ в той же вкладке не наследует чужой/истёкший
 - API-режим не затронут: `pollOrderOnce()` считает остаток от серверного `order.status_updated_at`, отдельная, не тронутая этим фиксом ветка
 
+### 2026-07-12 — Order creation time persistence model
+
+**Status:** Approved
+
+**Decision:** отображаемое время «Заказ оформлен в HH:MM» вычисляется из одного неизменяемого persisted timestamp (`orderCreatedAtMs`), а не из `new Date()` в момент рендера.
+
+**Behavior:**
+- захватывается client-side ровно один раз — в `openQR()`, в момент реального создания заказа (не оплаты), одинаково для demo и API-режима, до любого сетевого вызова
+- refresh, restore, back-навигация, повторный рендер статуса и polling переиспользуют существующий timestamp, никогда не пересчитывают его из текущего времени
+- `nextStatus()` НЕ очищает timestamp — в отличие от `preDeadline`, это ORDER-scoped значение, живёт весь жизненный цикл заказа, а не только одну фазу
+- явная отмена, отказ ресторана/таймаут и "заказ не найден" обнуляют timestamp — следующий заказ в той же вкладке не наследует чужое время
+- backend `orders.created_at` существует в schema.sql, но сознательно не добавлялся в `PublicOrderDTO` — client-side capture в момент создания заказа даёт эквивалентную точность (разница — время одного сетевого запроса) без расширения публичного API
+
 ### 2026-07-12 — Infrastructure order
 
 **Status:** Approved
@@ -149,6 +162,10 @@
 - 18 детерминированных frontend-regression-тестов на этот таймер (`client/test/restaurantResponseTimerPersistence.test.js`, реальный `app.js` через `node:vm`, без новых зависимостей) — 31/31 (18 новых + 13 существующих qrDeadline) PASS, 5 последовательных прогонов + parallel run
 - Production Chromium Playwright check A–F на `https://yaam.su` — refresh, back-навигация/возврат, 3×reload, переход дальше (nextStatus), demo decline, отмена+новый заказ — все PASS после подтверждённого деплоя
 - Точечный commit `10e1ae2` создан и **запушен в `origin/main`** — restaurant response timer persistence fix + regression-тесты
+- Order creation time persistence fix — текст «Заказ оформлен в HH:MM» (экран статуса заказа) теперь переживает refresh/restore/back-навигацию/переход статусов/polling, тот же архитектурный класс бага, что у qrDeadline/preDeadline, но у ORDER-scoped значения `orderCreatedAtMs` (не countdown, не очищается на nextStatus — см. Decisions → Order creation time persistence model)
+- 20 детерминированных frontend-regression-тестов на это значение (`client/test/orderCreatedTimePersistence.test.js`, реальный `app.js` через `node:vm`, включая реальный прогон `openQR()`, минимальное расширение helper — `closest()` в fake DOM-элементе) — 51/51 (20 новых + 31 существующих) PASS, 5 последовательных прогонов + parallel run
+- Production Chromium Playwright check A–F на `https://yaam.su` — refresh через границу часа, back-навигация, 3×reload, переход через все статусы до "Доставлен", demo decline, отмена+новый заказ — все PASS после подтверждённого деплоя
+- Точечный commit `e13e52d` создан и **запушен в `origin/main`** — order creation time persistence fix + regression-тесты
 
 ## 3. Critical (обязательно до Production)
 
@@ -255,13 +272,23 @@
 
 ### Medium — Safari/WebKit quality gate not closed
 
-**Current impact:** и payment timer fix (A–D), и restaurant response timer fix (A–F) production-check пройдены только в Chromium (Playwright MCP по умолчанию запускает Chromium, не Safari/WebKit) — движок явно зафиксирован в обоих PDF-отчётах, не выдавался за Safari.
+**Current impact:** payment timer fix (A–D), restaurant response timer fix (A–F) и order creation time fix (A–F) production-check пройдены только в Chromium (Playwright MCP по умолчанию запускает Chromium, не Safari/WebKit) — движок явно зафиксирован во всех трёх PDF-отчётах, не выдавался за Safari.
 
-**Why open:** реальный Safari/WebKit прогон этой сессией не выполнялся ни для одного из двух timer-фиксов; iOS Safari — основной браузер целевой аудитории (мобильный трафик), специфичные тайминги (bfcache, throttling фоновых вкладок) в Chromium не воспроизводятся один в один.
+**Why open:** реальный Safari/WebKit прогон этой сессией не выполнялся ни для одного из трёх фиксов; iOS Safari — основной браузер целевой аудитории (мобильный трафик), специфичные тайминги (bfcache, throttling фоновых вкладок) в Chromium не воспроизводятся один в один.
 
-**Resolution:** отдельный ручной или Playwright-WebKit прогон сценариев обоих таймеров перед объявлением timer-фиксов полностью закрытыми для всех браузеров.
+**Resolution:** отдельный ручной или Playwright-WebKit прогон сценариев всех трёх фиксов перед объявлением их полностью закрытыми для всех браузеров.
 
 **Production blocker:** Для текущего этапа (Timeweb VPS) — нет. Перед полным production launch — да.
+
+### Low — order.created_at сознательно не добавлен в PublicOrderDTO
+
+**Current impact:** нет — client-side capture `orderCreatedAtMs` (момент `openQR()`) даёт точность до долей секунды от реального backend `created_at`, неотличимую при отображении с точностью до минуты.
+
+**Why open:** это не открытый гэп, а осознанное решение при анализе order creation time fix — расширение `PublicOrderDTO` явно входило в scope, требующий подтверждения CTO (см. Production rules), но оказалось не нужно: frontend-only решение полностью покрывает и demo, и API режим без изменения backend.
+
+**Resolution:** не требуется, если только в будущем не понадобится реальный серверный `created_at` для иной цели (аналитика, поддержка) — тогда отдельной задачей.
+
+**Production blocker:** Нет.
 
 ### Low — Separate qrDeadline/preDeadline models (не объединены намеренно)
 
@@ -344,6 +371,11 @@
 - commit `10e1ae2` created and pushed to `origin/main` at 2026-07-12T11:22:19Z
 - GitHub Pages deploy confirmed at 2026-07-12T11:22:34Z (`last-modified` header, `savedOrder.preDeadline`/guard/clear-points present in production `app.js`)
 - production Chromium Playwright check A–F: all PASS (refresh, back-navigation/return, 3×reload, nextStatus clears deadline, demo decline clears deadline, cancel+new order gets fresh deadline)
+- order creation time persistence fix (`orderCreatedAtMs` survives refresh/restore/back/all status transitions)
+- 20 frontend order-time regression tests (51/51 total with existing qrDeadline+preDeadline tests, 5× sequential + parallel run, all PASS)
+- commit `e13e52d` created and pushed to `origin/main` at 2026-07-12T14:49:39Z
+- GitHub Pages deploy confirmed at 2026-07-12T14:49:51Z (`last-modified` header, `orderCreatedAtMs` capture/persist/restore/clear-points present in production `app.js`)
+- production Chromium Playwright check A–F: all PASS (refresh across hour boundary, back-navigation, 3×reload, full status walk to delivered, demo decline, cancel+new order gets fresh timestamp)
 
 ## 9. Next milestone
 
