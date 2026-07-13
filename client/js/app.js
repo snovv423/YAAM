@@ -10,7 +10,45 @@ const TOAST_DURATION_MS=2600;
 const FLY_ANIM_MS=750;
 const CART_STORAGE_KEY='yaam_cart_state';
 const ORDER_STORAGE_KEY='yaam_active_order';
+const PENDING_ORDER_CREDENTIALS_KEY='yaam_pending_order_credentials';
 const DEMO_SEQ_KEY='yaam_demo_order_seq';
+const ORDER_TOKEN_PREFIX='yaam_ord_v1_';
+const CREATE_KEY_PREFIX='yaam_create_v1_';
+// Совпадает с серверным окном дедупликации awaiting_payment: пока первый
+// ответ мог потеряться, повторяем POST с той же парой; после окна новый заказ
+// получает новые credentials и не наследует секрет старой попытки.
+const CAPABILITY_TTL_MS=15*60*1000;
+
+function randomCapability(prefix){
+  if(!globalThis.crypto||typeof globalThis.crypto.getRandomValues!=='function'){
+    throw new Error('Безопасное создание заказа не поддерживается этим браузером');
+  }
+  const bytes=new Uint8Array(32);
+  globalThis.crypto.getRandomValues(bytes);
+  let binary='';
+  bytes.forEach(b=>{binary+=String.fromCharCode(b);});
+  return prefix+btoa(binary).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+}
+function validCapability(value,prefix){
+  return typeof value==='string'&&value.startsWith(prefix)&&value.length===prefix.length+43&&/^[A-Za-z0-9_-]+$/.test(value.slice(prefix.length));
+}
+function pendingOrderCredentials(){
+  let saved=null;
+  try{saved=JSON.parse(localStorage.getItem(PENDING_ORDER_CREDENTIALS_KEY)||'null');}catch(e){}
+  if(saved&&Date.now()-Number(saved.createdAt||0)<=CAPABILITY_TTL_MS
+    &&validCapability(saved.orderAccessToken,ORDER_TOKEN_PREFIX)
+    &&validCapability(saved.createIdempotencyKey,CREATE_KEY_PREFIX))return saved;
+  const fresh={
+    orderAccessToken:randomCapability(ORDER_TOKEN_PREFIX),
+    createIdempotencyKey:randomCapability(CREATE_KEY_PREFIX),
+    createdAt:Date.now(),
+  };
+  localStorage.setItem(PENDING_ORDER_CREDENTIALS_KEY,JSON.stringify(fresh));
+  return fresh;
+}
+function clearPendingOrderCredentials(){
+  try{localStorage.removeItem(PENDING_ORDER_CREDENTIALS_KEY);}catch(e){}
+}
 
 // Без бэкенда (USE_API=false, как сейчас на проде — сервер ещё не задеплоен)
 // номер заказа неоткуда взять от сервера, но активный заказ всё равно должен
@@ -237,7 +275,7 @@ function renderRatingStars(){
 async function submitRating(n){
   document.querySelectorAll('#rating-stars .rating-star').forEach(b=>b.classList.toggle('on',Number(b.dataset.n)<=n));
   try{
-    if(USE_API&&currentOrderCode)await api.rateOrder(currentOrderCode,n);
+    if(USE_API&&currentOrderCode)await api.rateOrder(currentOrderCode,currentOrderAccessToken,n);
     ratingSubmitted=true;ratingJustNow=true;
     saveOrderState(); // демо: чтобы после refresh снова не показать форму оценки
     setTimeout(renderRatingStars,350); // короткая пауза, чтобы увидеть подсветку звёзд перед "спасибо"
@@ -394,7 +432,7 @@ function saveOrderState(){
       // preDeadline — тот же принцип, что и qrDeadline: абсолютный дедлайн окна
       // ожидания ответа ресторана, сохраняется всегда, иначе refresh на этом
       // экране каждый раз показывал бы заново почти полные 3:00.
-      const state={orderCode:currentOrderCode,providerPaymentId:currentProviderPaymentId,paymentUrl:currentPaymentUrl,amount:currentOrderAmount,restId:curRest?curRest.id:null,qrDeadline,preDeadline,orderCreatedAtMs};
+      const state={orderCode:currentOrderCode,orderAccessToken:currentOrderAccessToken,paymentUrl:currentPaymentUrl,amount:currentOrderAmount,restId:curRest?curRest.id:null,qrDeadline,preDeadline,orderCreatedAtMs};
       if(!USE_API){
         // Демо-режим сам себе бэкенд — сохраняем всё, что понадобится для
         // восстановления экрана без единого сетевого запроса (см. restoreDemoOrder).
@@ -411,7 +449,8 @@ function saveOrderState(){
     }else{
       localStorage.removeItem(ORDER_STORAGE_KEY);
     }
-  }catch(e){}
+    return true;
+  }catch(e){return false;}
 }
 
 // Восстановление после обновления/закрытия вкладки. Активный оплаченный заказ
@@ -458,9 +497,16 @@ function restoreDemoOrder(saved){
 async function tryRestoreSession(){
   let savedOrder=null;
   try{savedOrder=JSON.parse(localStorage.getItem(ORDER_STORAGE_KEY)||'null');}catch(e){}
+  // Заказы, сохранённые до появления capability, нельзя восстанавливать через
+  // один перебираемый public_code. Это pre-production legacy: удаляем только
+  // локальную ссылку, сам внутренний заказ остаётся доступен поддержке/админке.
+  if(USE_API&&savedOrder&&savedOrder.orderCode&&!validCapability(savedOrder.orderAccessToken,ORDER_TOKEN_PREFIX)){
+    localStorage.removeItem(ORDER_STORAGE_KEY);
+    savedOrder=null;
+  }
   if(savedOrder&&savedOrder.orderCode){
     currentOrderCode=savedOrder.orderCode;
-    currentProviderPaymentId=savedOrder.providerPaymentId||null;
+    currentOrderAccessToken=savedOrder.orderAccessToken||null;
     currentPaymentUrl=savedOrder.paymentUrl||null;
     currentOrderAmount=savedOrder.amount||null;
     qrDeadline=savedOrder.qrDeadline||null; // восстанавливаем ДО любого возможного startQRTimer() ниже — иначе он не найдёт дедлайн и создаст новый через fallback
@@ -683,7 +729,8 @@ function validateLegalConsent(){
 // (например, после refresh с активным заказом — см. tryRestoreSession), так
 // что брать сумму оттуда небезопасно. Обновляется из order.items_total в
 // pollOrderOnce() (API-режим) — это и есть backend-данные заказа.
-let currentOrderCode=null, currentProviderPaymentId=null, currentPaymentUrl=null, currentOrderAmount=null;
+let currentOrderCode=null, currentOrderAccessToken=null, currentCreateIdempotencyKey=null;
+let currentPaymentUrl=null, currentOrderAmount=null;
 // orderCreatedAtMs — момент фактического создания заказа (не оплаты), один раз
 // зафиксированный в openQR(). Персистится и восстанавливается тем же принципом,
 // что qrDeadline/preDeadline, но не очищается на nextStatus()/переходах статуса —
@@ -752,17 +799,26 @@ async function openQR(){
     // не оплаты.
     orderCreatedAtMs=Date.now();
     if(USE_API){
+      // Credentials создаются и сохраняются ДО POST. Если ответ потеряется,
+      // повторный тап/refresh отправит ту же пару, и backend вернёт тот же
+      // заказ вместо создания дубля. В JSON-body секреты не попадают.
+      const credentials=pendingOrderCredentials();
+      currentOrderAccessToken=credentials.orderAccessToken;
+      currentCreateIdempotencyKey=credentials.createIdempotencyKey;
       const{order,payment}=await api.createOrder({
         restaurantId:curRest.id, city:selectedCity,
         customerName:payload.name, customerPhone:payload.phone,
         address:payload.address, fulfillmentType:payload.fulfillmentType, comment:payload.comment,
         items:payload.items.map(i=>({name:i.name,price:i.price,qty:i.qty,menuItemId:i.menuItemId})),
-      });
+      },currentOrderAccessToken,currentCreateIdempotencyKey);
       currentOrderCode=order.public_code;
-      currentProviderPaymentId=payment.providerPaymentId;
-      currentPaymentUrl=payment.paymentUrl||null;
+      currentPaymentUrl=payment?.paymentUrl||null;
       currentOrderAmount=order.items_total;
-      saveOrderState();
+      const activeStateSaved=saveOrderState();
+      // Не удаляем резервную пару, если браузер не смог записать активное
+      // состояние: иначе при refresh пользователь потеряет единственный ключ.
+      if(activeStateSaved)clearPendingOrderCredentials();
+      currentCreateIdempotencyKey=null;
     }else{
       // Демо-режим — своя "БД" в localStorage вместо реального бэкенда (см.
       // nextDemoOrderCode/saveOrderState) — активный заказ должен переживать
@@ -902,7 +958,7 @@ function openRejected(reason){
   // Заказ окончен (отклонён рестораном/не ответил вовремя) — это терминальное
   // состояние без пути назад, поэтому не держим его "активным": иначе refresh
   // на этом экране заново находил бы его и не давал вернуться к обычному меню.
-  currentOrderCode=null;currentProviderPaymentId=null;currentPaymentUrl=null;currentOrderAmount=null;orderCreatedAtMs=null;saveOrderState();
+  currentOrderCode=null;currentOrderAccessToken=null;currentCreateIdempotencyKey=null;currentPaymentUrl=null;currentOrderAmount=null;orderCreatedAtMs=null;saveOrderState();
   setRejOrderCode(orderCodeForDisplay);
   document.getElementById('rej-explain').style.display='';
   // Сумма возврата — только из данных заказа, никогда из захардкоженной
@@ -940,9 +996,8 @@ function openPaymentFailed(){
 }
 async function retryPaymentFlow(){
   try{
-    const{payment}=await api.retryPayment(currentOrderCode);
-    currentProviderPaymentId=payment.providerPaymentId;
-    currentPaymentUrl=payment.paymentUrl||null;
+    const{payment}=await api.retryPayment(currentOrderCode,currentOrderAccessToken);
+    currentPaymentUrl=payment?.paymentUrl||null;
     saveOrderState();
     const{sum}=totals();
     document.getElementById('qr-amt').textContent=sum+' ₽';
@@ -970,7 +1025,7 @@ function cancelOrderFlow(unpaid){
       return;
     }
     try{
-      await api.cancelOrder(currentOrderCode);
+      await api.cancelOrder(currentOrderCode,currentOrderAccessToken);
       stopOrderPolling();
       showToast(unpaid?'Заказ отменён':'Заказ отменён, деньги вернутся автоматически');
       resetAll();
@@ -1016,7 +1071,7 @@ function openOrderNotFound(){
   const orderCodeForDisplay=currentOrderCode; // захватываем до очистки ниже
   stopOrderPolling();
   showStatusSpinner(false);showOrderDot(false);showRestaurantPhone(null);
-  currentOrderCode=null;currentProviderPaymentId=null;currentPaymentUrl=null;currentOrderAmount=null;orderCreatedAtMs=null;saveOrderState();
+  currentOrderCode=null;currentOrderAccessToken=null;currentCreateIdempotencyKey=null;currentPaymentUrl=null;currentOrderAmount=null;orderCreatedAtMs=null;saveOrderState();
   setRejOrderCode(orderCodeForDisplay);
   document.getElementById('rej-title').textContent='Не удалось найти заказ';
   document.getElementById('rej-explain').textContent='Возможно, он отменён или устарел. Если это ошибка — напишите в поддержку.';
@@ -1031,7 +1086,7 @@ async function pollOrderOnce(){
   pollInFlight=true;
   try{
   let order;
-  try{order=await api.getOrder(currentOrderCode);}catch(err){
+  try{order=await api.getOrder(currentOrderCode,currentOrderAccessToken);}catch(err){
     if(err.status===404){openOrderNotFound();return;}
     return; // сеть моргнула — попробуем на следующем тике
   }
@@ -1109,7 +1164,7 @@ window.addEventListener('pageshow',(e)=>{if(e.persisted){refreshActiveOrderIfVis
 
 function cur(id){return document.getElementById(id).classList.contains('active');}
 function go(id){document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));document.getElementById(id).classList.add('active');document.querySelector('.dish-add').style.display=(id==='dish')?'block':'none';if(id!=='status'&&id!=='rejected')document.getElementById('statusbg').style.display='none';window.scrollTo(0,0);updateBar();if(id==='home'&&introFadeHandler)introFadeHandler();try{if(id!=='home')history.pushState({screen:id},'');else history.replaceState({screen:'home'},'');}catch(e){}}
-function resetAll(){clearInterval(preTimer);clearTimeout(preAutoTimer);preDeadline=null;stopQRTimer();qrDeadline=null;stopOrderPolling();showRestaurantPhone(null);showOrderDot(false);cart={};curRest=null;currentOrderCode=null;currentProviderPaymentId=null;currentPaymentUrl=null;currentOrderAmount=null;orderCreatedAtMs=null;demoStage='qr';saveCartState();saveOrderState();document.getElementById('statusbg').style.display='none';go('home');renderList();}
+function resetAll(){clearInterval(preTimer);clearTimeout(preAutoTimer);preDeadline=null;stopQRTimer();qrDeadline=null;stopOrderPolling();showRestaurantPhone(null);showOrderDot(false);cart={};curRest=null;currentOrderCode=null;currentOrderAccessToken=null;currentCreateIdempotencyKey=null;currentPaymentUrl=null;currentOrderAmount=null;orderCreatedAtMs=null;demoStage='qr';clearPendingOrderCredentials();saveCartState();saveOrderState();document.getElementById('statusbg').style.display='none';go('home');renderList();}
 // Своё окно подтверждения (замена заблокированного confirm)
 function yaamConfirm(text,onYes,labels){
   const ov=document.getElementById('confirm-overlay');
@@ -1147,7 +1202,7 @@ function openSheet(){
 async function afterPay(){
   stopQRTimer();qrDeadline=null; // оплата подтверждена — платёжное окно больше не актуально, не даём его случайно переиспользовать
   if(USE_API){
-    try{await api.devMarkPaid(currentProviderPaymentId);}
+    try{await api.devMarkPaid(currentOrderCode,currentOrderAccessToken);}
     catch(err){showToast(err.message||'Оплата не прошла');return;}
     startOrderPolling();
   }else{

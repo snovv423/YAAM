@@ -54,6 +54,8 @@ function basicOrderPayload(restaurantId, menuItemId, overrides = {}) {
     comment: '',
     fulfillmentType: 'delivery',
     items: [{ menuItemId, name: 'Тестовое блюдо', price: 300, qty: 1 }],
+    orderAccessToken: overrides.orderAccessToken || `yaam_ord_v1_${crypto.randomBytes(32).toString('base64url')}`,
+    createIdempotencyKey: overrides.createIdempotencyKey || `yaam_create_v1_${crypto.randomBytes(32).toString('base64url')}`,
   };
 }
 

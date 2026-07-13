@@ -7,10 +7,11 @@
 const API_BASE_URL = window.YAAM_API_BASE_URL || null;
 const USE_API = !!API_BASE_URL;
 
-async function apiRequest(path, options) {
+async function apiRequest(path, options = {}) {
+  const { headers: optionHeaders = {}, ...requestOptions } = options;
   const res = await fetch(API_BASE_URL + path, {
-    headers: { 'Content-Type': 'application/json' },
-    ...options,
+    ...requestOptions,
+    headers: { 'Content-Type': 'application/json', ...optionHeaders },
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
@@ -21,13 +22,31 @@ async function apiRequest(path, options) {
   return data;
 }
 
+function orderAccessHeaders(orderAccessToken, createIdempotencyKey) {
+  const headers = { Authorization: `Bearer ${orderAccessToken}` };
+  if (createIdempotencyKey) headers['Idempotency-Key'] = createIdempotencyKey;
+  return headers;
+}
+
 const api = {
   getRestaurants: (city) => apiRequest(`/api/restaurants?city=${encodeURIComponent(city)}`),
   getRestaurant: (id) => apiRequest(`/api/restaurants/${id}`),
-  createOrder: (payload) => apiRequest('/api/orders', { method: 'POST', body: JSON.stringify(payload) }),
-  getOrder: (code) => apiRequest(`/api/orders/${code}`),
-  cancelOrder: (code) => apiRequest(`/api/orders/${code}/cancel`, { method: 'POST' }),
-  retryPayment: (code) => apiRequest(`/api/orders/${code}/retry-payment`, { method: 'POST' }),
-  rateOrder: (code, rating) => apiRequest(`/api/orders/${code}/rate`, { method: 'POST', body: JSON.stringify({ rating }) }),
-  devMarkPaid: (providerPaymentId) => apiRequest(`/api/dev/pay/${providerPaymentId}`, { method: 'POST' }),
+  createOrder: (payload, orderAccessToken, createIdempotencyKey) => apiRequest('/api/orders', {
+    method: 'POST',
+    headers: orderAccessHeaders(orderAccessToken, createIdempotencyKey),
+    body: JSON.stringify(payload),
+  }),
+  getOrder: (code, token) => apiRequest(`/api/orders/${code}`, { headers: orderAccessHeaders(token) }),
+  cancelOrder: (code, token) => apiRequest(`/api/orders/${code}/cancel`, {
+    method: 'POST', headers: orderAccessHeaders(token),
+  }),
+  retryPayment: (code, token) => apiRequest(`/api/orders/${code}/retry-payment`, {
+    method: 'POST', headers: orderAccessHeaders(token),
+  }),
+  rateOrder: (code, token, rating) => apiRequest(`/api/orders/${code}/rate`, {
+    method: 'POST', headers: orderAccessHeaders(token), body: JSON.stringify({ rating }),
+  }),
+  devMarkPaid: (code, token) => apiRequest(`/api/orders/${code}/dev-confirm-payment`, {
+    method: 'POST', headers: orderAccessHeaders(token),
+  }),
 };

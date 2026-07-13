@@ -24,6 +24,7 @@ let baseUrl;
 let restaurantId;
 let menuItemId;
 let orderCode;
+let orderAccessToken;
 
 before(async () => {
   const express = require('express');
@@ -39,9 +40,9 @@ before(async () => {
   baseUrl = `http://127.0.0.1:${port}`;
 
   ({ restaurantId, menuItemId } = seedMinimalRestaurant(db));
-  const { order } = await orderService.createOrder(
-    basicOrderPayload(restaurantId, menuItemId, { customerPhone: '+79289990001' }),
-  );
+  const payload = basicOrderPayload(restaurantId, menuItemId, { customerPhone: '+79289990001' });
+  orderAccessToken = payload.orderAccessToken;
+  const { order } = await orderService.createOrder(payload);
   orderCode = order.public_code;
 });
 
@@ -59,13 +60,17 @@ const FORBIDDEN_FIELDS = [
   'comment', 'commission_amount', 'created_at', 'restaurant_name', 'items',
 ];
 
+function auth(token = orderAccessToken) {
+  return { Authorization: `Bearer ${token}` };
+}
+
 test('GET /api/orders/:code для существующего заказа возвращает HTTP 200', async () => {
-  const res = await fetch(`${baseUrl}/api/orders/${orderCode}`);
+  const res = await fetch(`${baseUrl}/api/orders/${orderCode}`, { headers: auth() });
   assert.equal(res.status, 200);
 });
 
 test('GET /api/orders/:code — ответ содержит только утверждённый public allowlist', async () => {
-  const res = await fetch(`${baseUrl}/api/orders/${orderCode}`);
+  const res = await fetch(`${baseUrl}/api/orders/${orderCode}`, { headers: auth() });
   const body = await res.json();
   for (const field of PUBLIC_ALLOWLIST) {
     assert.equal(Object.prototype.hasOwnProperty.call(body, field), true, `ответ должен содержать поле "${field}"`);
@@ -74,7 +79,7 @@ test('GET /api/orders/:code — ответ содержит только утв�
 });
 
 test('GET /api/orders/:code — ответ НЕ содержит PII и внутренних полей (проверка реального route, не mapper напрямую)', async () => {
-  const res = await fetch(`${baseUrl}/api/orders/${orderCode}`);
+  const res = await fetch(`${baseUrl}/api/orders/${orderCode}`, { headers: auth() });
   const body = await res.json();
   for (const field of FORBIDDEN_FIELDS) {
     assert.equal(Object.prototype.hasOwnProperty.call(body, field), false, `ответ HTTP-роута не должен содержать поле "${field}"`);
@@ -82,8 +87,19 @@ test('GET /api/orders/:code — ответ НЕ содержит PII и внут
 });
 
 test('GET /api/orders/:code для неизвестного кода возвращает HTTP 404', async () => {
-  const res = await fetch(`${baseUrl}/api/orders/YAAM-99999`);
+  const res = await fetch(`${baseUrl}/api/orders/YAAM-99999`, { headers: auth() });
   assert.equal(res.status, 404);
   const body = await res.json();
   assert.equal(typeof body.error, 'string');
+});
+
+test('GET существующего заказа без bearer-токена возвращает HTTP 401', async () => {
+  const res = await fetch(`${baseUrl}/api/orders/${orderCode}`);
+  assert.equal(res.status, 401);
+});
+
+test('GET существующего заказа с чужим валидным токеном не раскрывает его существование', async () => {
+  const wrong = `yaam_ord_v1_${Buffer.alloc(32, 7).toString('base64url')}`;
+  const res = await fetch(`${baseUrl}/api/orders/${orderCode}`, { headers: auth(wrong) });
+  assert.equal(res.status, 404);
 });

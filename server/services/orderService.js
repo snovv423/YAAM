@@ -1,6 +1,7 @@
 const { EventEmitter } = require('node:events');
 const db = require('../db');
 const payments = require('./paymentService');
+const orderAccess = require('./orderAccessService');
 
 // Другие модули (бот, будущий SSE для клиента) подписываются на события заказа
 // через orderEvents — orderService ничего не знает про бота напрямую, это и
@@ -58,6 +59,32 @@ async function waitForProviderPaymentId(paymentRowId) {
   return null;
 }
 
+function paymentResultFromRow(paymentRow) {
+  if (!paymentRow || !paymentRow.provider_payment_id) return null;
+  const presentation = db.prepare(`
+    SELECT payment_url, qr_payload FROM payment_presentations WHERE payment_id = ?
+  `).get(paymentRow.id);
+  return {
+    providerPaymentId: paymentRow.provider_payment_id,
+    paymentUrl: presentation?.payment_url || null,
+    qrPayload: presentation?.qr_payload || null,
+  };
+}
+
+function persistPaymentResult(paymentRowId, payment) {
+  db.transaction(() => {
+    db.prepare('UPDATE payments SET provider_payment_id = ? WHERE id = ?')
+      .run(payment.providerPaymentId, paymentRowId);
+    db.prepare(`
+      INSERT INTO payment_presentations (payment_id, payment_url, qr_payload)
+      VALUES (?, ?, ?)
+      ON CONFLICT(payment_id) DO UPDATE SET
+        payment_url = excluded.payment_url,
+        qr_payload = excluded.qr_payload
+    `).run(paymentRowId, payment.paymentUrl || null, payment.qrPayload || null);
+  })();
+}
+
 function getOrder(idOrCode) {
   const row = Number.isInteger(idOrCode)
     ? db.prepare(`
@@ -74,7 +101,7 @@ function getOrder(idOrCode) {
 }
 
 // Публичная проекция заказа — единственный источник для того, что уходит по
-// сети незалогиненному клиенту (см. GET /api/orders/:code в routes/api.js).
+// сети клиенту после capability-проверки (см. GET /api/orders/:code).
 // public_code последовательный и перебираемый (YAAM-00001, 00002...), поэтому
 // здесь сознательно НЕ отдаются customer_name/customer_phone/address/comment
 // (ПДн), commission_amount (внутренняя бизнес-цифра), внутренний id/restaurant_id
@@ -94,7 +121,25 @@ function toPublicOrderDTO(order) {
   };
 }
 
-async function createOrder({ restaurantId, city, customerName, customerPhone, address, comment, items, fulfillmentType }) {
+// Платёжный DTO не раскрывает внутренний provider_payment_id. Для клиента
+// нужны только данные, позволяющие открыть подтверждение оплаты. Dev/mock
+// подтверждение теперь адресуется по заказу и защищается order token.
+function toPublicPaymentDTO(payment) {
+  if (!payment) return null;
+  return {
+    paymentUrl: payment.paymentUrl || null,
+    qrPayload: payment.qrPayload || null,
+  };
+}
+
+async function createOrder({
+  restaurantId, city, customerName, customerPhone, address, comment, items,
+  fulfillmentType, orderAccessToken, createIdempotencyKey,
+}) {
+  const { tokenHash, createKeyHash } = orderAccess.requireValidCreationSecrets(
+    orderAccessToken,
+    createIdempotencyKey,
+  );
   if (!customerName || !customerName.trim()) throw new Error('customerName обязателен');
   const normalizedPhone = normalizeRuPhone(customerPhone);
   if (!normalizedPhone) throw new Error('укажите корректный номер телефона');
@@ -103,45 +148,6 @@ async function createOrder({ restaurantId, city, customerName, customerPhone, ad
   const restaurant = db.prepare('SELECT * FROM restaurants WHERE id = ?').get(restaurantId);
   if (!restaurant) throw new Error('ресторан не найден');
   if (!restaurant.is_open) throw new Error('ресторан сейчас закрыт — заказ невозможен');
-
-  // Защита от дублей на бэкенде (в дополнение к фронтенду): если у этого
-  // телефона уже есть свой неоплаченный заказ в этом ресторане — не создаём
-  // второй (двойной клик, кнопка "назад" и повторное "Оплатить", повтор
-  // запроса медленной сетью), а возвращаем существующий заказ и его же
-  // платёж, ничего заново не создавая. Нет собственной аутентификации/сессий,
-  // поэтому телефон+ресторан+статус — практичный, минимально достаточный ключ.
-  if (normalizedPhone) {
-    // Дедуп применяется только к ещё "свежему" awaiting_payment (см.
-    // AWAITING_PAYMENT_DEDUP_TTL_SEC выше) — иначе брошенный неоплаченный
-    // заказ блокировал бы этот телефон+ресторан от нового заказа навсегда.
-    // Граница включительно: возраст ровно TTL секунд ещё считается свежим,
-    // строго больше TTL — уже нет. Старый заказ никак не меняется, просто
-    // перестаёт участвовать в дедупе.
-    const existingOrder = db.prepare(`
-      SELECT * FROM orders WHERE restaurant_id = ? AND customer_phone = ? AND status = 'awaiting_payment'
-        AND (strftime('%s','now') - strftime('%s', created_at)) <= ?
-      ORDER BY id DESC LIMIT 1
-    `).get(restaurantId, normalizedPhone, AWAITING_PAYMENT_DEDUP_TTL_SEC);
-    if (existingOrder) {
-      const existingPayment = db.prepare(`
-        SELECT * FROM payments WHERE order_id = ? AND status = 'pending' ORDER BY id DESC LIMIT 1
-      `).get(existingOrder.id);
-      if (existingPayment) {
-        // provider_payment_id может на короткое время быть ещё пуст — см.
-        // комментарий у "резервируем платёж" ниже: пока первый (настоящий)
-        // запрос ждёт ответ провайдера, второй уже видит строку платежа, но
-        // не сам id. Ждём совсем недолго вместо того, чтобы плодить второй заказ.
-        const providerPaymentId = existingPayment.provider_payment_id
-          || await waitForProviderPaymentId(existingPayment.id);
-        if (providerPaymentId) {
-          return {
-            order: getOrder(existingOrder.id),
-            payment: { providerPaymentId },
-          };
-        }
-      }
-    }
-  }
 
   // Клиент присылает name/price/menuItemId вместе с корзиной, но это его
   // собственные данные, а не источник истины — их нельзя доверять напрямую.
@@ -169,6 +175,67 @@ async function createOrder({ restaurantId, city, customerName, customerPhone, ad
   }
   const commission = payments.calcCommission(itemsTotal);
   const normalizedFulfillment = fulfillmentType === 'pickup' ? 'pickup' : 'delivery';
+  const normalizedCustomerName = customerName.trim();
+  const normalizedAddress = address || '';
+  const normalizedComment = comment || '';
+  const canonicalItems = trustedItems
+    .map(({ menuItemId, qty }) => ({ menuItemId, qty }))
+    .sort((a, b) => a.menuItemId - b.menuItemId || a.qty - b.qty);
+  const requestHash = orderAccess.hashCreationRequest({
+    restaurantId: Number(restaurantId),
+    city: city || '',
+    customerName: normalizedCustomerName,
+    customerPhone: normalizedPhone,
+    address: normalizedAddress,
+    comment: normalizedComment,
+    fulfillmentType: normalizedFulfillment,
+    items: canonicalItems,
+  });
+
+  // Защита от дублей на бэкенде (в дополнение к фронтенду): если у этого
+  // телефона уже есть свой свежий неоплаченный заказ в этом ресторане,
+  // возвращаем его только при совпадении token, idempotency key И точного
+  // нормализованного содержимого запроса. Изменённая корзина/адрес не могут
+  // молча получить старый заказ под тем же ключом.
+  const existingOrder = db.prepare(`
+    SELECT * FROM orders WHERE restaurant_id = ? AND customer_phone = ? AND status = 'awaiting_payment'
+      AND (strftime('%s','now') - strftime('%s', created_at)) <= ?
+    ORDER BY id DESC LIMIT 1
+  `).get(restaurantId, normalizedPhone, AWAITING_PAYMENT_DEDUP_TTL_SEC);
+  if (existingOrder) {
+    const existingPayment = db.prepare(`
+      SELECT * FROM payments WHERE order_id = ? AND status = 'pending' ORDER BY id DESC LIMIT 1
+    `).get(existingOrder.id);
+    if (existingPayment) {
+      if (!orderAccess.credentialMatches(
+        existingOrder.id,
+        tokenHash,
+        createKeyHash,
+        requestHash,
+      )) {
+        throw new orderAccess.ActiveOrderConflictError();
+      }
+      // provider_payment_id и безопасная presentation сохраняются одной
+      // транзакцией. Поэтому, как только id виден повторному запросу, ссылка/QR
+      // тоже уже доступны для продолжения оплаты после потерянного ответа.
+      const providerPaymentId = existingPayment.provider_payment_id
+        || await waitForProviderPaymentId(existingPayment.id);
+      if (providerPaymentId) {
+        const refreshedPayment = db.prepare('SELECT * FROM payments WHERE id = ?').get(existingPayment.id);
+        return {
+          order: getOrder(existingOrder.id),
+          payment: paymentResultFromRow(refreshedPayment),
+        };
+      }
+    }
+  }
+
+  // Один и тот же token/idempotency key не может защищать два разных заказа.
+  // Это также не даёт повторно использовать credential после истечения TTL:
+  // новая попытка заказа обязана получить новую пару случайных значений.
+  if (orderAccess.secretsAlreadyUsed(tokenHash, createKeyHash)) {
+    throw new orderAccess.ActiveOrderConflictError();
+  }
 
   const insertOrder = db.prepare(`
     INSERT INTO orders (public_code, restaurant_id, city, customer_name, customer_phone, address, fulfillment_type, comment, items_total, commission_amount, status)
@@ -188,16 +255,17 @@ async function createOrder({ restaurantId, city, customerName, customerPhone, ad
       public_code: `TMP-${process.hrtime.bigint()}`,
       restaurant_id: restaurantId,
       city,
-      customer_name: customerName.trim(),
+      customer_name: normalizedCustomerName,
       customer_phone: normalizedPhone,
-      address: address || '',
+      address: normalizedAddress,
       fulfillment_type: normalizedFulfillment,
-      comment: comment || '',
+      comment: normalizedComment,
       items_total: itemsTotal,
       commission_amount: commission,
     });
     const newId = info.lastInsertRowid;
     db.prepare('UPDATE orders SET public_code = ? WHERE id = ?').run(formatPublicCode(newId), newId);
+    orderAccess.insertCredential(newId, tokenHash, createKeyHash, requestHash);
     for (const it of trustedItems) {
       insertItem.run(newId, it.menuItemId, it.name, it.price, it.qty);
     }
@@ -219,7 +287,7 @@ async function createOrder({ restaurantId, city, customerName, customerPhone, ad
     amount: itemsTotal,
     description: `Заказ ${order.public_code}`,
   });
-  db.prepare('UPDATE payments SET provider_payment_id = ? WHERE id = ?').run(payment.providerPaymentId, paymentRowId);
+  persistPaymentResult(paymentRowId, payment);
 
   return { order, payment };
 }
@@ -258,10 +326,16 @@ async function retryPayment(orderId) {
     amount: order.items_total,
     description: `Заказ ${order.public_code} (повторная попытка)`,
   });
-  db.prepare(`
-    INSERT INTO payments (order_id, provider, provider_payment_id, amount, status)
-    VALUES (?, ?, ?, ?, 'pending')
-  `).run(orderId, payments.providerName, payment.providerPaymentId, order.items_total);
+  db.transaction(() => {
+    const info = db.prepare(`
+      INSERT INTO payments (order_id, provider, provider_payment_id, amount, status)
+      VALUES (?, ?, ?, ?, 'pending')
+    `).run(orderId, payments.providerName, payment.providerPaymentId, order.items_total);
+    db.prepare(`
+      INSERT INTO payment_presentations (payment_id, payment_url, qr_payload)
+      VALUES (?, ?, ?)
+    `).run(info.lastInsertRowid, payment.paymentUrl || null, payment.qrPayload || null);
+  })();
   setStatus(orderId, 'awaiting_payment');
   return payment;
 }
@@ -408,6 +482,7 @@ module.exports = {
   createOrder,
   getOrder,
   toPublicOrderDTO,
+  toPublicPaymentDTO,
   markPaid,
   markPaymentFailed,
   retryPayment,

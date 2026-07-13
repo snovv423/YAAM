@@ -28,6 +28,18 @@ process.on('SIGINT', shutdown);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const HOST = process.env.HOST || '127.0.0.1';
+
+// За одним локальным Nginx доверяем forwarded IP только от loopback. Нельзя
+// использовать blanket `true`: если порт Node когда-либо окажется доступен
+// напрямую, клиент сможет подделать X-Forwarded-For и обходить rate limits.
+if (process.env.TRUST_PROXY === 'loopback') {
+  app.set('trust proxy', 'loopback');
+} else if (process.env.TRUST_PROXY) {
+  throw new Error('TRUST_PROXY поддерживает только безопасное значение "loopback"');
+} else if (process.env.APP_ENV === 'production') {
+  throw new Error('Для production за локальным Nginx требуется TRUST_PROXY=loopback');
+}
 
 app.use(cors(buildCorsOptions()));
 
@@ -66,8 +78,8 @@ setInterval(() => orderService.sweepTimeouts(), 10_000);
 // Автосвип истёкших перерывов ресторанов (33 мин / 3 часа / 11 часов).
 setInterval(() => orderService.sweepPauseExpiry(), 30_000);
 
-app.listen(PORT, () => {
-  console.log(`[server] YAAM API слушает на порту ${PORT}`);
+app.listen(PORT, HOST, () => {
+  console.log(`[server] YAAM API слушает на ${HOST}:${PORT}`);
 
   if (process.env.TELEGRAM_BOT_TOKEN) {
     const { startBot } = require('./bot');

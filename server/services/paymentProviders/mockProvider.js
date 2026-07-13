@@ -2,9 +2,10 @@ const crypto = require('node:crypto');
 const PaymentProviderInterface = require('./providerInterface');
 
 // Провайдер для демо/разработки, пока не подключена ЮKassa.
-// Платёж "оплачивается" вручную через POST /api/dev/pay/:providerPaymentId
-// (см. routes/api.js) — это прямой аналог кнопки "Демо: оплата прошла" в клиенте,
-// просто теперь решение принимает сервер, а не браузер.
+// Платёж "оплачивается" вручную через защищённый маршрут заказа
+// POST /api/orders/:code/dev-confirm-payment (см. routes/api.js). Внутренний
+// providerPaymentId наружу не публикуется; сервер выбирает попытку сам после
+// проверки bearer-токена заказа.
 class MockProvider extends PaymentProviderInterface {
   constructor() {
     super();

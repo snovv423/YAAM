@@ -12,6 +12,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const { webcrypto } = require('node:crypto');
 
 function makeFakeElement(id) {
   const listeners = {};
@@ -68,6 +69,9 @@ function createSandbox({ apiBaseUrl } = {}) {
     localStorage,
     document: documentStub,
     navigator: { vibrate() {} },
+    crypto: webcrypto,
+    Uint8Array,
+    btoa: (value) => Buffer.from(value, 'binary').toString('base64'),
     history: { pushState() {}, replaceState() {} },
     location: { href: '' },
     requestAnimationFrame: (fn) => fn(),

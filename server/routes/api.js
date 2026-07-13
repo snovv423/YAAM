@@ -2,6 +2,7 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 const db = require('../db');
 const orderService = require('../services/orderService');
+const orderAccess = require('../services/orderAccessService');
 const paymentService = require('../services/paymentService');
 
 const router = express.Router();
@@ -28,13 +29,63 @@ const orderCreateLimiter = rateLimit({
   handler: rateLimitHandler('Слишком много попыток оформить заказ — попробуйте через несколько минут'),
 });
 
-const rateOrderLimiter = rateLimit({
+// Нормальный polling идёт раз в 4 секунды (~75 запросов за 5 минут). Лимит
+// оставляет запас на refresh/pageshow, но режет дешёвый перебор кодов.
+const orderReadLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: rateLimitHandler('Слишком много запросов статуса — попробуйте чуть позже'),
+});
+
+const orderMutationLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 20,
   standardHeaders: true,
   legacyHeaders: false,
   handler: rateLimitHandler('Слишком много запросов — попробуйте чуть позже'),
 });
+
+function bearerToken(req) {
+  return orderAccess.parseBearerAuthorization(req.get('authorization'));
+}
+
+function requireBearerForCreate(req, res, next) {
+  res.set('Cache-Control', 'no-store');
+  const token = bearerToken(req);
+  if (!token) {
+    res.set('WWW-Authenticate', 'Bearer');
+    return res.status(401).json({ error: 'Требуется защищённый доступ к заказу' });
+  }
+  if (!orderAccess.isValidCreateKey(req.get('idempotency-key'))) {
+    return res.status(400).json({ error: 'Некорректный ключ создания заказа' });
+  }
+  req.orderAccessToken = token;
+  req.createIdempotencyKey = req.get('idempotency-key');
+  return next();
+}
+
+// И код, и токен проверяются одной выборкой. Для неверной пары возвращаем тот
+// же 404, что и для несуществующего заказа — API не подтверждает перебирающему,
+// какие последовательные public_code реально существуют.
+function requireOrderAccess(req, res, next) {
+  res.set('Cache-Control', 'no-store');
+  const token = bearerToken(req);
+  if (!token) {
+    res.set('WWW-Authenticate', 'Bearer');
+    return res.status(401).json({ error: 'Требуется защищённый доступ к заказу' });
+  }
+  const orderId = orderAccess.findAuthorizedOrderId(req.params.code, token);
+  if (!orderId) return res.status(404).json({ error: 'заказ не найден' });
+  req.orderAccessToken = token;
+  req.order = orderService.getOrder(orderId);
+  return next();
+}
+
+function errorStatus(err) {
+  return Number.isInteger(err.statusCode) ? err.statusCode : 400;
+}
 
 // "Хит" — не ручной флаг, а автоматический расчёт по реальным продажам:
 // топ-3 блюда ресторана по сумме qty за оплаченные и успешно завершённые
@@ -111,56 +162,58 @@ router.get('/restaurants/:id', (req, res) => {
   res.json(restaurantWithMenu(r));
 });
 
-router.post('/orders', orderCreateLimiter, async (req, res) => {
+router.post('/orders', orderCreateLimiter, requireBearerForCreate, async (req, res) => {
   try {
-    const { order, payment } = await orderService.createOrder(req.body);
-    res.status(201).json({ order, payment });
+    // Секреты принимаются только из заголовков. Одноимённые поля JSON-body
+    // игнорируются, чтобы API-контракт не приучал клиентов класть capability в
+    // тела, которые инфраструктура часто логирует целиком.
+    const { order, payment } = await orderService.createOrder({
+      ...req.body,
+      orderAccessToken: req.orderAccessToken,
+      createIdempotencyKey: req.createIdempotencyKey,
+    });
+    res.status(201).json({
+      order: orderService.toPublicOrderDTO(order),
+      payment: orderService.toPublicPaymentDTO(payment),
+    });
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    res.status(errorStatus(err)).json({ error: err.message });
   }
 });
 
-// Публичный эндпоинт (без авторизации) — отдаёт только toPublicOrderDTO(),
-// НЕ полный объект заказа. public_code последовательный и перебираемый, поэтому
-// customer_name/phone/address и прочие внутренние поля здесь недопустимы (см.
-// orderService.toPublicOrderDTO). Бот/админка используют orderService.getOrder()
-// напрямую в процессе, этот эндпоинт их не затрагивает.
-router.get('/orders/:code', (req, res) => {
-  const order = orderService.getOrder(req.params.code);
-  if (!order) return res.status(404).json({ error: 'заказ не найден' });
-  res.json(orderService.toPublicOrderDTO(order));
+// Клиентский эндпоинт требует bearer capability и отдаёт только
+// toPublicOrderDTO(), НЕ полный объект заказа. public_code последовательный и
+// перебираемый, поэтому одного кода недостаточно, а customer_name/phone/address
+// и прочие внутренние поля в ответе недопустимы. Бот/админка используют
+// orderService.getOrder() напрямую в процессе, этот эндпоинт их не затрагивает.
+router.get('/orders/:code', orderReadLimiter, requireOrderAccess, (req, res) => {
+  res.json(orderService.toPublicOrderDTO(req.order));
 });
 
-router.post('/orders/:code/cancel', async (req, res) => {
+router.post('/orders/:code/cancel', orderMutationLimiter, requireOrderAccess, async (req, res) => {
   try {
-    const order = orderService.getOrder(req.params.code);
-    if (!order) return res.status(404).json({ error: 'заказ не найден' });
-    const updated = await orderService.cancelByCustomer(order.id);
-    res.json(updated);
+    const updated = await orderService.cancelByCustomer(req.order.id);
+    res.json(orderService.toPublicOrderDTO(updated));
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    res.status(errorStatus(err)).json({ error: err.message });
   }
 });
 
-router.post('/orders/:code/retry-payment', async (req, res) => {
+router.post('/orders/:code/retry-payment', orderMutationLimiter, requireOrderAccess, async (req, res) => {
   try {
-    const order = orderService.getOrder(req.params.code);
-    if (!order) return res.status(404).json({ error: 'заказ не найден' });
-    const payment = await orderService.retryPayment(order.id);
-    res.json({ payment });
+    const payment = await orderService.retryPayment(req.order.id);
+    res.json({ payment: orderService.toPublicPaymentDTO(payment) });
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    res.status(errorStatus(err)).json({ error: err.message });
   }
 });
 
-router.post('/orders/:code/rate', rateOrderLimiter, (req, res) => {
+router.post('/orders/:code/rate', orderMutationLimiter, requireOrderAccess, (req, res) => {
   try {
-    const order = orderService.getOrder(req.params.code);
-    if (!order) return res.status(404).json({ error: 'заказ не найден' });
-    const updated = orderService.rateOrder(order.id, Number(req.body.rating));
-    res.json(updated);
+    const updated = orderService.rateOrder(req.order.id, Number(req.body.rating));
+    res.json(orderService.toPublicOrderDTO(updated));
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    res.status(errorStatus(err)).json({ error: err.message });
   }
 });
 
@@ -185,21 +238,24 @@ if (process.env.PAYMENT_PROVIDER === 'yookassa') {
   });
 }
 
-// --- DEV-ONLY: имитация оплаты без реального провайдера (замена "Демо: оплата прошла") ---
-if (process.env.PAYMENT_PROVIDER !== 'yookassa') {
-  router.post('/dev/pay/:providerPaymentId', async (req, res) => {
-    const payment = db.prepare('SELECT * FROM payments WHERE provider_payment_id = ?').get(req.params.providerPaymentId);
-    if (!payment) return res.status(404).json({ error: 'payment not found' });
-    paymentService.devMarkPaid(req.params.providerPaymentId, 'succeeded');
-    const order = await orderService.markPaid(payment.order_id);
-    res.json(order);
-  });
-  router.post('/dev/pay-fail/:providerPaymentId', (req, res) => {
-    const payment = db.prepare('SELECT * FROM payments WHERE provider_payment_id = ?').get(req.params.providerPaymentId);
-    if (!payment) return res.status(404).json({ error: 'payment not found' });
-    paymentService.devMarkPaid(req.params.providerPaymentId, 'failed');
-    const order = orderService.markPaymentFailed(payment.order_id);
-    res.json(order);
+// --- DEV-ONLY: имитация оплаты в закрытом mock-staging ---
+// По умолчанию маршрута нет. В production его нельзя включить даже ошибочной
+// переменной окружения. Provider payment id больше не торчит в публичном URL:
+// сервер сам выбирает pending-попытку только после проверки владельца заказа.
+const devPaymentEnabled = process.env.ENABLE_DEV_PAYMENT_ROUTES === 'true'
+  && process.env.PAYMENT_PROVIDER === 'mock'
+  && ['local', 'staging'].includes(process.env.APP_ENV);
+if (devPaymentEnabled) {
+  router.post('/orders/:code/dev-confirm-payment', orderMutationLimiter, requireOrderAccess, async (req, res) => {
+    const payment = db.prepare(
+      "SELECT * FROM payments WHERE order_id = ? AND status = 'pending' ORDER BY id DESC LIMIT 1",
+    ).get(req.order.id);
+    if (!payment || !payment.provider_payment_id) {
+      return res.status(404).json({ error: 'payment not found' });
+    }
+    paymentService.devMarkPaid(payment.provider_payment_id, 'succeeded');
+    const updated = await orderService.markPaid(req.order.id);
+    return res.json(orderService.toPublicOrderDTO(updated));
   });
 }
 

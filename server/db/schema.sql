@@ -67,6 +67,21 @@ CREATE TABLE IF NOT EXISTS orders (
   estimated_ready_minutes INTEGER             -- ресторан выбирает в боте на шаге "Готовится" (см. bot/index.js)
 );
 
+-- Секрет доступа к заказу хранится отдельно от отображаемого public_code.
+-- Клиент генерирует 256-битный bearer-токен и отдельный ключ идемпотентности;
+-- в БД попадают только SHA-256 digest (32 байта), исходные секреты сервер не
+-- сохраняет и не может повторно раскрыть. request_hash связывает ключ с точным
+-- нормализованным содержимым заказа: изменённый replay не получит старый заказ.
+-- Старые заказы без строки в этой таблице намеренно недоступны через публичный
+-- API — legacy fallback по одному public_code вернул бы исходную уязвимость.
+CREATE TABLE IF NOT EXISTS order_access_credentials (
+  order_id INTEGER PRIMARY KEY REFERENCES orders(id) ON DELETE CASCADE,
+  token_hash BLOB NOT NULL UNIQUE CHECK(length(token_hash) = 32),
+  create_key_hash BLOB NOT NULL UNIQUE CHECK(length(create_key_hash) = 32),
+  request_hash BLOB NOT NULL CHECK(length(request_hash) = 32),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS order_items (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
@@ -87,4 +102,16 @@ CREATE TABLE IF NOT EXISTS payments (
   status TEXT NOT NULL DEFAULT 'pending',     -- pending | succeeded | failed | refunded
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Безопасные данные, необходимые клиенту для продолжения уже созданной
+-- платёжной попытки после потерянного HTTP-ответа. Внутренний id провайдера
+-- остаётся только в payments; наружу после bearer-проверки возвращаются лишь
+-- payment_url/qr_payload. Отдельная таблица делает изменение аддитивным для
+-- существующей SQLite-БД и не требует ALTER TABLE.
+CREATE TABLE IF NOT EXISTS payment_presentations (
+  payment_id INTEGER PRIMARY KEY REFERENCES payments(id) ON DELETE CASCADE,
+  payment_url TEXT,
+  qr_payload TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );

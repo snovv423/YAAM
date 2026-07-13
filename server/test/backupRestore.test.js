@@ -7,11 +7,14 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
-const { useIsolatedDb, cleanupDbFile, seedMinimalRestaurant } = require('./helpers/testDb');
+const {
+  useIsolatedDb, cleanupDbFile, seedMinimalRestaurant, basicOrderPayload,
+} = require('./helpers/testDb');
 const { backupDatabase, pruneOldBackups } = require('../scripts/backup-db');
 const { restoreDatabase, findLatestBackup } = require('../scripts/restore-db');
 
 const { db, dbPath } = useIsolatedDb();
+const orderService = require('../services/orderService');
 const backupDir = fs.mkdtempSync(path.join(os.tmpdir(), 'yaam-backup-test-'));
 
 after(() => {
@@ -20,7 +23,10 @@ after(() => {
 });
 
 test('backupDatabase() создаёт файл бэкапа с текущими данными базы', async () => {
-  seedMinimalRestaurant(db, { name: 'Ресторан до бэкапа' });
+  const { restaurantId, menuItemId } = seedMinimalRestaurant(db, { name: 'Ресторан до бэкапа' });
+  const protectedOrder = await orderService.createOrder(
+    basicOrderPayload(restaurantId, menuItemId, { customerPhone: '+79280002001' }),
+  );
 
   const destPath = await backupDatabase({ dbPath, backupDir });
   assert.equal(fs.existsSync(destPath), true);
@@ -28,8 +34,20 @@ test('backupDatabase() создаёт файл бэкапа с текущими 
   const { DatabaseSync } = require('node:sqlite');
   const backupDb = new DatabaseSync(destPath, { readOnly: true });
   const row = backupDb.prepare('SELECT name FROM restaurants WHERE name = ?').get('Ресторан до бэкапа');
+  const credential = backupDb.prepare(`
+    SELECT a.token_hash, a.create_key_hash, a.request_hash
+    FROM order_access_credentials a WHERE a.order_id = ?
+  `).get(protectedOrder.order.id);
+  const presentation = backupDb.prepare(`
+    SELECT pp.qr_payload FROM payment_presentations pp
+    JOIN payments p ON p.id = pp.payment_id WHERE p.order_id = ?
+  `).get(protectedOrder.order.id);
   backupDb.close();
   assert.ok(row, 'бэкап должен содержать ресторан, добавленный до backupDatabase()');
+  assert.equal(credential.token_hash.length, 32, 'бэкап должен сохранять hash доступа к заказу');
+  assert.equal(credential.create_key_hash.length, 32, 'бэкап должен сохранять idempotency hash');
+  assert.equal(credential.request_hash.length, 32, 'бэкап должен сохранять привязку ключа к запросу');
+  assert.match(presentation.qr_payload, /^yaam-demo:\/\/pay\//, 'бэкап должен сохранять данные продолжения оплаты');
 });
 
 test('restoreDatabase() возвращает базу к состоянию бэкапа после порчи данных', async () => {
