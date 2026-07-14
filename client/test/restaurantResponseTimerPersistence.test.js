@@ -224,15 +224,18 @@ test('17. qrDeadline и preDeadline не конфликтуют в одном sa
   teardown(sandbox);
 });
 
-test('18. persist preDeadline не зависит от USE_API — но реальная API-ветка (pollOrderOnce) им не пользуется', (t) => {
+test('18. persist preDeadline не зависит от USE_API — но реальная API-ветка (pollOrderOnce) им не пользуется', async (t) => {
   const sandbox = freshApp({ apiBaseUrl: 'https://example.invalid' });
-  evalInContext(sandbox, `currentOrderCode='YAAM-RT18-api';renderWaitForRestaurant();`);
   // saveOrderState() сохраняет preDeadline безусловно (вне if(!USE_API)) —
   // структурно консистентно с qrDeadline. Реальный awaiting_restaurant в
   // API-режиме считает остаток от order.status_updated_at в pollOrderOnce()
   // (отдельная, не тронутая этим фиксом ветка) и никогда не вызывает
   // renderWaitForRestaurant()/startResponseTimer() — здесь подтверждается
   // только то, что persist-механизм сам по себе не ломается флагом USE_API.
+  // saveOrderState() в API-режиме — no-op вне общего Web Lock (см. initial-payment
+  // idempotency), поэтому сам вызов оборачиваем в withCreateOrderLock, как и
+  // остальные мутации order-state в API-режиме.
+  await evalInContext(sandbox, `withCreateOrderLock(()=>{currentOrderCode='YAAM-RT18-api';renderWaitForRestaurant();})`);
   const stored = readStoredOrder(sandbox);
   assert.equal(typeof stored.preDeadline, 'number');
   teardown(sandbox);

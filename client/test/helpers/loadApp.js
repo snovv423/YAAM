@@ -67,17 +67,28 @@ function createSandbox({ apiBaseUrl } = {}) {
     documentElement: makeFakeElement('documentElement'),
   };
 
+  let webLockTail = Promise.resolve();
   const sandbox = {
     console,
     localStorage,
     document: documentStub,
-    navigator: { vibrate() {} },
+    navigator: {
+      vibrate() {},
+      locks: {
+        request(_name, _options, task) {
+          const run = webLockTail.then(task);
+          webLockTail = run.catch(() => {});
+          return run;
+        },
+      },
+    },
     crypto: webcrypto,
     Uint8Array,
     btoa: (value) => Buffer.from(value, 'binary').toString('base64'),
     history: { pushState() {}, replaceState() {} },
     location: { href: '' },
     requestAnimationFrame: (fn) => fn(),
+    AbortController,
     setInterval, clearInterval, setTimeout, clearTimeout,
     Date, Math, JSON, Object, Array, Number, String, Boolean, Promise, Error,
     encodeURIComponent, decodeURIComponent,

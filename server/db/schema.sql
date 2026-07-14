@@ -147,3 +147,16 @@ CREATE TABLE IF NOT EXISTS payment_presentations (
   qr_payload TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Первоначальный платёж создаётся после того, как заказ уже зафиксирован в БД.
+-- Этот ledger хранит устойчивый серверный ключ внешней операции, чтобы после
+-- сетевого сбоя или рестарта повторить createPayment с тем же ключом, а не
+-- создать второй платёж у провайдера. Клиентский create-key остаётся только в
+-- order_access_credentials и никогда не передаётся платёжному провайдеру.
+CREATE TABLE IF NOT EXISTS payment_initial_attempts (
+  payment_id INTEGER PRIMARY KEY REFERENCES payments(id) ON DELETE CASCADE,
+  provider_idempotency_key TEXT NOT NULL UNIQUE,
+  state TEXT NOT NULL DEFAULT 'creating' CHECK(state IN ('creating', 'ready')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);

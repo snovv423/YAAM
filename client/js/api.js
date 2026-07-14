@@ -6,20 +6,39 @@
 // правки в остальном коде не нужны.
 const API_BASE_URL = window.YAAM_API_BASE_URL || null;
 const USE_API = !!API_BASE_URL;
+const CREATE_ORDER_TIMEOUT_MS = 15000;
 
 async function apiRequest(path, options = {}) {
-  const { headers: optionHeaders = {}, ...requestOptions } = options;
-  const res = await fetch(API_BASE_URL + path, {
-    ...requestOptions,
-    headers: { 'Content-Type': 'application/json', ...optionHeaders },
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const err = new Error(data.error || `Ошибка запроса: ${res.status}`);
-    err.status = res.status; // нужно отличать "заказ не найден" (404, не ретраить) от сетевого сбоя
+  const {
+    headers: optionHeaders = {}, timeoutMs = 0, signal: externalSignal, ...requestOptions
+  } = options;
+  const controller = timeoutMs > 0 && !externalSignal ? new AbortController() : null;
+  const timeout = controller
+    ? setTimeout(() => controller.abort(), timeoutMs)
+    : null;
+  try {
+    const res = await fetch(API_BASE_URL + path, {
+      ...requestOptions,
+      signal: externalSignal || controller?.signal,
+      headers: { 'Content-Type': 'application/json', ...optionHeaders },
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const err = new Error(data.error || `Ошибка запроса: ${res.status}`);
+      err.status = res.status; // нужно отличать однозначный 4xx от неизвестного сетевого результата
+      throw err;
+    }
+    return data;
+  } catch (err) {
+    if (err?.name === 'AbortError') {
+      const timeoutError = new Error('Сервис отвечает слишком долго — повторите оформление заказа');
+      timeoutError.isNetworkError = true;
+      throw timeoutError;
+    }
     throw err;
+  } finally {
+    if (timeout !== null) clearTimeout(timeout);
   }
-  return data;
 }
 
 function orderAccessHeaders(orderAccessToken, createIdempotencyKey) {
@@ -35,6 +54,12 @@ const api = {
     method: 'POST',
     headers: orderAccessHeaders(orderAccessToken, createIdempotencyKey),
     body: JSON.stringify(payload),
+    timeoutMs: CREATE_ORDER_TIMEOUT_MS,
+  }),
+  recoverOrder: (orderAccessToken, createIdempotencyKey) => apiRequest('/api/orders/recover', {
+    method: 'POST',
+    headers: orderAccessHeaders(orderAccessToken, createIdempotencyKey),
+    timeoutMs: CREATE_ORDER_TIMEOUT_MS,
   }),
   getOrder: (code, token) => apiRequest(`/api/orders/${code}`, { headers: orderAccessHeaders(token) }),
   cancelOrder: (code, token) => apiRequest(`/api/orders/${code}/cancel`, {

@@ -87,6 +87,22 @@ function errorStatus(err) {
   return Number.isInteger(err.statusCode) ? err.statusCode : 400;
 }
 
+function publicCreationResponse({ order, payment, context }) {
+  return {
+    order: orderService.toPublicOrderDTO(order),
+    payment: orderService.toPublicPaymentDTO(payment),
+    context,
+  };
+}
+
+function sendCreationError(res, err, operation) {
+  if (Number.isInteger(err.statusCode)) {
+    return res.status(err.statusCode).json({ error: err.message });
+  }
+  console.error(`[api] ${operation} failed type=${err?.name || 'Error'}`);
+  return res.status(500).json({ error: 'Не удалось безопасно оформить заказ' });
+}
+
 // "Хит" — не ручной флаг, а автоматический расчёт по реальным продажам:
 // топ-3 блюда ресторана по сумме qty за оплаченные и успешно завершённые
 // заказы (отменённые/отклонённые/просроченные/неудавшаяся оплата не считаются),
@@ -167,17 +183,29 @@ router.post('/orders', orderCreateLimiter, requireBearerForCreate, async (req, r
     // Секреты принимаются только из заголовков. Одноимённые поля JSON-body
     // игнорируются, чтобы API-контракт не приучал клиентов класть capability в
     // тела, которые инфраструктура часто логирует целиком.
-    const { order, payment } = await orderService.createOrder({
+    const result = await orderService.createOrder({
       ...req.body,
       orderAccessToken: req.orderAccessToken,
       createIdempotencyKey: req.createIdempotencyKey,
     });
-    res.status(201).json({
-      order: orderService.toPublicOrderDTO(order),
-      payment: orderService.toPublicPaymentDTO(payment),
-    });
+    return res.status(201).json(publicCreationResponse(result));
   } catch (err) {
-    res.status(errorStatus(err)).json({ error: err.message });
+    return sendCreationError(res, err, 'create-order');
+  }
+});
+
+// Body-less recovery не хранит ПДн заказа в localStorage. Два исходных
+// capability однозначно находят уже зафиксированный снимок заказа; тело
+// не нужно и не может изменить первичный request hash.
+router.post('/orders/recover', orderCreateLimiter, requireBearerForCreate, async (req, res) => {
+  try {
+    const result = await orderService.recoverOrder({
+      orderAccessToken: req.orderAccessToken,
+      createIdempotencyKey: req.createIdempotencyKey,
+    });
+    return res.json(publicCreationResponse(result));
+  } catch (err) {
+    return sendCreationError(res, err, 'recover-order');
   }
 });
 

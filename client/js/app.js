@@ -15,9 +15,13 @@ const DEMO_SEQ_KEY='yaam_demo_order_seq';
 const ORDER_TOKEN_PREFIX='yaam_ord_v1_';
 const CREATE_KEY_PREFIX='yaam_create_v1_';
 const RETRY_KEY_PREFIX='yaam_retry_v1_';
-// Совпадает с серверным окном дедупликации awaiting_payment: пока первый
-// ответ мог потеряться, повторяем POST с той же парой; после окна новый заказ
-// получает новые credentials и не наследует секрет старой попытки.
+const CREATE_ORDER_LOCK_NAME='yaam-create-order-v1';
+// Все изменения двух order-scoped localStorage ключей в API-режиме проходят
+// через один Web Lock. Счётчик нужен, чтобы низкоуровневые helpers могли
+// fail-closed отклонить случайную запись вне критической секции.
+let createOrderLockDepth=0;
+// TTL относится только к паре, которую ещё не отправляли. После POST результат
+// может оставаться неизвестным: такую пару продолжаем через recovery endpoint.
 const CAPABILITY_TTL_MS=15*60*1000;
 
 function randomCapability(prefix){
@@ -33,22 +37,99 @@ function randomCapability(prefix){
 function validCapability(value,prefix){
   return typeof value==='string'&&value.startsWith(prefix)&&value.length===prefix.length+43&&/^[A-Za-z0-9_-]+$/.test(value.slice(prefix.length));
 }
-function pendingOrderCredentials(){
+function sanitizePendingOrderCredentials(saved){
+  if(!saved||!validCapability(saved.orderAccessToken,ORDER_TOKEN_PREFIX)
+    ||!validCapability(saved.createIdempotencyKey,CREATE_KEY_PREFIX))return null;
+  const parsedCreatedAt=Number(saved.createdAt);
+  const createdAt=Number.isFinite(parsedCreatedAt)?parsedCreatedAt:Date.now();
+  // Миграция legacy-формата: requestPayload означал возможный POST. ПДн из него
+  // немедленно удаляем; точный заказ теперь восстанавливает сервер по capability.
+  const parsedSubmittedAt=Number(saved.submittedAt);
+  const submittedAt=parsedSubmittedAt>0
+    ?parsedSubmittedAt
+    :(saved.requestPayload?(createdAt>0?createdAt:Date.now()):null);
+  return{
+    orderAccessToken:saved.orderAccessToken,
+    createIdempotencyKey:saved.createIdempotencyKey,
+    createdAt,
+    submittedAt,
+  };
+}
+function readPendingOrderCredentials({persistSanitized=false}={}){
   let saved=null;
   try{saved=JSON.parse(localStorage.getItem(PENDING_ORDER_CREDENTIALS_KEY)||'null');}catch(e){}
-  if(saved&&Date.now()-Number(saved.createdAt||0)<=CAPABILITY_TTL_MS
-    &&validCapability(saved.orderAccessToken,ORDER_TOKEN_PREFIX)
-    &&validCapability(saved.createIdempotencyKey,CREATE_KEY_PREFIX))return saved;
+  const clean=sanitizePendingOrderCredentials(saved);
+  if(!clean)return null;
+  // Миграцию legacy payload выполняем только внутри Web Lock (вызывающая
+  // функция передаёт persistSanitized=true). Обычное read не должно записать
+  // назад старую пару поверх более новой операции другой вкладки.
+  if(persistSanitized&&(!USE_API||createOrderLockDepth>0)){
+    try{localStorage.setItem(PENDING_ORDER_CREDENTIALS_KEY,JSON.stringify(clean));}catch(e){}
+  }
+  return clean;
+}
+function savePendingOrderCredentials(value){
+  if(USE_API&&createOrderLockDepth===0)return false;
+  const clean=sanitizePendingOrderCredentials(value);
+  if(!clean)return false;
+  try{localStorage.setItem(PENDING_ORDER_CREDENTIALS_KEY,JSON.stringify(clean));return true;}
+  catch(e){return false;}
+}
+function pendingOrderCredentials(){
+  const saved=readPendingOrderCredentials({persistSanitized:true});
+  if(saved&&(saved.submittedAt||Date.now()-saved.createdAt<=CAPABILITY_TTL_MS))return saved;
   const fresh={
     orderAccessToken:randomCapability(ORDER_TOKEN_PREFIX),
     createIdempotencyKey:randomCapability(CREATE_KEY_PREFIX),
     createdAt:Date.now(),
+    submittedAt:null,
   };
-  localStorage.setItem(PENDING_ORDER_CREDENTIALS_KEY,JSON.stringify(fresh));
+  if(!savePendingOrderCredentials(fresh))throw new Error('Не удалось безопасно сохранить создание заказа — освободите место в браузере и повторите');
   return fresh;
 }
-function clearPendingOrderCredentials(){
-  try{localStorage.removeItem(PENDING_ORDER_CREDENTIALS_KEY);}catch(e){}
+function markPendingOrderSubmitted(credentials){
+  const submitted={...credentials,submittedAt:credentials.submittedAt||Date.now()};
+  if(!savePendingOrderCredentials(submitted))throw new Error('Не удалось безопасно сохранить попытку заказа — освободите место в браузере и повторите');
+  return submitted;
+}
+function clearPendingOrderCredentials(expected,{allowSubmitted=true}={}){
+  if(USE_API&&createOrderLockDepth===0)return false;
+  if(!expected)return false;
+  const saved=readPendingOrderCredentials();
+  if(!saved||saved.orderAccessToken!==expected.orderAccessToken
+    ||saved.createIdempotencyKey!==expected.createIdempotencyKey)return false;
+  if(saved.submittedAt&&!allowSubmitted)return false;
+  try{localStorage.removeItem(PENDING_ORDER_CREDENTIALS_KEY);return true;}catch(e){return false;}
+}
+function readStoredActiveOrder(){
+  try{return JSON.parse(localStorage.getItem(ORDER_STORAGE_KEY)||'null');}catch(e){return null;}
+}
+function sameStoredOrder(saved,orderCode,orderAccessToken){
+  if(!saved||saved.orderCode!==orderCode)return false;
+  if(orderAccessToken)return saved.orderAccessToken===orderAccessToken;
+  return !saved.orderAccessToken; // demo-заказ не может удалить API-заказ с тем же кодом
+}
+function clearStoredOrderState(orderCode,orderAccessToken){
+  if(USE_API&&createOrderLockDepth===0)return false;
+  const saved=readStoredActiveOrder();
+  if(!sameStoredOrder(saved,orderCode,orderAccessToken))return false;
+  try{localStorage.removeItem(ORDER_STORAGE_KEY);return true;}catch(e){return false;}
+}
+function validStoredApiOrder(saved){
+  return !!(saved&&saved.orderCode&&validCapability(saved.orderAccessToken,ORDER_TOKEN_PREFIX));
+}
+function withCreateOrderLock(task){
+  if(navigator?.locks&&typeof navigator.locks.request==='function'){
+    return navigator.locks.request(CREATE_ORDER_LOCK_NAME,{mode:'exclusive'},async()=>{
+      createOrderLockDepth+=1;
+      try{return await task();}
+      finally{createOrderLockDepth-=1;}
+    });
+  }
+  // localStorage не предоставляет атомарной compare-and-set операции, поэтому
+  // корректный межвкладочный mutex на нём построить нельзя. Для старого
+  // браузера безопаснее не отправить финансовую операцию, чем рискнуть двумя.
+  return Promise.reject(new Error('Для безопасного оформления заказа обновите браузер до актуальной версии'));
 }
 
 // Без бэкенда (USE_API=false, как сейчас на проде — сервер ещё не задеплоен)
@@ -278,7 +359,7 @@ async function submitRating(n){
   try{
     if(USE_API&&currentOrderCode)await api.rateOrder(currentOrderCode,currentOrderAccessToken,n);
     ratingSubmitted=true;ratingJustNow=true;
-    saveOrderState(); // демо: чтобы после refresh снова не показать форму оценки
+    await saveOrderStateSafely(); // демо/API: после refresh снова не показываем форму оценки
     setTimeout(renderRatingStars,350); // короткая пауза, чтобы увидеть подсветку звёзд перед "спасибо"
   }catch(err){
     showToast(err.message||'Не удалось сохранить оценку');
@@ -423,6 +504,7 @@ function saveCartState(){
   }catch(e){}
 }
 function saveOrderState(){
+  if(USE_API&&createOrderLockDepth===0)return false;
   try{
     if(currentOrderCode){
       // qrDeadline — абсолютный дедлайн платёжного окна (см. "Таймер QR" ниже).
@@ -433,7 +515,16 @@ function saveOrderState(){
       // preDeadline — тот же принцип, что и qrDeadline: абсолютный дедлайн окна
       // ожидания ответа ресторана, сохраняется всегда, иначе refresh на этом
       // экране каждый раз показывал бы заново почти полные 3:00.
-      const state={orderCode:currentOrderCode,orderAccessToken:currentOrderAccessToken,retryIdempotencyKey:currentRetryIdempotencyKey,paymentUrl:currentPaymentUrl,amount:currentOrderAmount,restId:curRest?curRest.id:null,qrDeadline,preDeadline,orderCreatedAtMs};
+      const state={
+        orderCode:currentOrderCode,
+        orderAccessToken:currentOrderAccessToken,
+        retryIdempotencyKey:currentRetryIdempotencyKey,
+        paymentUrl:currentPaymentUrl,
+        amount:currentOrderAmount,
+        restId:currentOrderRestaurantId||(curRest?curRest.id:null),
+        orderItems:currentOrderItems,
+        qrDeadline,preDeadline,orderCreatedAtMs,
+      };
       if(!USE_API){
         // Демо-режим сам себе бэкенд — сохраняем всё, что понадобится для
         // восстановления экрана без единого сетевого запроса (см. restoreDemoOrder).
@@ -446,12 +537,211 @@ function saveOrderState(){
         state.curEstimatedMinutes=curEstimatedMinutes;
         state.cartSnapshot=cart;
       }
+      const stored=readStoredActiveOrder();
+      if(stored&&!sameStoredOrder(stored,currentOrderCode,currentOrderAccessToken)){
+        const storedCreatedAt=Number(stored.orderCreatedAtMs);
+        const currentCreatedAt=Number(orderCreatedAtMs);
+        const storedHasCreatedAt=stored.orderCreatedAtMs!=null&&Number.isFinite(storedCreatedAt);
+        const currentHasCreatedAt=orderCreatedAtMs!=null&&Number.isFinite(currentCreatedAt);
+        // Старая вкладка не имеет права затирать другой, более новый заказ.
+        // Заменяем отличающийся snapshot только когда оба времени известны и
+        // текущий заказ доказанно новее сохранённого.
+        if(!storedHasCreatedAt||!currentHasCreatedAt
+          ||currentCreatedAt<=storedCreatedAt)return false;
+      }
       localStorage.setItem(ORDER_STORAGE_KEY,JSON.stringify(state));
     }else{
-      localStorage.removeItem(ORDER_STORAGE_KEY);
+      return false; // удаление требует compare-and-delete через clearStoredOrderState()
     }
     return true;
   }catch(e){return false;}
+}
+async function saveOrderStateSafely(){
+  if(!USE_API||createOrderLockDepth>0)return saveOrderState();
+  return withCreateOrderLock(()=>saveOrderState());
+}
+async function clearStoredOrderStateSafely(orderCode,orderAccessToken){
+  if(!USE_API||createOrderLockDepth>0)return clearStoredOrderState(orderCode,orderAccessToken);
+  return withCreateOrderLock(()=>clearStoredOrderState(orderCode,orderAccessToken));
+}
+
+function normalizeOrderSnapshotItems(items){
+  if(!Array.isArray(items))return[];
+  return items.map(item=>({
+    n:String(item?.name??item?.n??''),
+    p:Number(item?.price??item?.p??0),
+    q:Number(item?.qty??item?.q??0),
+  })).filter(item=>item.n&&Number.isFinite(item.p)&&Number.isInteger(item.q)&&item.q>0);
+}
+function parseServerCreatedAt(value,fallback){
+  if(typeof value==='number'&&Number.isFinite(value))return value;
+  if(typeof value==='string'){
+    const normalized=value.includes('T')?value:value.replace(' ','T')+'Z';
+    const parsed=Date.parse(normalized);
+    if(Number.isFinite(parsed))return parsed;
+  }
+  return Number(fallback)||Date.now();
+}
+function loadOrderRestaurant(restId){
+  if(!restId)return;
+  currentOrderRestaurantId=Number(restId)||restId;
+  if(curRest&&String(curRest.id)===String(restId))return;
+  if(USE_API){
+    return api.getRestaurant(restId)
+      .then(rest=>{curRest=normalizeRestaurant(rest);})
+      .catch(()=>{curRest=null;});
+  }else{
+    curRest=restaurants.find(r=>String(r.id)===String(restId))||null;
+  }
+}
+function hydrateStoredOrder(savedOrder){
+  currentOrderCode=savedOrder.orderCode;
+  currentOrderAccessToken=savedOrder.orderAccessToken||null;
+  currentRetryIdempotencyKey=validCapability(savedOrder.retryIdempotencyKey,RETRY_KEY_PREFIX)?savedOrder.retryIdempotencyKey:null;
+  currentPaymentUrl=savedOrder.paymentUrl||null;
+  currentOrderAmount=savedOrder.amount||null;
+  currentOrderRestaurantId=savedOrder.restId||null;
+  currentOrderItems=normalizeOrderSnapshotItems(savedOrder.orderItems);
+  qrDeadline=savedOrder.qrDeadline||null;
+  preDeadline=savedOrder.preDeadline||null;
+  orderCreatedAtMs=savedOrder.orderCreatedAtMs||null;
+}
+async function applyStoredOrder(savedOrder){
+  hydrateStoredOrder(savedOrder);
+  if(savedOrder.restId)await loadOrderRestaurant(savedOrder.restId);
+}
+async function applyRecoveredOrder(result,credentials,{fallbackContext}={}){
+  const{order,payment,context}=result||{};
+  if(!order?.public_code)throw new Error('Сервер не вернул созданный заказ');
+  const safeContext=context||fallbackContext||{};
+  currentOrderCode=order.public_code;
+  currentOrderAccessToken=credentials.orderAccessToken;
+  currentCreateIdempotencyKey=credentials.createIdempotencyKey;
+  currentPaymentUrl=payment?.paymentUrl||null;
+  currentOrderAmount=Number(order.items_total)||null;
+  currentOrderRestaurantId=safeContext.restaurantId||null;
+  currentOrderItems=normalizeOrderSnapshotItems(safeContext.items);
+  orderCreatedAtMs=parseServerCreatedAt(safeContext.createdAt,credentials.submittedAt||credentials.createdAt);
+  const activeStateSaved=saveOrderState();
+  // Только после надёжного active snapshot удаляем recovery capability.
+  if(activeStateSaved)clearPendingOrderCredentials(credentials);
+  initialRecoveryBlocked=false;
+  currentCreateIdempotencyKey=null;
+  await loadOrderRestaurant(currentOrderRestaurantId);
+  return order;
+}
+async function showRecoveredOrder(order){
+  if(order.status!=='awaiting_payment'){
+    startOrderPolling();
+    return;
+  }
+  document.getElementById('qr-amt').textContent=(currentOrderAmount||0)+' ₽';
+  document.getElementById('cartbar').style.display='none';
+  renderQRPaymentOptions();
+  drawQR();await startNewQRTimer();go('qr');
+}
+
+async function recoverSubmittedOrder(credentials){
+  return api.recoverOrder(credentials.orderAccessToken,credentials.createIdempotencyKey);
+}
+async function resolveInitialOrder({allowCreate=false,apiPayload=null,fallbackContext=null}={}){
+  return withCreateOrderLock(async()=>{
+    // Другая вкладка могла завершить операцию, пока эта ждала lock.
+    const active=readStoredActiveOrder();
+    if(validStoredApiOrder(active)){
+      await applyStoredOrder(active);
+      return{kind:'active'};
+    }
+
+    let credentials=readPendingOrderCredentials({persistSanitized:true});
+    if(credentials?.submittedAt){
+      try{
+        const recovered=await recoverSubmittedOrder(credentials);
+        const order=await applyRecoveredOrder(recovered,credentials);
+        return{kind:'resolved',order,source:'recover'};
+      }catch(err){
+        if(err.status!==404)throw err;
+        // 404 — сервер однозначно не знает эту пару: финансовой операции нет.
+        clearPendingOrderCredentials(credentials);
+        credentials=null;
+      }
+    }
+    if(!allowCreate)return{kind:'none'};
+
+    credentials=pendingOrderCredentials();
+    credentials=markPendingOrderSubmitted(credentials);
+    currentOrderAccessToken=credentials.orderAccessToken;
+    currentCreateIdempotencyKey=credentials.createIdempotencyKey;
+    let created;
+    try{
+      created=await api.createOrder(apiPayload,credentials.orderAccessToken,credentials.createIdempotencyKey);
+    }catch(err){
+      // Валидный клиентский отказ, включая fresh 409, закрывает эту пару.
+      // Timeout/rate-limit могут прийти от промежуточного слоя после отправки,
+      // поэтому 408/429, как сеть/5xx, остаются submitted и идут через recover.
+      if(Number.isInteger(err.status)&&err.status>=400&&err.status<500
+        &&err.status!==408&&err.status!==429){
+        clearPendingOrderCredentials(credentials);
+        currentOrderAccessToken=null;currentCreateIdempotencyKey=null;
+      }
+      throw err;
+    }
+    const order=await applyRecoveredOrder(created,credentials,{fallbackContext});
+    return{kind:'resolved',order,source:'create'};
+  });
+}
+
+let initialRecoveryInFlight=null,initialRecoveryBlocked=false;
+function showInitialOrderRecoveryPending(waiting=false){
+  initialRecoveryBlocked=true;
+  showOrderDot(false);showRestaurantPhone(null);setRejOrderCode(null);
+  document.getElementById('rej-title').textContent='Проверяем созданный заказ';
+  document.getElementById('rej-explain').textContent=waiting
+    ?'Уточняем результат предыдущей попытки. Не закрывайте страницу и не оформляйте заказ повторно.'
+    :'Ответ сервера не получен. Не оформляйте заказ повторно — безопасно проверим предыдущую попытку.';
+  document.getElementById('rej-refund-line').style.display='none';
+  const btn=document.getElementById('rej-action-btn');
+  btn.textContent=waiting?'Проверяем…':'Проверить снова';btn.onclick=retryInitialOrderRecovery;
+  document.getElementById('statusbg').style.display='none';
+  if(!cur('rejected'))go('rejected');
+}
+async function recoverPendingInitialOrder({showFailure=true}={}){
+  if(!USE_API||currentOrderCode)return false;
+  const pending=readPendingOrderCredentials();
+  if(!pending?.submittedAt)return false;
+  if(initialRecoveryInFlight)return initialRecoveryInFlight;
+  if(showFailure)showInitialOrderRecoveryPending(true);
+  const operation=(async()=>{
+    try{
+      const outcome=await resolveInitialOrder();
+      if(outcome.kind==='active'){
+        initialRecoveryBlocked=false;startOrderPolling();return true;
+      }
+      if(outcome.kind==='resolved'){
+        initialRecoveryBlocked=false;await showRecoveredOrder(outcome.order);return true;
+      }
+      initialRecoveryBlocked=false;
+      return false; // recover вернул однозначный 404 и capability уже удалена
+    }catch(err){
+      if(showFailure)showInitialOrderRecoveryPending(false);
+      return true; // судьба POST неизвестна: корзину/новое оформление не показываем
+    }
+  })();
+  initialRecoveryInFlight=operation;
+  try{return await operation;}
+  finally{if(initialRecoveryInFlight===operation)initialRecoveryInFlight=null;}
+}
+async function retryInitialOrderRecovery(){
+  const btn=document.getElementById('rej-action-btn');
+  if(initialRecoveryInFlight)return;
+  btn.disabled=true;btn.style.opacity='.6';btn.textContent='Проверяем…';
+  try{
+    const handled=await recoverPendingInitialOrder({showFailure:true});
+    if(!handled){go('home');await tryRestoreSession();}
+  }finally{
+    btn.disabled=false;btn.style.opacity='';
+    if(initialRecoveryBlocked)btn.textContent='Проверить снова';
+  }
 }
 
 // Восстановление после обновления/закрытия вкладки. Активный оплаченный заказ
@@ -496,31 +786,31 @@ function restoreDemoOrder(saved){
   go('status');
 }
 async function tryRestoreSession(){
-  let savedOrder=null;
-  try{savedOrder=JSON.parse(localStorage.getItem(ORDER_STORAGE_KEY)||'null');}catch(e){}
+  let savedOrder=readStoredActiveOrder();
   // Заказы, сохранённые до появления capability, нельзя восстанавливать через
   // один перебираемый public_code. Это pre-production legacy: удаляем только
   // локальную ссылку, сам внутренний заказ остаётся доступен поддержке/админке.
   if(USE_API&&savedOrder&&savedOrder.orderCode&&!validCapability(savedOrder.orderAccessToken,ORDER_TOKEN_PREFIX)){
-    localStorage.removeItem(ORDER_STORAGE_KEY);
+    await clearStoredOrderStateSafely(savedOrder.orderCode,null);
     savedOrder=null;
   }
   if(savedOrder&&savedOrder.orderCode){
-    currentOrderCode=savedOrder.orderCode;
-    currentOrderAccessToken=savedOrder.orderAccessToken||null;
-    currentRetryIdempotencyKey=validCapability(savedOrder.retryIdempotencyKey,RETRY_KEY_PREFIX)?savedOrder.retryIdempotencyKey:null;
-    currentPaymentUrl=savedOrder.paymentUrl||null;
-    currentOrderAmount=savedOrder.amount||null;
-    qrDeadline=savedOrder.qrDeadline||null; // восстанавливаем ДО любого возможного startQRTimer() ниже — иначе он не найдёт дедлайн и создаст новый через fallback
-    preDeadline=savedOrder.preDeadline||null; // тот же принцип — восстанавливаем ДО restoreDemoOrder()/renderWaitForRestaurant() ниже
-    orderCreatedAtMs=savedOrder.orderCreatedAtMs||null; // тот же принцип — восстанавливаем ДО restoreDemoOrder()/startOrderPolling() ниже
-    if(savedOrder.restId){
-      if(USE_API){try{curRest=normalizeRestaurant(await api.getRestaurant(savedOrder.restId));}catch(e){}}
-      else{curRest=restaurants.find(r=>r.id===savedOrder.restId)||null;}
+    if(USE_API){
+      await applyStoredOrder(savedOrder);
+      startOrderPolling();
+    }else if(savedOrder.demo){
+      // Локальный demo restore не требует сети: гидратируем и рисуем его в том
+      // же event-loop, без промежуточного пустого экрана после refresh.
+      hydrateStoredOrder(savedOrder);
+      if(savedOrder.restId)loadOrderRestaurant(savedOrder.restId);
+      restoreDemoOrder(savedOrder);
     }
-    if(USE_API)startOrderPolling();
-    else if(savedOrder.demo)restoreDemoOrder(savedOrder);
     return true;
+  }
+  // Потерянный ответ восстанавливаем по capability до корзины, не собирая
+  // новый POST из потенциально уже изменённой формы.
+  if(USE_API){
+    if(await recoverPendingInitialOrder({showFailure:true}))return true;
   }
   let savedCart=null;
   try{savedCart=JSON.parse(localStorage.getItem(CART_STORAGE_KEY)||'null');}catch(e){}
@@ -616,7 +906,8 @@ async function openCartBar(){
 }
 // Строки заказа "N × Блюдо — сумма" — используются в корзине и на двух экранах статуса.
 function orderItemsHTML(){
-  return Object.values(cart).map(c=>`<div class="sumrow"><span>${c.q} × ${c.n}</span><span>${c.p*c.q} ₽</span></div>`).join('');
+  const items=currentOrderCode&&currentOrderItems.length?currentOrderItems:Object.values(cart);
+  return items.map(c=>`<div class="sumrow"><span>${c.q} × ${c.n}</span><span>${c.p*c.q} ₽</span></div>`).join('');
 }
 // Доставка/самовывоз — выбор клиента при оформлении. По умолчанию доставка,
 // но дальше сохраняется между открытиями корзины (openCart передаёт текущее
@@ -732,7 +1023,7 @@ function validateLegalConsent(){
 // что брать сумму оттуда небезопасно. Обновляется из order.items_total в
 // pollOrderOnce() (API-режим) — это и есть backend-данные заказа.
 let currentOrderCode=null, currentOrderAccessToken=null, currentCreateIdempotencyKey=null, currentRetryIdempotencyKey=null;
-let currentPaymentUrl=null, currentOrderAmount=null;
+let currentPaymentUrl=null, currentOrderAmount=null, currentOrderRestaurantId=null, currentOrderItems=[];
 // orderCreatedAtMs — момент фактического создания заказа (не оплаты), один раз
 // зафиксированный в openQR(). Персистится и восстанавливается тем же принципом,
 // что qrDeadline/preDeadline, но не очищается на nextStatus()/переходах статуса —
@@ -801,26 +1092,31 @@ async function openQR(){
     // не оплаты.
     orderCreatedAtMs=Date.now();
     if(USE_API){
-      // Credentials создаются и сохраняются ДО POST. Если ответ потеряется,
-      // повторный тап/refresh отправит ту же пару, и backend вернёт тот же
-      // заказ вместо создания дубля. В JSON-body секреты не попадают.
-      const credentials=pendingOrderCredentials();
-      currentOrderAccessToken=credentials.orderAccessToken;
-      currentCreateIdempotencyKey=credentials.createIdempotencyKey;
-      const{order,payment}=await api.createOrder({
+      const apiPayload={
         restaurantId:curRest.id, city:selectedCity,
         customerName:payload.name, customerPhone:payload.phone,
         address:payload.address, fulfillmentType:payload.fulfillmentType, comment:payload.comment,
         items:payload.items.map(i=>({name:i.name,price:i.price,qty:i.qty,menuItemId:i.menuItemId})),
-      },currentOrderAccessToken,currentCreateIdempotencyKey);
-      currentOrderCode=order.public_code;
-      currentPaymentUrl=payment?.paymentUrl||null;
-      currentOrderAmount=order.items_total;
-      const activeStateSaved=saveOrderState();
-      // Не удаляем резервную пару, если браузер не смог записать активное
-      // состояние: иначе при refresh пользователь потеряет единственный ключ.
-      if(activeStateSaved)clearPendingOrderCredentials();
-      currentCreateIdempotencyKey=null;
+      };
+      // В pending localStorage остаются только две capability и метаданные без
+      // ПДн. После неизвестного POST payload больше не переигрывается: заказ
+      // восстанавливает сервер по той же паре, а его context становится
+      // источником истины для ресторана и состава заказа.
+      const fallbackContext={
+        restaurantId:apiPayload.restaurantId,
+        createdAt:orderCreatedAtMs,
+        items:apiPayload.items.map(({name,price,qty})=>({name,price,qty})),
+      };
+      const outcome=await resolveInitialOrder({allowCreate:true,apiPayload,fallbackContext});
+      if(outcome.kind==='active'){
+        startOrderPolling();
+        return;
+      }
+      if(outcome.kind==='resolved'){
+        await showRecoveredOrder(outcome.order);
+        return;
+      }
+      throw new Error('Не удалось подтвердить создание заказа');
     }else{
       // Демо-режим — своя "БД" в localStorage вместо реального бэкенда (см.
       // nextDemoOrderCode/saveOrderState) — активный заказ должен переживать
@@ -828,6 +1124,8 @@ async function openQR(){
       currentOrderCode=nextDemoOrderCode();
       currentPaymentUrl=null; // demo — реальной ссылки на оплату нет и не будет
       currentOrderAmount=sum;
+      currentOrderRestaurantId=curRest?.id||null;
+      currentOrderItems=normalizeOrderSnapshotItems(Object.values(cart));
       demoStage='qr';
       saveOrderState();
     }
@@ -835,12 +1133,20 @@ async function openQR(){
     // создан и ещё не оплачен (pending_payment/QR), поэтому здесь точка не
     // включается; см. openStatus()/pollOrderOnce() — включается только после
     // подтверждённой оплаты.
-    document.getElementById('qr-amt').textContent=sum+' ₽';
+    document.getElementById('qr-amt').textContent=(currentOrderAmount??sum)+' ₽';
     document.getElementById('cartbar').style.display='none';
     renderQRPaymentOptions();
-    drawQR();startNewQRTimer();go('qr');
+    drawQR();await startNewQRTimer();go('qr');
   }catch(err){
-    showToast(err.message||'Не удалось оформить заказ');
+    // resolveInitialOrder различает fresh HTTP 4xx и неизвестный результат:
+    // первый очищает capability, второй сохраняет её только для recover.
+    if(USE_API&&readPendingOrderCredentials()?.submittedAt){
+      // POST мог дойти до сервера. Не оставляем пользователя на редактируемой
+      // корзине: повторный тап обязан сначала выяснить судьбу заказа A.
+      showInitialOrderRecoveryPending(false);
+    }else{
+      showToast(err.message||'Не удалось оформить заказ');
+    }
   }finally{
     checkoutInFlight=false;
     if(payBtn){payBtn.disabled=false;payBtn.style.opacity='';payBtn.innerHTML=payBtnHTML;}
@@ -952,6 +1258,7 @@ function setRejOrderCode(code){
 }
 function openRejected(reason){
   const orderCodeForDisplay=currentOrderCode; // захватываем до очистки ниже
+  const orderTokenForClear=currentOrderAccessToken;
   const amountForDisplay=currentOrderAmount; // источник истины — сумма ЗАКАЗА, не текущей (возможно уже пустой после refresh) корзины
   clearInterval(preTimer);clearTimeout(preAutoTimer);preDeadline=null;stopOrderPolling(); // отклонён/не ответил вовремя — терминально, окно ожидания больше не актуально
   showStatusSpinner(false);
@@ -960,7 +1267,8 @@ function openRejected(reason){
   // Заказ окончен (отклонён рестораном/не ответил вовремя) — это терминальное
   // состояние без пути назад, поэтому не держим его "активным": иначе refresh
   // на этом экране заново находил бы его и не давал вернуться к обычному меню.
-  currentOrderCode=null;currentOrderAccessToken=null;currentCreateIdempotencyKey=null;currentRetryIdempotencyKey=null;currentPaymentUrl=null;currentOrderAmount=null;orderCreatedAtMs=null;saveOrderState();
+  currentOrderCode=null;currentOrderAccessToken=null;currentCreateIdempotencyKey=null;currentRetryIdempotencyKey=null;currentPaymentUrl=null;currentOrderAmount=null;currentOrderRestaurantId=null;currentOrderItems=[];orderCreatedAtMs=null;
+  void clearStoredOrderStateSafely(orderCodeForDisplay,orderTokenForClear);
   setRejOrderCode(orderCodeForDisplay);
   document.getElementById('rej-explain').style.display='';
   // Сумма возврата — только из данных заказа, никогда из захардкоженной
@@ -1020,7 +1328,7 @@ async function retryPaymentFlow(){
       currentRetryIdempotencyKey=randomCapability(RETRY_KEY_PREFIX);
       // Ключ должен пережить потерянный HTTP-ответ. Если браузер не может
       // сохранить его до POST, безопаснее не начинать финансовую операцию.
-      if(!saveOrderState()){
+      if(!await saveOrderStateSafely()){
         currentRetryIdempotencyKey=null;
         throw new Error('Не удалось безопасно сохранить попытку оплаты — освободите место в браузере и повторите');
       }
@@ -1029,7 +1337,7 @@ async function retryPaymentFlow(){
     const{payment}=await api.retryPayment(currentOrderCode,currentOrderAccessToken,completedKey);
     currentPaymentUrl=payment?.paymentUrl||null;
     currentRetryIdempotencyKey=null;
-    if(!saveOrderState()){
+    if(!await saveOrderStateSafely()){
       // Сервер уже мог создать платёж. Сохраняем ключ хотя бы в памяти, чтобы
       // повтор текущей вкладки запросил ту же попытку, а не новую.
       currentRetryIdempotencyKey=completedKey;
@@ -1038,12 +1346,15 @@ async function retryPaymentFlow(){
     const sum=currentOrderAmount||totals().sum;
     document.getElementById('qr-amt').textContent=sum+' ₽';
     renderQRPaymentOptions();
-    drawQR();startNewQRTimer();go('qr'); // новая попытка оплаты после payment_failed — новый providerPaymentId, значит и новый дедлайн
+    drawQR();await startNewQRTimer();go('qr'); // новая попытка оплаты после payment_failed — новый providerPaymentId, значит и новый дедлайн
   }catch(err){
     // 4xx (кроме rate limit) — сервер однозначно отклонил этот ключ; следующий
     // ручной тап получает новый. При сети/429/5xx исход неизвестен, поэтому
     // сохраняем прежний ключ и безопасно повторяем ту же попытку.
-    if(err.status>=400&&err.status<500&&err.status!==429){currentRetryIdempotencyKey=null;saveOrderState();}
+    if(err.status>=400&&err.status<500&&err.status!==429){
+      currentRetryIdempotencyKey=null;
+      await saveOrderStateSafely();
+    }
     showToast(err.message||'Не удалось создать новый платёж');
   }finally{
     retryPaymentInFlight=false;
@@ -1065,14 +1376,17 @@ async function recoverRetryPaymentPresentation(notifyUser=false){
       // восстановленной demo/pre-production попытки начинаем окно заново.
       qrDeadline=Date.now()+QR_TIMER_SEC*1000;
       currentRetryIdempotencyKey=null;
-      if(!saveOrderState()){
+      if(!await saveOrderStateSafely()){
         currentRetryIdempotencyKey=recoveryKey;
         if(notifyUser)showToast('Не удалось сохранить восстановленный платёж — не закрывайте вкладку');
         return false;
       }
       return true;
     }catch(err){
-      if(err.status>=400&&err.status<500&&err.status!==429){currentRetryIdempotencyKey=null;saveOrderState();}
+      if(err.status>=400&&err.status<500&&err.status!==429){
+        currentRetryIdempotencyKey=null;
+        await saveOrderStateSafely();
+      }
       if(notifyUser)showToast(err.message||'Не удалось восстановить платёж');
       return false;
     }finally{
@@ -1147,9 +1461,11 @@ async function resumeExistingPayment(){
 // объясняем и даём вернуться, вместо того чтобы вечно опрашивать 404 молча.
 function openOrderNotFound(){
   const orderCodeForDisplay=currentOrderCode; // захватываем до очистки ниже
+  const orderTokenForClear=currentOrderAccessToken;
   stopOrderPolling();
   showStatusSpinner(false);showOrderDot(false);showRestaurantPhone(null);
-  currentOrderCode=null;currentOrderAccessToken=null;currentCreateIdempotencyKey=null;currentRetryIdempotencyKey=null;currentPaymentUrl=null;currentOrderAmount=null;orderCreatedAtMs=null;saveOrderState();
+  currentOrderCode=null;currentOrderAccessToken=null;currentCreateIdempotencyKey=null;currentRetryIdempotencyKey=null;currentPaymentUrl=null;currentOrderAmount=null;currentOrderRestaurantId=null;currentOrderItems=[];orderCreatedAtMs=null;
+  void clearStoredOrderStateSafely(orderCodeForDisplay,orderTokenForClear);
   setRejOrderCode(orderCodeForDisplay);
   document.getElementById('rej-title').textContent='Не удалось найти заказ';
   document.getElementById('rej-explain').textContent='Возможно, он отменён или устарел. Если это ошибка — напишите в поддержку.';
@@ -1189,7 +1505,7 @@ async function pollOrderOnce(){
     if(recovered&&order.status==='payment_failed')return;
   }else if(currentRetryIdempotencyKey&&order.status!=='payment_failed'&&order.status!=='awaiting_payment'){
     currentRetryIdempotencyKey=null;
-    saveOrderState();
+    await saveOrderStateSafely();
   }
 
   if(order.status==='awaiting_payment'){
@@ -1248,12 +1564,23 @@ function startOrderPolling(){
 function refreshActiveOrderIfVisible(){
   if(USE_API&&currentOrderCode&&orderPollTimer)pollOrderOnce();
 }
-document.addEventListener('visibilitychange',()=>{if(!document.hidden){refreshActiveOrderIfVisible();resyncVisibleTimers();}});
-window.addEventListener('pageshow',(e)=>{if(e.persisted){refreshActiveOrderIfVisible();resyncVisibleTimers();}});
+function refreshPendingInitialOrderIfVisible(){
+  if(USE_API&&!currentOrderCode&&readPendingOrderCredentials()?.submittedAt){
+    return recoverPendingInitialOrder({showFailure:true});
+  }
+  return null;
+}
+document.addEventListener('visibilitychange',()=>{if(!document.hidden){refreshActiveOrderIfVisible();refreshPendingInitialOrderIfVisible();resyncVisibleTimers();}});
+window.addEventListener('pageshow',(e)=>{if(e.persisted){refreshActiveOrderIfVisible();refreshPendingInitialOrderIfVisible();resyncVisibleTimers();}});
 
 function cur(id){return document.getElementById(id).classList.contains('active');}
 function go(id){document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));document.getElementById(id).classList.add('active');document.querySelector('.dish-add').style.display=(id==='dish')?'block':'none';if(id!=='status'&&id!=='rejected')document.getElementById('statusbg').style.display='none';window.scrollTo(0,0);updateBar();if(id==='home'&&introFadeHandler)introFadeHandler();try{if(id!=='home')history.pushState({screen:id},'');else history.replaceState({screen:'home'},'');}catch(e){}}
-function resetAll(){clearInterval(preTimer);clearTimeout(preAutoTimer);preDeadline=null;stopQRTimer();qrDeadline=null;stopOrderPolling();showRestaurantPhone(null);showOrderDot(false);cart={};curRest=null;currentOrderCode=null;currentOrderAccessToken=null;currentCreateIdempotencyKey=null;currentRetryIdempotencyKey=null;currentPaymentUrl=null;currentOrderAmount=null;orderCreatedAtMs=null;demoStage='qr';clearPendingOrderCredentials();saveCartState();saveOrderState();document.getElementById('statusbg').style.display='none';go('home');renderList();}
+function resetAll(){
+  const orderCodeForClear=currentOrderCode,orderTokenForClear=currentOrderAccessToken;
+  clearInterval(preTimer);clearTimeout(preAutoTimer);preDeadline=null;stopQRTimer();qrDeadline=null;stopOrderPolling();showRestaurantPhone(null);showOrderDot(false);cart={};curRest=null;currentOrderCode=null;currentOrderAccessToken=null;currentCreateIdempotencyKey=null;currentRetryIdempotencyKey=null;currentPaymentUrl=null;currentOrderAmount=null;currentOrderRestaurantId=null;currentOrderItems=[];orderCreatedAtMs=null;initialRecoveryBlocked=false;demoStage='qr';
+  if(orderCodeForClear)void clearStoredOrderStateSafely(orderCodeForClear,orderTokenForClear);
+  saveCartState();document.getElementById('statusbg').style.display='none';go('home');renderList();
+}
 // Своё окно подтверждения (замена заблокированного confirm)
 function yaamConfirm(text,onYes,labels){
   const ov=document.getElementById('confirm-overlay');
@@ -1345,8 +1672,9 @@ function startQRTimer(){
 // restore корректно восстановил именно его, а не начал заново с 10 минут.
 function startNewQRTimer(){
   qrDeadline=Date.now()+QR_TIMER_SEC*1000;
-  saveOrderState();
+  const persisted=saveOrderStateSafely();
   startQRTimer();
+  return persisted;
 }
 // Уход с экрана QR кнопкой "Назад" — заказ и currentOrderCode НЕ трогаем (пользователь
 // должен суметь вернуться к той же оплате), но фоновый таймер обязан остановиться,
@@ -1397,7 +1725,9 @@ window.addEventListener('popstate',e=>{try{
   // создать дубль заказа (см. openQR/resumeExistingOrderFlow). Демо-заказ на
   // стадии "qr" (ещё не "оплачен") ведёт на экран QR, а не статуса — там
   // пока нечего показывать.
-  if(currentOrderCode&&s!=='rejected'){
+  if(initialRecoveryBlocked){
+    s='rejected';
+  }else if(currentOrderCode&&s!=='rejected'){
     const target=(!USE_API&&demoStage==='qr')?'qr':'status';
     if(s!==target){
       s=target;

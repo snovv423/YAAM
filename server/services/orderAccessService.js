@@ -71,13 +71,6 @@ function insertCredential(orderId, tokenHash, createKeyHash, requestHash) {
   `).run(orderId, tokenHash, createKeyHash, requestHash);
 }
 
-function credentialMatches(orderId, tokenHash, createKeyHash, requestHash) {
-  return !!db.prepare(`
-    SELECT 1 FROM order_access_credentials
-    WHERE order_id = ? AND token_hash = ? AND create_key_hash = ? AND request_hash = ?
-  `).get(orderId, tokenHash, createKeyHash, requestHash);
-}
-
 function secretsAlreadyUsed(tokenHash, createKeyHash) {
   return !!db.prepare(`
     SELECT 1 FROM order_access_credentials
@@ -110,7 +103,6 @@ module.exports = {
   requireValidCreationSecrets,
   parseBearerAuthorization,
   insertCredential,
-  credentialMatches,
   secretsAlreadyUsed,
   findAuthorizedOrderId,
 };

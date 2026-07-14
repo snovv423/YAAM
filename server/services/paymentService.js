@@ -20,6 +20,9 @@ function calcCommission(itemsTotal) {
 }
 
 async function createPayment({ orderId, amount, description, idempotencyKey }) {
+  if (typeof idempotencyKey !== 'string' || !idempotencyKey) {
+    throw new Error('provider idempotency key обязателен для создания платежа');
+  }
   return provider.createPayment({ orderId, amount, description, idempotencyKey });
 }
 

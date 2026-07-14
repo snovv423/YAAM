@@ -15,9 +15,12 @@ const { restoreDatabase, findLatestBackup } = require('../scripts/restore-db');
 
 const { db, dbPath } = useIsolatedDb();
 const orderService = require('../services/orderService');
+const paymentService = require('../services/paymentService');
+const originalCreatePayment = paymentService.createPayment;
 const backupDir = fs.mkdtempSync(path.join(os.tmpdir(), 'yaam-backup-test-'));
 
 after(() => {
+  paymentService.createPayment = originalCreatePayment;
   cleanupDbFile(dbPath);
   fs.rmSync(backupDir, { recursive: true, force: true });
 });
@@ -42,12 +45,50 @@ test('backupDatabase() создаёт файл бэкапа с текущими 
     SELECT pp.qr_payload FROM payment_presentations pp
     JOIN payments p ON p.id = pp.payment_id WHERE p.order_id = ?
   `).get(protectedOrder.order.id);
+  const initialAttempt = backupDb.prepare(`
+    SELECT a.provider_idempotency_key, a.state, p.status
+    FROM payment_initial_attempts a
+    JOIN payments p ON p.id = a.payment_id
+    WHERE p.order_id = ?
+  `).get(protectedOrder.order.id);
   backupDb.close();
   assert.ok(row, 'бэкап должен содержать ресторан, добавленный до backupDatabase()');
   assert.equal(credential.token_hash.length, 32, 'бэкап должен сохранять hash доступа к заказу');
   assert.equal(credential.create_key_hash.length, 32, 'бэкап должен сохранять idempotency hash');
   assert.equal(credential.request_hash.length, 32, 'бэкап должен сохранять привязку ключа к запросу');
   assert.match(presentation.qr_payload, /^yaam-demo:\/\/pay\//, 'бэкап должен сохранять данные продолжения оплаты');
+  assert.match(initialAttempt.provider_idempotency_key, /^[0-9a-f-]{36}$/);
+  assert.equal(initialAttempt.state, 'ready');
+  assert.equal(initialAttempt.status, 'pending');
+});
+
+test('backupDatabase() сохраняет ambiguous initial attempt в creating для replay после restore', async () => {
+  const { restaurantId, menuItemId } = seedMinimalRestaurant(db, { name: 'Ресторан creating backup' });
+  const payload = basicOrderPayload(restaurantId, menuItemId, { customerPhone: '+79280002003' });
+  paymentService.createPayment = async () => { throw new Error('ambiguous response'); };
+  try {
+    await assert.rejects(orderService.createOrder(payload), (err) => err.statusCode === 503);
+  } finally {
+    paymentService.createPayment = originalCreatePayment;
+  }
+
+  const order = db.prepare('SELECT id FROM orders WHERE customer_phone = ?').get(payload.customerPhone);
+  const destPath = await backupDatabase({ dbPath, backupDir });
+  const { DatabaseSync } = require('node:sqlite');
+  const backupDb = new DatabaseSync(destPath, { readOnly: true });
+  const attempt = backupDb.prepare(`
+    SELECT p.status, p.provider_payment_id, a.state, a.provider_idempotency_key,
+      (SELECT COUNT(*) FROM payment_presentations pp WHERE pp.payment_id = p.id) AS presentations
+    FROM payments p JOIN payment_initial_attempts a ON a.payment_id = p.id
+    WHERE p.order_id = ?
+  `).get(order.id);
+  backupDb.close();
+
+  assert.equal(attempt.status, 'creating');
+  assert.equal(attempt.provider_payment_id, null);
+  assert.equal(attempt.state, 'creating');
+  assert.match(attempt.provider_idempotency_key, /^[0-9a-f-]{36}$/);
+  assert.equal(attempt.presentations, 0);
 });
 
 test('backupDatabase() сохраняет ledger повторной оплаты без исходного client retry-key', async () => {
@@ -74,7 +115,7 @@ test('backupDatabase() сохраняет ledger повторной оплаты
   backupDb.close();
 
   assert.equal(retry.client_key_hash.length, 32);
-  assert.match(retry.provider_idempotency_key, /^yaam_provider_retry_v1_/);
+  assert.match(retry.provider_idempotency_key, /^[0-9a-f-]{36}$/);
   assert.equal(retry.provider_idempotency_key.includes(rawRetryKey), false);
   assert.equal(retry.state, 'ready');
   assert.equal(retry.status, 'pending');

@@ -21,6 +21,7 @@ function withoutCreateTable(schema, tableName) {
 const currentSchema = fs.readFileSync(path.join(__dirname, '../db/schema.sql'), 'utf8');
 let oldSchema = withoutCreateTable(currentSchema, 'order_access_credentials');
 oldSchema = withoutCreateTable(oldSchema, 'payment_presentations');
+oldSchema = withoutCreateTable(oldSchema, 'payment_initial_attempts');
 oldSchema = withoutCreateTable(oldSchema, 'payment_retry_keys');
 oldSchema = withoutCreateTable(oldSchema, 'payment_retry_attempts');
 oldSchema = oldSchema.replace(/CREATE UNIQUE INDEX IF NOT EXISTS ux_payments_one_active_per_order[\s\S]*?;\n/, '');
@@ -72,6 +73,11 @@ test('аддитивное обновление закрывает legacy-зак
   assert.equal(
     db.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name='payment_presentations'").get().count,
     1,
+  );
+  const initialColumns = db.prepare('PRAGMA table_info(payment_initial_attempts)').all().map((row) => row.name);
+  assert.deepEqual(
+    initialColumns,
+    ['payment_id', 'provider_idempotency_key', 'state', 'created_at', 'updated_at'],
   );
   const retryColumns = db.prepare('PRAGMA table_info(payment_retry_attempts)').all().map((row) => row.name);
   assert.deepEqual(

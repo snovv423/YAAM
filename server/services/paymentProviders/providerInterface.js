@@ -5,7 +5,7 @@
  * не знают, какой провайдер сейчас подключён — подключение нового провайдера
  * не требует правок ни в orderService, ни в API, ни в клиенте.
  *
- * createPayment({orderId, amount, description, idempotencyKey?})
+ * createPayment({orderId, amount, description, idempotencyKey})
  *   -> { providerPaymentId, qrPayload?, paymentUrl? }
  *   Создаёт платёж во внешней системе. qrPayload — то, что рисуем как QR
  *   (для СБП). paymentUrl (у ЮKassa это confirmation.confirmation_url) —
@@ -13,9 +13,9 @@
  *   кнопки "Оплата с этого устройства" (window.location.href=paymentUrl),
  *   и для QR — оплата с текущего телефона и с другого телефона по QR ведут
  *   на одну и ту же платёжную сессию. null/отсутствует, если у провайдера
- *   нет прямой ссылки (сейчас — mock). idempotencyKey — устойчивый серверный
- *   ключ конкретной попытки: реальный провайдер обязан передать его в свой
- *   idempotency-заголовок, чтобы повтор не создавал второй внешний платёж.
+ *   нет прямой ссылки (сейчас — mock). idempotencyKey обязателен: это устойчивый
+ *   серверный ключ конкретной попытки, который реальный провайдер обязан передать
+ *   в свой idempotency-заголовок, чтобы повтор не создавал второй внешний платёж.
  *
  * getStatus(providerPaymentId)
  *   -> 'pending' | 'succeeded' | 'failed'

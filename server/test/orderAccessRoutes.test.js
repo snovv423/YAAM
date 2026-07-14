@@ -58,13 +58,20 @@ async function createViaHttp(payload) {
   });
 }
 
+async function recoverViaHttp(payload) {
+  return fetch(`${baseUrl}/api/orders/recover`, {
+    method: 'POST',
+    headers: headers(payload, { includeCreateKey: true }),
+  });
+}
+
 function retryKey() {
   return `yaam_retry_v1_${crypto.randomBytes(32).toString('base64url')}`;
 }
 
 const FORBIDDEN_FIELDS = [
   'id', 'restaurant_id', 'city', 'customer_name', 'customer_phone', 'address',
-  'comment', 'commission_amount', 'created_at', 'restaurant_name', 'items',
+  'comment', 'commission_amount', 'created_at', 'restaurant_name',
   'access_token_hash', 'token_hash', 'create_key_hash', 'request_hash', 'providerPaymentId',
 ];
 
@@ -104,8 +111,18 @@ test('POST /orders с корректной парой создаёт заказ,
   assert.equal(res.status, 201);
   const body = await res.json();
   assert.equal(res.headers.get('cache-control'), 'no-store');
+  assert.deepEqual(Object.keys(body).sort(), ['context', 'order', 'payment']);
+  assert.deepEqual(Object.keys(body.order).sort(), [
+    'estimated_ready_minutes', 'fulfillment_type', 'items_total', 'public_code',
+    'rating', 'restaurant_phone', 'status', 'status_updated_at',
+  ]);
   assert.match(body.order.public_code, /^YAAM-\d+$/);
   assert.deepEqual(Object.keys(body.payment).sort(), ['paymentUrl', 'qrPayload']);
+  assert.deepEqual(Object.keys(body.context).sort(), ['createdAt', 'items', 'restaurantId']);
+  assert.equal(body.context.restaurantId, restaurantId);
+  assert.match(body.context.createdAt, /^\d{4}-\d{2}-\d{2} /);
+  assert.deepEqual(body.context.items, [{ name: 'Тестовое блюдо', price: 300, qty: 1 }]);
+  assert.deepEqual(Object.keys(body.context.items[0]).sort(), ['name', 'price', 'qty']);
   assertNoInternalFields(body);
   assert.equal(JSON.stringify(body).includes(payload.orderAccessToken), false);
   assert.equal(JSON.stringify(body).includes(payload.createIdempotencyKey), false);
@@ -132,6 +149,25 @@ test('потерянный ответ: повтор POST с той же паро
   assert.deepEqual(second.payment, first.payment, 'повтор должен вернуть ту же безопасную ссылку/QR оплаты');
   const count = db.prepare('SELECT COUNT(*) AS count FROM orders WHERE customer_phone = ?').get('+79280001003').count;
   assert.equal(count, 1);
+});
+
+test('POST /orders/recover без body возвращает тот же заказ, payment и safe context', async () => {
+  const payload = basicOrderPayload(restaurantId, menuItemId, { customerPhone: '+79280001016' });
+  const created = await (await createViaHttp(payload)).json();
+  const recoveredResponse = await recoverViaHttp(payload);
+  assert.equal(recoveredResponse.status, 200);
+  assert.equal(recoveredResponse.headers.get('cache-control'), 'no-store');
+  const recovered = await recoveredResponse.json();
+  assert.deepEqual(recovered, created);
+  assertNoInternalFields(recovered);
+});
+
+test('POST /orders/recover с валидной, но неизвестной парой возвращает neutral 404', async () => {
+  const unknown = basicOrderPayload(restaurantId, menuItemId, { customerPhone: '+79280001017' });
+  const res = await recoverViaHttp(unknown);
+  assert.equal(res.status, 404);
+  assert.equal(res.headers.get('cache-control'), 'no-store');
+  assert.deepEqual(await res.json(), { error: 'заказ не найден' });
 });
 
 test('idempotency key привязан к содержимому заказа и отклоняет изменённый replay', async () => {
