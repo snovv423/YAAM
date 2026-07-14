@@ -24,15 +24,17 @@ test('незаконные ADVANCE_MAP-переходы по-прежнему о
 
 test('markPaid остаётся идемпотентным при повторном вызове', async () => {
   const { order } = await orderService.createOrder(basicOrderPayload(restaurantId, menuItemId, { customerPhone: '+79287770002' }));
-  const first = await orderService.markPaid(order.id);
-  const second = await orderService.markPaid(order.id);
+  const payment = db.prepare("SELECT id FROM payments WHERE order_id = ? AND status = 'pending'").get(order.id);
+  const first = await orderService.markPaid(order.id, payment.id);
+  const second = await orderService.markPaid(order.id, payment.id);
   assert.equal(first.status, 'awaiting_restaurant');
   assert.equal(second.status, 'awaiting_restaurant');
 });
 
 test('обычный путь заказа delivery целиком проходит без ошибок (regression sanity)', async () => {
   const { order } = await orderService.createOrder(basicOrderPayload(restaurantId, menuItemId, { customerPhone: '+79287770003' }));
-  await orderService.markPaid(order.id);
+  const payment = db.prepare("SELECT id FROM payments WHERE order_id = ? AND status = 'pending'").get(order.id);
+  await orderService.markPaid(order.id, payment.id);
   orderService.restaurantAccept(order.id);
   orderService.restaurantAdvance(order.id, 'preparing');
   orderService.restaurantAdvance(order.id, 'courier');

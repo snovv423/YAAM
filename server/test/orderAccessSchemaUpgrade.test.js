@@ -21,6 +21,11 @@ function withoutCreateTable(schema, tableName) {
 const currentSchema = fs.readFileSync(path.join(__dirname, '../db/schema.sql'), 'utf8');
 let oldSchema = withoutCreateTable(currentSchema, 'order_access_credentials');
 oldSchema = withoutCreateTable(oldSchema, 'payment_presentations');
+oldSchema = withoutCreateTable(oldSchema, 'payment_retry_keys');
+oldSchema = withoutCreateTable(oldSchema, 'payment_retry_attempts');
+oldSchema = oldSchema.replace(/CREATE UNIQUE INDEX IF NOT EXISTS ux_payments_one_active_per_order[\s\S]*?;\n/, '');
+oldSchema = oldSchema.replace(/CREATE UNIQUE INDEX IF NOT EXISTS ux_payments_provider_reference[\s\S]*?;\n/, '');
+oldSchema = oldSchema.replace(/CREATE INDEX IF NOT EXISTS ix_payment_retry_keys_payment[\s\S]*?;\n/, '');
 
 // Имитируем БД предыдущей версии: заказы/платежи уже есть, security-таблиц ещё нет.
 const legacyDb = new DatabaseSync(dbPath);
@@ -67,6 +72,16 @@ test('аддитивное обновление закрывает legacy-зак
   assert.equal(
     db.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name='payment_presentations'").get().count,
     1,
+  );
+  const retryColumns = db.prepare('PRAGMA table_info(payment_retry_attempts)').all().map((row) => row.name);
+  assert.deepEqual(
+    retryColumns,
+    ['payment_id', 'provider_idempotency_key', 'state', 'created_at', 'updated_at'],
+  );
+  const retryKeyColumns = db.prepare('PRAGMA table_info(payment_retry_keys)').all().map((row) => row.name);
+  assert.deepEqual(
+    retryKeyColumns,
+    ['client_key_hash', 'payment_id', 'created_at'],
   );
 
   const legacyToken = `yaam_ord_v1_${crypto.randomBytes(32).toString('base64url')}`;

@@ -99,10 +99,42 @@ CREATE TABLE IF NOT EXISTS payments (
   provider TEXT NOT NULL DEFAULT 'mock',      -- 'mock' | 'yookassa' (позже)
   provider_payment_id TEXT,                   -- id платежа во внешней системе
   amount INTEGER NOT NULL,
-  status TEXT NOT NULL DEFAULT 'pending',     -- pending | succeeded | failed | refunded
+  status TEXT NOT NULL DEFAULT 'pending',     -- creating | pending | succeeded | failed | refunded
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Последовательность повторной оплаты: сначала резервируем одну попытку в БД,
+-- затем (уже без открытой SQLite-транзакции) вызываем провайдера и финализируем
+-- именно эту строку. Исходный клиентский ключ не сохраняется — только SHA-256.
+-- Устойчивый provider_idempotency_key позволяет после сетевого сбоя/рестарта
+-- безопасно повторить внешний запрос, не создавая второй платёж у провайдера.
+CREATE TABLE IF NOT EXISTS payment_retry_attempts (
+  payment_id INTEGER PRIMARY KEY REFERENCES payments(id) ON DELETE CASCADE,
+  provider_idempotency_key TEXT NOT NULL UNIQUE,
+  state TEXT NOT NULL DEFAULT 'creating' CHECK(state IN ('creating', 'ready')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Несколько вкладок могут почти одновременно создать разные client keys.
+-- Каждый принятый ключ навсегда привязывается к выбранной попытке, поэтому его
+-- replay и после завершения платежа не сможет неожиданно создать другую.
+CREATE TABLE IF NOT EXISTS payment_retry_keys (
+  client_key_hash BLOB PRIMARY KEY CHECK(length(client_key_hash) = 32),
+  payment_id INTEGER NOT NULL REFERENCES payment_retry_attempts(payment_id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Финансовые инварианты защищены самой БД, а не только JavaScript-проверкой:
+-- у заказа не может быть двух одновременно создаваемых/ожидающих платежей,
+-- а один внешний payment id нельзя прикрепить к двум нашим попыткам.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_payments_one_active_per_order
+  ON payments(order_id) WHERE status IN ('creating', 'pending');
+CREATE UNIQUE INDEX IF NOT EXISTS ux_payments_provider_reference
+  ON payments(provider, provider_payment_id) WHERE provider_payment_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_payment_retry_keys_payment
+  ON payment_retry_keys(payment_id);
 
 -- Безопасные данные, необходимые клиенту для продолжения уже созданной
 -- платёжной попытки после потерянного HTTP-ответа. Внутренний id провайдера

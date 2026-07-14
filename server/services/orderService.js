@@ -1,4 +1,5 @@
 const { EventEmitter } = require('node:events');
+const crypto = require('node:crypto');
 const db = require('../db');
 const payments = require('./paymentService');
 const orderAccess = require('./orderAccessService');
@@ -11,6 +12,58 @@ const orderEvents = new EventEmitter();
 
 const RESTAURANT_RESPONSE_WINDOW_SEC = 180;
 const RATING_ELIGIBLE_STATUS = 'delivered';
+const retryAttemptInFlight = new Map();
+
+class PaymentRetryConflictError extends Error {
+  constructor(message = 'Повторная попытка оплаты уже завершена или недоступна') {
+    super(message);
+    this.name = 'PaymentRetryConflictError';
+    this.statusCode = 409;
+  }
+}
+
+class PaymentRetryUnavailableError extends Error {
+  constructor() {
+    super('Платёжный сервис временно недоступен — повторите попытку');
+    this.name = 'PaymentRetryUnavailableError';
+    this.statusCode = 503;
+  }
+}
+
+class PaymentRetryInvariantError extends Error {
+  constructor(internalMessage) {
+    super('Не удалось безопасно завершить платёжную попытку');
+    this.name = 'PaymentRetryInvariantError';
+    this.statusCode = 500;
+    this.internalMessage = internalMessage;
+  }
+}
+
+function providerCreateTimeoutMs() {
+  const configured = Number(process.env.PAYMENT_CREATE_TIMEOUT_MS || 10000);
+  return Number.isFinite(configured) && configured >= 10 && configured <= 120000
+    ? configured
+    : 10000;
+}
+
+async function createPaymentWithTimeout(params) {
+  let timer;
+  try {
+    return await Promise.race([
+      payments.createPayment(params),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('payment provider timeout')), providerCreateTimeoutMs());
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function paymentInvariant(message) {
+  console.error(`[orderService] payment retry invariant: ${message}`);
+  return new PaymentRetryInvariantError(message);
+}
 
 // Временная demo-логика: у awaiting_payment пока нет полноценного серверного
 // payment_expires_at (это отдельная задача для этапа реальной ЮKassa — там же
@@ -300,44 +353,231 @@ function setStatus(orderId, status) {
 }
 
 // Вызывается вебхуком/dev-роутом оплаты, когда провайдер подтвердил платёж.
-function markPaid(orderId) {
-  const order = getOrder(orderId);
-  if (!order || order.status !== 'awaiting_payment') return order;
-  db.prepare("UPDATE payments SET status='succeeded', updated_at=datetime('now') WHERE order_id = ? AND status='pending'").run(orderId);
-  const updated = setStatus(orderId, 'awaiting_restaurant');
-  orderEvents.emit('order:new', updated); // сюда подписан бот — уйдёт уведомление ресторану
+function markPaid(orderId, paymentId) {
+  if (!Number.isInteger(paymentId)) throw new Error('paymentId обязателен для подтверждения оплаты');
+  const changed = db.immediateTransaction(() => {
+    const order = db.prepare('SELECT status FROM orders WHERE id = ?').get(orderId);
+    if (!order || order.status !== 'awaiting_payment') return false;
+    const payment = db.prepare(
+      "SELECT id FROM payments WHERE id = ? AND order_id = ? AND status = 'pending'",
+    ).get(paymentId, orderId);
+    if (!payment) return false;
+    const paid = db.prepare(`
+      UPDATE payments SET status = 'succeeded', updated_at = datetime('now')
+      WHERE id = ? AND order_id = ? AND status = 'pending'
+    `).run(payment.id, orderId);
+    if (paid.changes !== 1) return false;
+    const advanced = db.prepare(`
+      UPDATE orders SET status = 'awaiting_restaurant', status_updated_at = datetime('now')
+      WHERE id = ? AND status = 'awaiting_payment'
+    `).run(orderId);
+    if (advanced.changes !== 1) throw new Error('не удалось атомарно подтвердить оплату заказа');
+    return true;
+  })();
+  const updated = getOrder(orderId);
+  if (changed) {
+    orderEvents.emit('order:status', updated);
+    orderEvents.emit('order:new', updated); // сюда подписан бот — уйдёт уведомление ресторану
+  }
   return updated;
 }
 
-function markPaymentFailed(orderId) {
-  db.prepare("UPDATE payments SET status='failed', updated_at=datetime('now') WHERE order_id = ? AND status='pending'").run(orderId);
-  return setStatus(orderId, 'payment_failed');
+function markPaymentFailed(orderId, paymentId) {
+  if (!Number.isInteger(paymentId)) throw new Error('paymentId обязателен для ошибки оплаты');
+  const changed = db.immediateTransaction(() => {
+    const order = db.prepare('SELECT status FROM orders WHERE id = ?').get(orderId);
+    if (!order || order.status !== 'awaiting_payment') return false;
+    const payment = db.prepare(
+      "SELECT id FROM payments WHERE id = ? AND order_id = ? AND status = 'pending'",
+    ).get(paymentId, orderId);
+    if (!payment) return false;
+    const failed = db.prepare(`
+      UPDATE payments SET status = 'failed', updated_at = datetime('now')
+      WHERE id = ? AND order_id = ? AND status = 'pending'
+    `).run(payment.id, orderId);
+    if (failed.changes !== 1) return false;
+    const updated = db.prepare(`
+      UPDATE orders SET status = 'payment_failed', status_updated_at = datetime('now')
+      WHERE id = ? AND status = 'awaiting_payment'
+    `).run(orderId);
+    if (updated.changes !== 1) throw new Error('не удалось атомарно зафиксировать ошибку оплаты');
+    return true;
+  })();
+  const updated = getOrder(orderId);
+  if (changed) orderEvents.emit('order:status', updated);
+  return updated;
 }
 
-// Повторная попытка оплаты после payment_failed — новая запись в payments,
-// заказ остаётся тем же (не плодим новые public_code на один и тот же выбор блюд).
-async function retryPayment(orderId) {
-  const order = getOrder(orderId);
-  if (!order) throw new Error('заказ не найден');
-  if (order.status !== 'payment_failed') throw new Error('повторная оплата возможна только после ошибки оплаты');
+function retryAttemptRowByClientKey(clientKeyHash) {
+  return db.prepare(`
+    SELECT p.*, p.order_id AS retry_order_id, a.provider_idempotency_key, a.state AS retry_state
+    FROM payment_retry_keys k
+    JOIN payment_retry_attempts a ON a.payment_id = k.payment_id
+    JOIN payments p ON p.id = a.payment_id
+    WHERE k.client_key_hash = ?
+  `).get(clientKeyHash);
+}
 
-  const payment = await payments.createPayment({
-    orderId,
-    amount: order.items_total,
-    description: `Заказ ${order.public_code} (повторная попытка)`,
-  });
-  db.transaction(() => {
-    const info = db.prepare(`
+function activeRetryAttemptRow(orderId) {
+  return db.prepare(`
+    SELECT p.*, p.order_id AS retry_order_id, a.provider_idempotency_key, a.state AS retry_state
+    FROM payments p
+    LEFT JOIN payment_retry_attempts a ON a.payment_id = p.id
+    WHERE p.order_id = ? AND p.status IN ('creating', 'pending')
+    ORDER BY p.id DESC LIMIT 1
+  `).get(orderId);
+}
+
+// Резервация выполняется целиком до первого await и под BEGIN IMMEDIATE.
+// Поэтому два параллельных retry не успеют оба увидеть «пусто» и вставить две
+// попытки; partial UNIQUE-индекс остаётся последним барьером на уровне БД.
+function reserveRetryAttempt(orderId, retryKey) {
+  if (!orderAccess.isValidRetryKey(retryKey)) {
+    throw new orderAccess.OrderAccessInputError('Некорректный ключ повторной оплаты');
+  }
+  const clientKeyHash = orderAccess.hashSecret(retryKey);
+  return db.immediateTransaction(() => {
+    const sameKey = retryAttemptRowByClientKey(clientKeyHash);
+    if (sameKey) {
+      if (sameKey.retry_order_id !== orderId) throw new PaymentRetryConflictError();
+      if (['creating', 'pending'].includes(sameKey.status)) return sameKey;
+      throw new PaymentRetryConflictError('Предыдущая попытка оплаты завершена — начните новую');
+    }
+
+    // Другой ключ из второй вкладки/устройства не создаёт второй платёж: при
+    // наличии bearer-доступа оба запроса сходятся к уже активной попытке.
+    const active = activeRetryAttemptRow(orderId);
+    if (active) {
+      if (!active.provider_idempotency_key) throw new PaymentRetryConflictError();
+      db.prepare(`
+        INSERT INTO payment_retry_keys (client_key_hash, payment_id) VALUES (?, ?)
+      `).run(clientKeyHash, active.id);
+      return active;
+    }
+
+    const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
+    if (!order) throw new Error('заказ не найден');
+    if (order.status !== 'payment_failed') {
+      throw new PaymentRetryConflictError('Повторная оплата возможна только после ошибки оплаты');
+    }
+
+    const paymentInfo = db.prepare(`
       INSERT INTO payments (order_id, provider, provider_payment_id, amount, status)
-      VALUES (?, ?, ?, ?, 'pending')
-    `).run(orderId, payments.providerName, payment.providerPaymentId, order.items_total);
+      VALUES (?, ?, NULL, ?, 'creating')
+    `).run(orderId, payments.providerName, order.items_total);
+    const providerIdempotencyKey = `yaam_provider_retry_v1_${crypto.randomBytes(32).toString('base64url')}`;
+    db.prepare(`
+      INSERT INTO payment_retry_attempts (payment_id, provider_idempotency_key, state)
+      VALUES (?, ?, 'creating')
+    `).run(paymentInfo.lastInsertRowid, providerIdempotencyKey);
+    db.prepare(`
+      INSERT INTO payment_retry_keys (client_key_hash, payment_id) VALUES (?, ?)
+    `).run(clientKeyHash, paymentInfo.lastInsertRowid);
+    return activeRetryAttemptRow(orderId);
+  })();
+}
+
+function finalizeRetryAttempt(paymentRowId, payment) {
+  let orderTransitioned = false;
+  const result = db.immediateTransaction(() => {
+    const attempt = db.prepare(`
+      SELECT p.*, r.provider_idempotency_key
+      FROM payments p JOIN payment_retry_attempts r ON r.payment_id = p.id
+      WHERE p.id = ?
+    `).get(paymentRowId);
+    if (!attempt) throw paymentInvariant('зарезервированная попытка оплаты не найдена');
+    if (attempt.status === 'pending') {
+      if (attempt.provider_payment_id !== payment.providerPaymentId) {
+        throw paymentInvariant('провайдер вернул другой платёж для того же ключа идемпотентности');
+      }
+      return paymentResultFromRow(attempt);
+    }
+    if (attempt.status !== 'creating') throw new PaymentRetryConflictError();
+    const order = db.prepare('SELECT status FROM orders WHERE id = ?').get(attempt.order_id);
+    if (!order || order.status !== 'payment_failed') {
+      throw paymentInvariant('состояние заказа изменилось во время создания платежа; требуется сверка');
+    }
+    const finalized = db.prepare(`
+      UPDATE payments
+      SET provider_payment_id = ?, status = 'pending', updated_at = datetime('now')
+      WHERE id = ? AND status = 'creating'
+    `).run(payment.providerPaymentId, paymentRowId);
+    if (finalized.changes !== 1) throw paymentInvariant('не удалось финализировать платёжную попытку');
     db.prepare(`
       INSERT INTO payment_presentations (payment_id, payment_url, qr_payload)
       VALUES (?, ?, ?)
-    `).run(info.lastInsertRowid, payment.paymentUrl || null, payment.qrPayload || null);
+      ON CONFLICT(payment_id) DO UPDATE SET
+        payment_url = excluded.payment_url,
+        qr_payload = excluded.qr_payload
+    `).run(paymentRowId, payment.paymentUrl || null, payment.qrPayload || null);
+    const retryReady = db.prepare(`
+      UPDATE payment_retry_attempts
+      SET state = 'ready', updated_at = datetime('now')
+      WHERE payment_id = ? AND state = 'creating'
+    `).run(paymentRowId);
+    if (retryReady.changes !== 1) throw paymentInvariant('ledger повторной оплаты не перешёл в ready');
+    const updatedOrder = db.prepare(`
+      UPDATE orders SET status = 'awaiting_payment', status_updated_at = datetime('now')
+      WHERE id = ? AND status = 'payment_failed'
+    `).run(attempt.order_id);
+    if (updatedOrder.changes !== 1) throw paymentInvariant('не удалось активировать повторную оплату');
+    orderTransitioned = true;
+    return paymentResultFromRow(db.prepare('SELECT * FROM payments WHERE id = ?').get(paymentRowId));
   })();
-  setStatus(orderId, 'awaiting_payment');
-  return payment;
+  if (orderTransitioned) orderEvents.emit('order:status', getOrder(db.prepare('SELECT order_id FROM payments WHERE id = ?').get(paymentRowId).order_id));
+  return result;
+}
+
+async function ensureRetryAttemptReady(attempt) {
+  if (!attempt) throw new Error('платёжная попытка не найдена');
+  if (attempt.status === 'pending') {
+    const existing = paymentResultFromRow(attempt);
+    if (!existing) throw paymentInvariant('активный платёж не содержит данных продолжения');
+    return existing;
+  }
+  if (attempt.status !== 'creating' || !attempt.provider_idempotency_key) {
+    throw new PaymentRetryConflictError();
+  }
+  if (retryAttemptInFlight.has(attempt.id)) return retryAttemptInFlight.get(attempt.id);
+
+  const operation = (async () => {
+    const order = getOrder(attempt.order_id);
+    if (!order) throw paymentInvariant('заказ зарезервированной попытки не найден');
+    let payment;
+    try {
+      payment = await createPaymentWithTimeout({
+        orderId: attempt.order_id,
+        amount: attempt.amount,
+        description: `Заказ ${order.public_code} (повторная попытка)`,
+        idempotencyKey: attempt.provider_idempotency_key,
+      });
+    } catch (err) {
+      // Не знаем, успел ли внешний провайдер создать платёж до сетевой ошибки.
+      // Поэтому строку creating не удаляем и не создаём новую: следующий запрос
+      // повторит тот же provider idempotency key и безопасно продолжит попытку.
+      console.error(`[orderService] retry provider unavailable payment=${attempt.id} type=${err?.name || 'Error'}`);
+      throw new PaymentRetryUnavailableError();
+    }
+    if (!payment || !payment.providerPaymentId) {
+      throw paymentInvariant('провайдер не вернул id платежа');
+    }
+    // Ошибки БД/инвариантов не маскируем под сетевой 503: они должны выйти как
+    // серверная ошибка и остаться видимыми в журнале для ручной сверки.
+    return finalizeRetryAttempt(attempt.id, payment);
+  })();
+  retryAttemptInFlight.set(attempt.id, operation);
+  try {
+    return await operation;
+  } finally {
+    if (retryAttemptInFlight.get(attempt.id) === operation) retryAttemptInFlight.delete(attempt.id);
+  }
+}
+
+// Повторная попытка оплаты после payment_failed остаётся тем же заказом. Один
+// и тот же или параллельный запрос всегда возвращает одну presentation.
+async function retryPayment(orderId, retryKey) {
+  const attempt = reserveRetryAttempt(orderId, retryKey);
+  return ensureRetryAttemptReady(attempt);
 }
 
 async function refundOrder(orderId) {

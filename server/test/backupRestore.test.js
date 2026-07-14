@@ -50,6 +50,37 @@ test('backupDatabase() создаёт файл бэкапа с текущими 
   assert.match(presentation.qr_payload, /^yaam-demo:\/\/pay\//, 'бэкап должен сохранять данные продолжения оплаты');
 });
 
+test('backupDatabase() сохраняет ledger повторной оплаты без исходного client retry-key', async () => {
+  const { restaurantId, menuItemId } = seedMinimalRestaurant(db, { name: 'Ресторан retry backup' });
+  const created = await orderService.createOrder(
+    basicOrderPayload(restaurantId, menuItemId, { customerPhone: '+79280002002' }),
+  );
+  const initial = db.prepare("SELECT id FROM payments WHERE order_id = ? AND status = 'pending'").get(created.order.id);
+  orderService.markPaymentFailed(created.order.id, initial.id);
+  const rawRetryKey = `yaam_retry_v1_${Buffer.alloc(32, 12).toString('base64url')}`;
+  await orderService.retryPayment(created.order.id, rawRetryKey);
+
+  const destPath = await backupDatabase({ dbPath, backupDir });
+  const { DatabaseSync } = require('node:sqlite');
+  const backupDb = new DatabaseSync(destPath, { readOnly: true });
+  const retry = backupDb.prepare(`
+    SELECT k.client_key_hash, a.provider_idempotency_key, a.state, p.status, pp.qr_payload
+    FROM payment_retry_attempts a
+    JOIN payment_retry_keys k ON k.payment_id = a.payment_id
+    JOIN payments p ON p.id = a.payment_id
+    JOIN payment_presentations pp ON pp.payment_id = p.id
+    WHERE p.order_id = ?
+  `).get(created.order.id);
+  backupDb.close();
+
+  assert.equal(retry.client_key_hash.length, 32);
+  assert.match(retry.provider_idempotency_key, /^yaam_provider_retry_v1_/);
+  assert.equal(retry.provider_idempotency_key.includes(rawRetryKey), false);
+  assert.equal(retry.state, 'ready');
+  assert.equal(retry.status, 'pending');
+  assert.match(retry.qr_payload, /^yaam-demo:\/\/pay\//);
+});
+
 test('restoreDatabase() возвращает базу к состоянию бэкапа после порчи данных', async () => {
   seedMinimalRestaurant(db, { name: 'Ресторан для restore-теста' });
   const backupPath = await backupDatabase({ dbPath, backupDir });

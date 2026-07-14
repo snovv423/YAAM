@@ -10,12 +10,25 @@ class MockProvider extends PaymentProviderInterface {
   constructor() {
     super();
     this.payments = new Map(); // providerPaymentId -> {status, amount}
+    // Демо-провайдер дедуплицирует параллельные/повторные вызовы в рамках
+    // процесса. После рестарта mock может забыть эту карту — реальных денег
+    // здесь нет; production-провайдер обязан хранить idempotency у себя.
+    this.idempotentPayments = new Map(); // idempotencyKey -> {orderId, amount, result}
   }
 
-  async createPayment({ orderId, amount }) {
+  async createPayment({ orderId, amount, idempotencyKey }) {
+    if (idempotencyKey) {
+      const existing = this.idempotentPayments.get(idempotencyKey);
+      if (existing) {
+        if (existing.orderId !== orderId || existing.amount !== amount) {
+          throw new Error('ключ идемпотентности уже использован для другого платежа');
+        }
+        return { ...existing.result };
+      }
+    }
     const providerPaymentId = `mock_${orderId}_${crypto.randomBytes(4).toString('hex')}`;
     this.payments.set(providerPaymentId, { status: 'pending', amount });
-    return {
+    const result = {
       providerPaymentId,
       qrPayload: `yaam-demo://pay/${providerPaymentId}/${amount}`,
       // Явно null, а не просто отсутствует — mock не умеет открывать банк
@@ -25,6 +38,8 @@ class MockProvider extends PaymentProviderInterface {
       // а не фейковую ссылку, которая выглядела бы как реальная оплата.
       paymentUrl: null,
     };
+    if (idempotencyKey) this.idempotentPayments.set(idempotencyKey, { orderId, amount, result });
+    return { ...result };
   }
 
   async getStatus(providerPaymentId) {

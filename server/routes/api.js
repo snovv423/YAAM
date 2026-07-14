@@ -201,10 +201,18 @@ router.post('/orders/:code/cancel', orderMutationLimiter, requireOrderAccess, as
 
 router.post('/orders/:code/retry-payment', orderMutationLimiter, requireOrderAccess, async (req, res) => {
   try {
-    const payment = await orderService.retryPayment(req.order.id);
+    const retryKey = req.get('idempotency-key');
+    if (!orderAccess.isValidRetryKey(retryKey)) {
+      return res.status(400).json({ error: 'Некорректный ключ повторной оплаты' });
+    }
+    const payment = await orderService.retryPayment(req.order.id, retryKey);
     res.json({ payment: orderService.toPublicPaymentDTO(payment) });
   } catch (err) {
-    res.status(errorStatus(err)).json({ error: err.message });
+    if (Number.isInteger(err.statusCode)) {
+      return res.status(err.statusCode).json({ error: err.message });
+    }
+    console.error(`[api] retry-payment failed order=${req.order.id}:`, err.message);
+    return res.status(500).json({ error: 'Не удалось безопасно создать повторный платёж' });
   }
 });
 
@@ -231,8 +239,8 @@ if (process.env.PAYMENT_PROVIDER === 'yookassa') {
     const payment = db.prepare('SELECT * FROM payments WHERE provider_payment_id = ?').get(event.providerPaymentId);
     if (!payment) return res.status(404).json({ error: 'payment not found' });
 
-    if (event.status === 'succeeded') await orderService.markPaid(payment.order_id);
-    else if (event.status === 'failed') orderService.markPaymentFailed(payment.order_id);
+    if (event.status === 'succeeded') await orderService.markPaid(payment.order_id, payment.id);
+    else if (event.status === 'failed') orderService.markPaymentFailed(payment.order_id, payment.id);
 
     res.json({ ok: true });
   });
@@ -253,8 +261,10 @@ if (devPaymentEnabled) {
     if (!payment || !payment.provider_payment_id) {
       return res.status(404).json({ error: 'payment not found' });
     }
-    paymentService.devMarkPaid(payment.provider_payment_id, 'succeeded');
-    const updated = await orderService.markPaid(req.order.id);
+    if (!paymentService.devMarkPaid(payment.provider_payment_id, 'succeeded')) {
+      return res.status(409).json({ error: 'payment provider state mismatch' });
+    }
+    const updated = await orderService.markPaid(req.order.id, payment.id);
     return res.json(orderService.toPublicOrderDTO(updated));
   });
 }

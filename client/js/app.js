@@ -14,6 +14,7 @@ const PENDING_ORDER_CREDENTIALS_KEY='yaam_pending_order_credentials';
 const DEMO_SEQ_KEY='yaam_demo_order_seq';
 const ORDER_TOKEN_PREFIX='yaam_ord_v1_';
 const CREATE_KEY_PREFIX='yaam_create_v1_';
+const RETRY_KEY_PREFIX='yaam_retry_v1_';
 // Совпадает с серверным окном дедупликации awaiting_payment: пока первый
 // ответ мог потеряться, повторяем POST с той же парой; после окна новый заказ
 // получает новые credentials и не наследует секрет старой попытки.
@@ -432,7 +433,7 @@ function saveOrderState(){
       // preDeadline — тот же принцип, что и qrDeadline: абсолютный дедлайн окна
       // ожидания ответа ресторана, сохраняется всегда, иначе refresh на этом
       // экране каждый раз показывал бы заново почти полные 3:00.
-      const state={orderCode:currentOrderCode,orderAccessToken:currentOrderAccessToken,paymentUrl:currentPaymentUrl,amount:currentOrderAmount,restId:curRest?curRest.id:null,qrDeadline,preDeadline,orderCreatedAtMs};
+      const state={orderCode:currentOrderCode,orderAccessToken:currentOrderAccessToken,retryIdempotencyKey:currentRetryIdempotencyKey,paymentUrl:currentPaymentUrl,amount:currentOrderAmount,restId:curRest?curRest.id:null,qrDeadline,preDeadline,orderCreatedAtMs};
       if(!USE_API){
         // Демо-режим сам себе бэкенд — сохраняем всё, что понадобится для
         // восстановления экрана без единого сетевого запроса (см. restoreDemoOrder).
@@ -507,6 +508,7 @@ async function tryRestoreSession(){
   if(savedOrder&&savedOrder.orderCode){
     currentOrderCode=savedOrder.orderCode;
     currentOrderAccessToken=savedOrder.orderAccessToken||null;
+    currentRetryIdempotencyKey=validCapability(savedOrder.retryIdempotencyKey,RETRY_KEY_PREFIX)?savedOrder.retryIdempotencyKey:null;
     currentPaymentUrl=savedOrder.paymentUrl||null;
     currentOrderAmount=savedOrder.amount||null;
     qrDeadline=savedOrder.qrDeadline||null; // восстанавливаем ДО любого возможного startQRTimer() ниже — иначе он не найдёт дедлайн и создаст новый через fallback
@@ -729,7 +731,7 @@ function validateLegalConsent(){
 // (например, после refresh с активным заказом — см. tryRestoreSession), так
 // что брать сумму оттуда небезопасно. Обновляется из order.items_total в
 // pollOrderOnce() (API-режим) — это и есть backend-данные заказа.
-let currentOrderCode=null, currentOrderAccessToken=null, currentCreateIdempotencyKey=null;
+let currentOrderCode=null, currentOrderAccessToken=null, currentCreateIdempotencyKey=null, currentRetryIdempotencyKey=null;
 let currentPaymentUrl=null, currentOrderAmount=null;
 // orderCreatedAtMs — момент фактического создания заказа (не оплаты), один раз
 // зафиксированный в openQR(). Персистится и восстанавливается тем же принципом,
@@ -958,7 +960,7 @@ function openRejected(reason){
   // Заказ окончен (отклонён рестораном/не ответил вовремя) — это терминальное
   // состояние без пути назад, поэтому не держим его "активным": иначе refresh
   // на этом экране заново находил бы его и не давал вернуться к обычному меню.
-  currentOrderCode=null;currentOrderAccessToken=null;currentCreateIdempotencyKey=null;currentPaymentUrl=null;currentOrderAmount=null;orderCreatedAtMs=null;saveOrderState();
+  currentOrderCode=null;currentOrderAccessToken=null;currentCreateIdempotencyKey=null;currentRetryIdempotencyKey=null;currentPaymentUrl=null;currentOrderAmount=null;orderCreatedAtMs=null;saveOrderState();
   setRejOrderCode(orderCodeForDisplay);
   document.getElementById('rej-explain').style.display='';
   // Сумма возврата — только из данных заказа, никогда из захардкоженной
@@ -994,18 +996,90 @@ function openPaymentFailed(){
   document.getElementById('statusbg').style.display='none';
   go('rejected');
 }
-async function retryPaymentFlow(){
+let retryPaymentInFlight=false;
+function syncRetryKeyFromStoredOrder(){
   try{
-    const{payment}=await api.retryPayment(currentOrderCode,currentOrderAccessToken);
+    const stored=JSON.parse(localStorage.getItem(ORDER_STORAGE_KEY)||'null');
+    if(stored?.orderCode===currentOrderCode&&validCapability(stored.retryIdempotencyKey,RETRY_KEY_PREFIX)){
+      currentRetryIdempotencyKey=stored.retryIdempotencyKey;
+    }
+  }catch(e){}
+}
+async function retryPaymentFlow(){
+  if(retryPaymentInFlight)return;
+  const btn=document.getElementById('rej-action-btn');
+  const previousText=btn?btn.textContent:'';
+  retryPaymentInFlight=true;
+  if(btn){btn.disabled=true;btn.style.opacity='.6';btn.textContent='Создаём платёж…';btn.setAttribute('aria-busy','true');}
+  try{
+    // Две уже открытые вкладки имеют разные JS-heaps, но общий localStorage.
+    // Перед генерацией читаем ключ ещё раз, чтобы вторая вкладка подхватила
+    // ключ первой, а не затёрла его своим значением.
+    syncRetryKeyFromStoredOrder();
+    if(!validCapability(currentRetryIdempotencyKey,RETRY_KEY_PREFIX)){
+      currentRetryIdempotencyKey=randomCapability(RETRY_KEY_PREFIX);
+      // Ключ должен пережить потерянный HTTP-ответ. Если браузер не может
+      // сохранить его до POST, безопаснее не начинать финансовую операцию.
+      if(!saveOrderState()){
+        currentRetryIdempotencyKey=null;
+        throw new Error('Не удалось безопасно сохранить попытку оплаты — освободите место в браузере и повторите');
+      }
+    }
+    const completedKey=currentRetryIdempotencyKey;
+    const{payment}=await api.retryPayment(currentOrderCode,currentOrderAccessToken,completedKey);
     currentPaymentUrl=payment?.paymentUrl||null;
-    saveOrderState();
-    const{sum}=totals();
+    currentRetryIdempotencyKey=null;
+    if(!saveOrderState()){
+      // Сервер уже мог создать платёж. Сохраняем ключ хотя бы в памяти, чтобы
+      // повтор текущей вкладки запросил ту же попытку, а не новую.
+      currentRetryIdempotencyKey=completedKey;
+      throw new Error('Платёж создан, но браузер не сохранил его состояние — не закрывайте вкладку и повторите');
+    }
+    const sum=currentOrderAmount||totals().sum;
     document.getElementById('qr-amt').textContent=sum+' ₽';
     renderQRPaymentOptions();
     drawQR();startNewQRTimer();go('qr'); // новая попытка оплаты после payment_failed — новый providerPaymentId, значит и новый дедлайн
   }catch(err){
+    // 4xx (кроме rate limit) — сервер однозначно отклонил этот ключ; следующий
+    // ручной тап получает новый. При сети/429/5xx исход неизвестен, поэтому
+    // сохраняем прежний ключ и безопасно повторяем ту же попытку.
+    if(err.status>=400&&err.status<500&&err.status!==429){currentRetryIdempotencyKey=null;saveOrderState();}
     showToast(err.message||'Не удалось создать новый платёж');
+  }finally{
+    retryPaymentInFlight=false;
+    if(btn){btn.disabled=false;btn.style.opacity='';btn.textContent=previousText||'Попробовать снова';btn.removeAttribute('aria-busy');}
   }
+}
+
+let retryRecoveryInFlight=null;
+async function recoverRetryPaymentPresentation(notifyUser=false){
+  if(!validCapability(currentRetryIdempotencyKey,RETRY_KEY_PREFIX))return true;
+  if(retryRecoveryInFlight)return retryRecoveryInFlight;
+  const recoveryKey=currentRetryIdempotencyKey;
+  retryRecoveryInFlight=(async()=>{
+    try{
+      const{payment}=await api.retryPayment(currentOrderCode,currentOrderAccessToken,recoveryKey);
+      currentPaymentUrl=payment?.paymentUrl||null;
+      // Ответ исходного retry мог потеряться до создания нового клиентского
+      // дедлайна. Серверного payment_expires_at пока нет, поэтому для
+      // восстановленной demo/pre-production попытки начинаем окно заново.
+      qrDeadline=Date.now()+QR_TIMER_SEC*1000;
+      currentRetryIdempotencyKey=null;
+      if(!saveOrderState()){
+        currentRetryIdempotencyKey=recoveryKey;
+        if(notifyUser)showToast('Не удалось сохранить восстановленный платёж — не закрывайте вкладку');
+        return false;
+      }
+      return true;
+    }catch(err){
+      if(err.status>=400&&err.status<500&&err.status!==429){currentRetryIdempotencyKey=null;saveOrderState();}
+      if(notifyUser)showToast(err.message||'Не удалось восстановить платёж');
+      return false;
+    }finally{
+      retryRecoveryInFlight=null;
+    }
+  })();
+  return retryRecoveryInFlight;
 }
 // unpaid=true — вызов с экрана QR или "оплата не завершена" (awaiting_payment,
 // см. #qr и #st-pending-pay-wrap в index.html): деньги ещё не списаны, и
@@ -1057,7 +1131,11 @@ function renderAwaitingPayment(order){
   document.getElementById('st-final').style.display='none';
   document.getElementById('st-pending-pay-wrap').style.display='flex';
 }
-function resumeExistingPayment(){
+async function resumeExistingPayment(){
+  if(validCapability(currentRetryIdempotencyKey,RETRY_KEY_PREFIX)){
+    const recovered=await recoverRetryPaymentPresentation(true);
+    if(!recovered)return;
+  }
   stopOrderPolling();
   const amt=lastKnownOrder?lastKnownOrder.items_total:totals().sum;
   document.getElementById('qr-amt').textContent=amt+' ₽';
@@ -1071,7 +1149,7 @@ function openOrderNotFound(){
   const orderCodeForDisplay=currentOrderCode; // захватываем до очистки ниже
   stopOrderPolling();
   showStatusSpinner(false);showOrderDot(false);showRestaurantPhone(null);
-  currentOrderCode=null;currentOrderAccessToken=null;currentCreateIdempotencyKey=null;currentPaymentUrl=null;currentOrderAmount=null;orderCreatedAtMs=null;saveOrderState();
+  currentOrderCode=null;currentOrderAccessToken=null;currentCreateIdempotencyKey=null;currentRetryIdempotencyKey=null;currentPaymentUrl=null;currentOrderAmount=null;orderCreatedAtMs=null;saveOrderState();
   setRejOrderCode(orderCodeForDisplay);
   document.getElementById('rej-title').textContent='Не удалось найти заказ';
   document.getElementById('rej-explain').textContent='Возможно, он отменён или устарел. Если это ошибка — напишите в поддержку.';
@@ -1102,6 +1180,17 @@ async function pollOrderOnce(){
   if(order.estimated_ready_minutes)curEstimatedMinutes=order.estimated_ready_minutes;
   showRestaurantPhone(order.restaurant_phone);
   document.getElementById('st-pending-pay-wrap').style.display='none';
+  if(validCapability(currentRetryIdempotencyKey,RETRY_KEY_PREFIX)
+    &&(order.status==='payment_failed'||order.status==='awaiting_payment')){
+    const recovered=await recoverRetryPaymentPresentation(false);
+    // payment_failed мог атомарно перейти в awaiting_payment во время recovery;
+    // не рисуем поверх него устаревший экран, следующий poll сразу возьмёт
+    // подтверждённое состояние сервера.
+    if(recovered&&order.status==='payment_failed')return;
+  }else if(currentRetryIdempotencyKey&&order.status!=='payment_failed'&&order.status!=='awaiting_payment'){
+    currentRetryIdempotencyKey=null;
+    saveOrderState();
+  }
 
   if(order.status==='awaiting_payment'){
     showOrderDot(false); // ещё не оплачен — точка "оплачен и в работе" здесь не показывается
@@ -1164,7 +1253,7 @@ window.addEventListener('pageshow',(e)=>{if(e.persisted){refreshActiveOrderIfVis
 
 function cur(id){return document.getElementById(id).classList.contains('active');}
 function go(id){document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));document.getElementById(id).classList.add('active');document.querySelector('.dish-add').style.display=(id==='dish')?'block':'none';if(id!=='status'&&id!=='rejected')document.getElementById('statusbg').style.display='none';window.scrollTo(0,0);updateBar();if(id==='home'&&introFadeHandler)introFadeHandler();try{if(id!=='home')history.pushState({screen:id},'');else history.replaceState({screen:'home'},'');}catch(e){}}
-function resetAll(){clearInterval(preTimer);clearTimeout(preAutoTimer);preDeadline=null;stopQRTimer();qrDeadline=null;stopOrderPolling();showRestaurantPhone(null);showOrderDot(false);cart={};curRest=null;currentOrderCode=null;currentOrderAccessToken=null;currentCreateIdempotencyKey=null;currentPaymentUrl=null;currentOrderAmount=null;orderCreatedAtMs=null;demoStage='qr';clearPendingOrderCredentials();saveCartState();saveOrderState();document.getElementById('statusbg').style.display='none';go('home');renderList();}
+function resetAll(){clearInterval(preTimer);clearTimeout(preAutoTimer);preDeadline=null;stopQRTimer();qrDeadline=null;stopOrderPolling();showRestaurantPhone(null);showOrderDot(false);cart={};curRest=null;currentOrderCode=null;currentOrderAccessToken=null;currentCreateIdempotencyKey=null;currentRetryIdempotencyKey=null;currentPaymentUrl=null;currentOrderAmount=null;orderCreatedAtMs=null;demoStage='qr';clearPendingOrderCredentials();saveCartState();saveOrderState();document.getElementById('statusbg').style.display='none';go('home');renderList();}
 // Своё окно подтверждения (замена заблокированного confirm)
 function yaamConfirm(text,onYes,labels){
   const ov=document.getElementById('confirm-overlay');

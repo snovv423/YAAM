@@ -40,8 +40,8 @@ const api = {
   cancelOrder: (code, token) => apiRequest(`/api/orders/${code}/cancel`, {
     method: 'POST', headers: orderAccessHeaders(token),
   }),
-  retryPayment: (code, token) => apiRequest(`/api/orders/${code}/retry-payment`, {
-    method: 'POST', headers: orderAccessHeaders(token),
+  retryPayment: (code, token, retryIdempotencyKey) => apiRequest(`/api/orders/${code}/retry-payment`, {
+    method: 'POST', headers: orderAccessHeaders(token, retryIdempotencyKey),
   }),
   rateOrder: (code, token, rating) => apiRequest(`/api/orders/${code}/rate`, {
     method: 'POST', headers: orderAccessHeaders(token), body: JSON.stringify({ rating }),

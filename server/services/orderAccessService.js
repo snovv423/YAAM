@@ -3,9 +3,11 @@ const db = require('../db');
 
 const ORDER_TOKEN_PREFIX = 'yaam_ord_v1_';
 const CREATE_KEY_PREFIX = 'yaam_create_v1_';
+const RETRY_KEY_PREFIX = 'yaam_retry_v1_';
 const BASE64URL_256_RE = '[A-Za-z0-9_-]{43}';
 const ORDER_TOKEN_RE = new RegExp(`^${ORDER_TOKEN_PREFIX}${BASE64URL_256_RE}$`);
 const CREATE_KEY_RE = new RegExp(`^${CREATE_KEY_PREFIX}${BASE64URL_256_RE}$`);
+const RETRY_KEY_RE = new RegExp(`^${RETRY_KEY_PREFIX}${BASE64URL_256_RE}$`);
 
 class OrderAccessInputError extends Error {
   constructor(message, statusCode = 400) {
@@ -29,6 +31,10 @@ function isValidOrderToken(token) {
 
 function isValidCreateKey(key) {
   return typeof key === 'string' && CREATE_KEY_RE.test(key);
+}
+
+function isValidRetryKey(key) {
+  return typeof key === 'string' && RETRY_KEY_RE.test(key);
 }
 
 function hashSecret(value) {
@@ -93,10 +99,12 @@ function findAuthorizedOrderId(publicCode, rawToken) {
 module.exports = {
   ORDER_TOKEN_PREFIX,
   CREATE_KEY_PREFIX,
+  RETRY_KEY_PREFIX,
   OrderAccessInputError,
   ActiveOrderConflictError,
   isValidOrderToken,
   isValidCreateKey,
+  isValidRetryKey,
   hashSecret,
   hashCreationRequest,
   requireValidCreationSecrets,

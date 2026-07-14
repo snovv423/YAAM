@@ -19,8 +19,8 @@ function calcCommission(itemsTotal) {
   return Math.round(itemsTotal * YAAM_COMMISSION_RATE);
 }
 
-async function createPayment({ orderId, amount, description }) {
-  return provider.createPayment({ orderId, amount, description });
+async function createPayment({ orderId, amount, description, idempotencyKey }) {
+  return provider.createPayment({ orderId, amount, description, idempotencyKey });
 }
 
 async function getPaymentStatus(providerPaymentId) {

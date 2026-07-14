@@ -1,5 +1,6 @@
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const {
   useIsolatedDb, cleanupDbFile, seedMinimalRestaurant, basicOrderPayload,
 } = require('./helpers/testDb');
@@ -55,6 +56,10 @@ async function createViaHttp(payload) {
     headers: headers(payload, { includeCreateKey: true }),
     body: JSON.stringify(publicBody(payload)),
   });
+}
+
+function retryKey() {
+  return `yaam_retry_v1_${crypto.randomBytes(32).toString('base64url')}`;
 }
 
 const FORBIDDEN_FIELDS = [
@@ -193,15 +198,26 @@ test('retry-payment доступен только владельцу и не р�
   const stranger = basicOrderPayload(restaurantId, menuItemId, { customerPhone: '+79280001011' });
   const created = await (await createViaHttp(owner)).json();
   const order = orderService.getOrder(created.order.public_code);
-  orderService.markPaymentFailed(order.id);
+  const failedPayment = db.prepare("SELECT id FROM payments WHERE order_id = ? AND status = 'pending'").get(order.id);
+  orderService.markPaymentFailed(order.id, failedPayment.id);
 
   const denied = await fetch(`${baseUrl}/api/orders/${order.public_code}/retry-payment`, {
-    method: 'POST', headers: headers(stranger),
+    method: 'POST', headers: { ...headers(stranger), 'Idempotency-Key': retryKey() },
   });
   assert.equal(denied.status, 404);
 
-  const allowed = await fetch(`${baseUrl}/api/orders/${order.public_code}/retry-payment`, {
+  const missingKey = await fetch(`${baseUrl}/api/orders/${order.public_code}/retry-payment`, {
     method: 'POST', headers: headers(owner),
+  });
+  assert.equal(missingKey.status, 400);
+
+  const malformedKey = await fetch(`${baseUrl}/api/orders/${order.public_code}/retry-payment`, {
+    method: 'POST', headers: { ...headers(owner), 'Idempotency-Key': 'retry-1' },
+  });
+  assert.equal(malformedKey.status, 400);
+
+  const allowed = await fetch(`${baseUrl}/api/orders/${order.public_code}/retry-payment`, {
+    method: 'POST', headers: { ...headers(owner), 'Idempotency-Key': retryKey() },
   });
   assert.equal(allowed.status, 200);
   const body = await allowed.json();
@@ -214,7 +230,8 @@ test('rate требует токен владельца и никогда не �
   const stranger = basicOrderPayload(restaurantId, menuItemId, { customerPhone: '+79280001012' });
   const created = await (await createViaHttp(payload)).json();
   const order = orderService.getOrder(created.order.public_code);
-  orderService.markPaid(order.id);
+  const paidPayment = db.prepare("SELECT id FROM payments WHERE order_id = ? AND status = 'pending'").get(order.id);
+  orderService.markPaid(order.id, paidPayment.id);
   orderService.restaurantAccept(order.id);
   orderService.restaurantAdvance(order.id, 'preparing');
   orderService.restaurantAdvance(order.id, 'courier');
