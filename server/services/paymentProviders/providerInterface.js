@@ -5,6 +5,10 @@
  * не знают, какой провайдер сейчас подключён — подключение нового провайдера
  * не требует правок ни в orderService, ни в API, ни в клиенте.
  *
+ * Текущий provider contract предназначен для MVP: СБП + capture=true
+ * (см. YAAM-payment-capture-model-ADR.pdf). При добавлении банковских карт
+ * возможен отдельный ADR и расширение интерфейса.
+ *
  * createPayment({orderId, amount, description, idempotencyKey})
  *   -> { providerPaymentId, qrPayload?, paymentUrl? }
  *   Создаёт платёж во внешней системе. qrPayload — то, что рисуем как QR
