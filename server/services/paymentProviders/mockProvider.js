@@ -14,6 +14,7 @@ class MockProvider extends PaymentProviderInterface {
     // процесса. После рестарта mock может забыть эту карту — реальных денег
     // здесь нет; production-провайдер обязан хранить idempotency у себя.
     this.idempotentPayments = new Map(); // idempotencyKey -> {orderId, amount, result}
+    this.idempotentRefunds = new Map(); // idempotencyKey -> {providerPaymentId, amount, result}
   }
 
   async createPayment({ orderId, amount, idempotencyKey }) {
@@ -47,11 +48,24 @@ class MockProvider extends PaymentProviderInterface {
     return p ? p.status : 'failed';
   }
 
-  async refund(providerPaymentId, amount) {
+  async refund(providerPaymentId, amount, idempotencyKey) {
+    if (typeof idempotencyKey !== 'string' || !idempotencyKey) {
+      throw new Error('idempotencyKey обязателен для возврата (mock-провайдер)');
+    }
+    const existing = this.idempotentRefunds.get(idempotencyKey);
+    if (existing) {
+      if (existing.providerPaymentId !== providerPaymentId || existing.amount !== amount) {
+        throw new Error('ключ идемпотентности уже использован для другого возврата');
+      }
+      return { ...existing.result };
+    }
     const p = this.payments.get(providerPaymentId);
-    if (!p) return { refundId: null, status: 'failed' };
-    p.status = 'refunded';
-    return { refundId: `refund_${providerPaymentId}`, status: 'succeeded' };
+    const result = p
+      ? { refundId: `refund_${providerPaymentId}_${crypto.randomBytes(4).toString('hex')}`, status: 'succeeded' }
+      : { refundId: null, status: 'failed' };
+    if (p) p.status = 'refunded';
+    this.idempotentRefunds.set(idempotencyKey, { providerPaymentId, amount, result });
+    return { ...result };
   }
 
   // Мок не получает настоящие webhook'и по HTTP — вызывается напрямую из dev-роута.

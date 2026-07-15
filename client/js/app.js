@@ -638,7 +638,7 @@ async function showRecoveredOrder(order){
   document.getElementById('qr-amt').textContent=(currentOrderAmount||0)+' ₽';
   document.getElementById('cartbar').style.display='none';
   renderQRPaymentOptions();
-  drawQR();await startNewQRTimer();go('qr');
+  drawQR();await startNewQRTimer();go('qr');startOrderPollingQuiet();
 }
 
 async function recoverSubmittedOrder(credentials){
@@ -1136,6 +1136,11 @@ async function openQR(){
     document.getElementById('qr-amt').textContent=(currentOrderAmount??sum)+' ₽';
     document.getElementById('cartbar').style.display='none';
     renderQRPaymentOptions();
+    // USE_API-ветка выше всегда return'ится раньше (outcome.kind — 'active'
+    // через startOrderPolling(), либо 'resolved' через showRecoveredOrder(),
+    // которая для свежего заказа сама поднимает startOrderPollingQuiet() —
+    // см. FIX 5). Сюда доходит только demo-режим, где реального backend для
+    // поллинга нет.
     drawQR();await startNewQRTimer();go('qr');
   }catch(err){
     // resolveInitialOrder различает fresh HTTP 4xx и неизвестный результат:
@@ -1256,39 +1261,75 @@ function setRejOrderCode(code){
   if(code){document.getElementById('rej-order-code').textContent=code;wrap.style.display='block';}
   else{wrap.style.display='none';}
 }
-function openRejected(reason){
-  const orderCodeForDisplay=currentOrderCode; // захватываем до очистки ниже
-  const orderTokenForClear=currentOrderAccessToken;
-  const amountForDisplay=currentOrderAmount; // источник истины — сумма ЗАКАЗА, не текущей (возможно уже пустой после refresh) корзины
-  clearInterval(preTimer);clearTimeout(preAutoTimer);preDeadline=null;stopOrderPolling(); // отклонён/не ответил вовремя — терминально, окно ожидания больше не актуально
-  showStatusSpinner(false);
-  showOrderDot(false);
-  showRestaurantPhone(null);
-  // Заказ окончен (отклонён рестораном/не ответил вовремя) — это терминальное
-  // состояние без пути назад, поэтому не держим его "активным": иначе refresh
-  // на этом экране заново находил бы его и не давал вернуться к обычному меню.
-  currentOrderCode=null;currentOrderAccessToken=null;currentCreateIdempotencyKey=null;currentRetryIdempotencyKey=null;currentPaymentUrl=null;currentOrderAmount=null;currentOrderRestaurantId=null;currentOrderItems=[];orderCreatedAtMs=null;
-  void clearStoredOrderStateSafely(orderCodeForDisplay,orderTokenForClear);
-  setRejOrderCode(orderCodeForDisplay);
-  document.getElementById('rej-explain').style.display='';
-  // Сумма возврата — только из данных заказа, никогда из захардкоженной
-  // HTML-заглушки и никогда из totals() (клиентская корзина к этому моменту
-  // может быть уже пустой, например после refresh с активным заказом — см.
-  // tryRestoreSession). Нет надёжной суммы — прячем блок целиком вместо того,
-  // чтобы показать случайное/устаревшее число.
-  if(amountForDisplay){
-    document.getElementById('rej-sum').textContent=amountForDisplay.toLocaleString('ru-RU')+' ₽';
-    document.getElementById('rej-refund-line').style.display='';
-  }else{
-    document.getElementById('rej-refund-line').style.display='none';
-  }
+// reason: 'declined' | 'timeout' | 'cancelled'. order — актуальный снимок с
+// backend (нужен order.refund_status — публичный none|processing|done|failed,
+// см. GET /api/orders/:code). Терминальный СТАТУС ЗАКАЗА (declined/timed_out/
+// cancelled) не означает, что возврат уже подтверждён — он резервируется
+// атомарно с переходом статуса, но реальный ответ провайдера приходит позже
+// (см. server/docs/refund-architecture-review.md). Поэтому эта функция
+// вызывается на КАЖДОМ poll-тике, пока заказ терминален, и должна быть
+// идемпотентна: повторный вызов для уже открытого экрана этого же заказа не
+// перенавигирует повторно (не дублирует history.pushState, не сбрасывает
+// scroll), только обновляет строку возврата.
+// Кнопка на экране #rejected раньше была БЕЗУСЛОВНО привязана к resetAll() —
+// единственная независимая проверка (Frontend/QA review) нашла в этом
+// Critical-дефект: resetAll() безусловно останавливает polling и стирает
+// currentOrderCode/credentials/localStorage, а это ЕДИНСТВЕННАЯ кнопка на
+// экране, где мы только что обещали пользователю "возврат обрабатывается,
+// продолжаем следить". Реальный пользователь, тапнувший её, необратимо терял
+// единственный способ узнать судьбу своего возврата — ни в этой вкладке
+// (interval убит), ни после refresh (localStorage запись уже стёрта).
+// Вызывается на КАЖДОМ вызове openRejected(), не только при первом входе на
+// экран — refund_status мог стать терминальным уже ПОСЛЕ того, как экран был
+// показан (пока пользователь на нём же и остаётся).
+function updateRejectedActionButton(refundStatus){
   const btn=document.getElementById('rej-action-btn');
-  btn.textContent='Выбрать другой ресторан';btn.onclick=resetAll;
-  if(curRest){
-    document.getElementById('rej-title').textContent=(reason==='timeout')?`«${curRest.name}» не ответил вовремя`:`«${curRest.name}» не смог принять заказ`;
+  if(refundStatus==='processing'){
+    btn.textContent='Возврат ещё обрабатывается…';
+    btn.disabled=true;
+    btn.onclick=null;
+  }else{
+    btn.textContent='Выбрать другой ресторан';
+    btn.disabled=false;
+    btn.onclick=resetAll;
   }
-  document.getElementById('statusbg').style.display='none';
-  go('rejected');
+}
+let rejOrderCodeShown=null;
+function openRejected(reason,order){
+  const refundStatus=order?order.refund_status:'none';
+  const alreadyShown=cur('rejected')&&rejOrderCodeShown===currentOrderCode;
+  renderRefundLine(refundStatus,currentOrderAmount);
+  updateRejectedActionButton(refundStatus);
+
+  if(!alreadyShown){
+    // Заказ окончен — это терминальное состояние без пути назад, поэтому
+    // окно ожидания ответа ресторана больше не актуально ни при каком reason.
+    clearInterval(preTimer);clearTimeout(preAutoTimer);preDeadline=null;
+    showStatusSpinner(false);
+    showOrderDot(false);
+    showRestaurantPhone(null);
+    setRejOrderCode(currentOrderCode);
+    document.getElementById('rej-explain').style.display='';
+    if(reason==='cancelled'){
+      document.getElementById('rej-title').textContent='Заказ отменён';
+      document.getElementById('rej-explain').textContent='Вы отменили заказ.';
+    }else if(curRest){
+      document.getElementById('rej-title').textContent=(reason==='timeout')?`«${curRest.name}» не ответил вовремя`:`«${curRest.name}» не смог принять заказ`;
+    }
+    document.getElementById('statusbg').style.display='none';
+    rejOrderCodeShown=currentOrderCode;
+    go('rejected');
+  }
+
+  if(refundStatus==='processing')return; // ждём терминального refund_status — polling и credentials остаются активными, см. FIX 5
+  // Возврата не было ('none'), либо он уже завершён ('done'/'failed') —
+  // возвращаться в этот заказ больше некуда, теперь можно безопасно
+  // остановить polling и очистить credentials (как и раньше делала эта функция).
+  stopOrderPolling();
+  const orderCodeForClear=currentOrderCode;
+  const orderTokenForClear=currentOrderAccessToken;
+  currentOrderCode=null;currentOrderAccessToken=null;currentCreateIdempotencyKey=null;currentRetryIdempotencyKey=null;currentPaymentUrl=null;currentOrderAmount=null;currentOrderRestaurantId=null;currentOrderItems=[];orderCreatedAtMs=null;
+  void clearStoredOrderStateSafely(orderCodeForClear,orderTokenForClear);
 }
 
 // Оплата не прошла (ошибка провайдера/банка) — отдельный экран-состояние,
@@ -1400,23 +1441,37 @@ async function recoverRetryPaymentPresentation(notifyUser=false){
 // backend (cancelByCustomer()) для этого статуса не вызывает refund вообще —
 // текст не должен обещать возврат того, чего не было. unpaid=false/не задан —
 // вызов из #st-cancel-wrap (реальная отмена уже оплаченного заказа, ожидание
-// ответа ресторана) — там возврат денег действительно происходит, текст как был.
+// ответа ресторана) — там возврат резервируется реально, поэтому дальше
+// показываем настоящий order.refund_status (см. openRejected), а не
+// безусловное "деньги вернутся автоматически" — возврат может занять время
+// или (в редком случае) не пройти автоматически вовсе.
 function cancelOrderFlow(unpaid){
   const confirmText=unpaid
     ?'Отменить неоплаченный заказ?\nКорзина будет очищена, и вы вернётесь на главный экран.'
-    :'Отменить заказ? Деньги вернутся автоматически.';
+    :'Отменить заказ?';
   const labels=unpaid?{yes:'Да, отменить',no:'Не отменять'}:undefined;
   yaamConfirm(confirmText,async()=>{
     if(!USE_API){ // демо — нечего отменять на сервере, просто сбрасываем локально
-      showToast(unpaid?'Заказ отменён':'Демо: заказ отменён, деньги вернутся автоматически');
+      showToast('Заказ отменён');
       resetAll();
       return;
     }
     try{
-      await api.cancelOrder(currentOrderCode,currentOrderAccessToken);
-      stopOrderPolling();
-      showToast(unpaid?'Заказ отменён':'Заказ отменён, деньги вернутся автоматически');
-      resetAll();
+      const updated=await api.cancelOrder(currentOrderCode,currentOrderAccessToken);
+      showToast('Заказ отменён');
+      if(unpaid){
+        // Оплаты не было — возврата не будет и нечего отслеживать (см.
+        // docs/PROJECT_BACKLOG.md Decisions: "UI не сообщает о возврате денег"
+        // для отмены неоплаченного заказа).
+        stopOrderPolling();
+        resetAll();
+      }else{
+        // Заказ уже был оплачен — сервер атомарно зарезервировал возврат
+        // вместе с переходом в cancelled. Показываем актуальный
+        // order.refund_status вместо безусловного обещания и продолжаем
+        // polling, пока он не станет терминальным (см. openRejected).
+        openRejected('cancelled',updated);
+      }
     }catch(err){
       showToast(err.message||'Не удалось отменить заказ');
     }
@@ -1428,6 +1483,29 @@ let orderPollTimer=null;
 let pollInFlight=false; // защита от наложения: visibilitychange/pageshow/setInterval могут вызвать pollOrderOnce() почти одновременно (особенно при возврате из фона на мобильном Safari) — без гейта два параллельных запроса могут прийти не по порядку и откатить UI на более старый статус
 let lastKnownOrder=null; // нужен resumeExistingPayment() — сумма/код заказа без обращения к (возможно уже пустой после reload) корзине
 function stopOrderPolling(){clearInterval(orderPollTimer);orderPollTimer=null;}
+// Полный список статусов заказа, которые реально умеет обрабатывать backend
+// (см. server/db/schema.sql CHECK-ограничение на orders.status — тот же
+// список). Если когда-нибудь придёт что-то за его пределами (битые данные,
+// будущая рассинхронизация версий клиент/сервер), pollOrderOnce() не должен
+// молча ничего не делать — см. FALLBACK ниже.
+const KNOWN_ORDER_STATUSES=['awaiting_payment','awaiting_restaurant','accepted','preparing','courier','delivered','declined','timed_out','cancelled','payment_failed'];
+let unknownOrderStatusNoticeShown=false; // не спамить тем же тостом каждые POLL_INTERVAL_MS, пока статус остаётся нераспознанным
+// order.refund_status (см. GET /api/orders/:code) — публичный, уже суженный
+// словарь: none | processing | done | failed. Внутренние состояния
+// (requested/processing на сервере) сюда никогда не попадают.
+function refundStatusMessage(refundStatus,amount){
+  const sumHtml=amount?`<b>${amount.toLocaleString('ru-RU')} ₽</b> `:'';
+  if(refundStatus==='processing')return `Возврат ${sumHtml}обрабатывается. Деньги будут возвращены после подтверждения платёжного сервиса.`;
+  if(refundStatus==='done')return `Возврат ${sumHtml}подтверждён. Срок зачисления зависит от банка.`;
+  if(refundStatus==='failed')return 'Возврат не завершён автоматически. Обратитесь в поддержку YAAM.';
+  return null; // 'none' — возврата не было и не будет (неоплаченная отмена) — молчим, как и раньше
+}
+function renderRefundLine(refundStatus,amount){
+  const line=document.getElementById('rej-refund-line');
+  const html=refundStatusMessage(refundStatus,amount);
+  if(html){line.innerHTML=html;line.style.display='';}
+  else{line.style.display='none';}
+}
 // Заказ создан, но оплата ещё не подтверждена — например, вернулись назад с
 // экрана QR, обновили страницу или закрыли вкладку и открыли снова. Отдельное
 // явное состояние вместо неопределённого экрана (раньше этот статус вообще
@@ -1485,6 +1563,20 @@ async function pollOrderOnce(){
     return; // сеть моргнула — попробуем на следующем тике
   }
   lastKnownOrder=order;
+  if(KNOWN_ORDER_STATUSES.includes(order.status))unknownOrderStatusNoticeShown=false;
+  // Свежесозданный заказ стартует polling ещё на экране QR (см.
+  // startOrderPollingQuiet(), FIX 5) — как только статус реально ушёл дальше
+  // awaiting_payment (оплата подтверждена с этого ЖЕ или ДРУГОГО устройства,
+  // например по QR со второго телефона), пользователь должен увидеть это без
+  // ручного refresh, а не остаться смотреть на статичный QR-код.
+  // initStatusScreen() обязателен здесь, а не только go('status') — иначе
+  // #statusbg/#st-items/#st-num остаются пустыми/скрытыми до ручного refresh
+  // (независимая проверка Frontend polling/UX это воспроизвела: тихий переход
+  // с QR оставлял пустой статус-экран). cur('qr') истинен только на первом
+  // тике после реального перехода за awaiting_payment — go('status') снимает
+  // .active с #qr, так что повторные тики этот блок больше не выполняют и не
+  // затирают statusStep/inPreStatus, уже выставленные веткой ниже.
+  if(order.status!=='awaiting_payment'&&cur('qr')){initStatusScreen();go('status');}
   currentOrderAmount=order.items_total; // backend — источник истины для суммы заказа, не клиентская корзина
   // Источник истины для "уже оценено" — order.rating с бэкенда, а не локальный
   // флаг: после обновления страницы ratingSubmitted сбрасывается в false
@@ -1536,23 +1628,41 @@ async function pollOrderOnce(){
     renderStatus();
     if(order.status==='delivered')stopOrderPolling();
   }else if(order.status==='declined'){
-    openRejected('declined');
+    openRejected('declined',order);
   }else if(order.status==='timed_out'){
-    openRejected('timeout');
+    openRejected('timeout',order);
   }else if(order.status==='cancelled'){
-    stopOrderPolling();resetAll();
+    openRejected('cancelled',order);
   }else if(order.status==='payment_failed'){
     openPaymentFailed();
+  }else{
+    // Нераспознанный статус — backend уже гарантирует CHECK-ограничением на
+    // orders.status (см. server/db/schema.sql), но контракт клиент/сервер
+    // может разойтись версиями в будущем. Не угадываем новый экран, не трогаем
+    // credentials, не отменяем заказ — оставляем как есть и продолжаем polling
+    // (см. независимый аудит State Machine, Finding 3).
+    console.error(`[YAAM] poll: заказ ${order.public_code} вернул нераспознанный статус`);
+    if(!unknownOrderStatusNoticeShown){
+      showToast('Статус заказа временно недоступен. Обновите страницу или обратитесь в поддержку.');
+      unknownOrderStatusNoticeShown=true;
+    }
   }
   }finally{pollInFlight=false;}
+}
+// Идемпотентна: stopOrderPolling() внутри гарантирует, что повторный вызов
+// (restore после refresh, resumeExistingOrderFlow, visibilitychange и т.п.)
+// всегда заменяет старый interval, а не плодит второй — второго "тикающего"
+// setInterval на один и тот же заказ быть не может.
+function startOrderPollingQuiet(){
+  stopOrderPolling();
+  pollOrderOnce();
+  orderPollTimer=setInterval(pollOrderOnce,POLL_INTERVAL_MS);
 }
 function startOrderPolling(){
   initStatusScreen();
   document.getElementById('st-cancel-wrap').style.display='none';
   go('status');
-  stopOrderPolling();
-  pollOrderOnce();
-  orderPollTimer=setInterval(pollOrderOnce,POLL_INTERVAL_MS);
+  startOrderPollingQuiet();
 }
 // Возврат из фона/bfcache (свернули браузер, переключили вкладку, iOS
 // заморозил и разморозил страницу) — статус мог устареть за это время сильнее,

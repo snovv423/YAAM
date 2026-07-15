@@ -57,8 +57,20 @@ CREATE TABLE IF NOT EXISTS orders (
   comment TEXT NOT NULL DEFAULT '',
   items_total INTEGER NOT NULL,              -- сумма блюд, руб. Комиссия YAAM считается от неё.
   commission_amount INTEGER NOT NULL,        -- 7% на момент создания заказа (фиксируем, а не пересчитываем задним числом)
-  status TEXT NOT NULL DEFAULT 'awaiting_payment',
-  -- статусы: awaiting_payment -> paid -> awaiting_restaurant -> accepted -> preparing
+  -- Ровно 10 допустимых значений — тот же список, что и в комментарии ниже,
+  -- продублирован в CHECK намеренно (см. server/db/index.js —
+  -- ORDERS_STATUS_CHECK_VALUES обязана оставаться идентичной этому списку,
+  -- используется миграцией для legacy-БД, у которых это ограничение ещё не
+  -- добавлено). Раньше orders.status был единственной статусной колонкой во
+  -- всей схеме без CHECK (payments/refunds/payment_initial_attempts/
+  -- payment_retry_attempts его всегда имели) — независимый аудит подтвердил,
+  -- что БД принимает произвольную строку без единой проверки.
+  status TEXT NOT NULL DEFAULT 'awaiting_payment'
+    CHECK(status IN (
+      'awaiting_payment', 'awaiting_restaurant', 'accepted', 'preparing', 'courier',
+      'delivered', 'payment_failed', 'declined', 'timed_out', 'cancelled'
+    )),
+  -- статусы: awaiting_payment -> paid(=awaiting_restaurant) -> accepted -> preparing
   --          -> courier -> delivered
   --          | payment_failed | declined | timed_out | cancelled
   status_updated_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -160,3 +172,75 @@ CREATE TABLE IF NOT EXISTS payment_initial_attempts (
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Возврат — отдельная сущность, не поле payments: у одного платежа может быть
+-- больше одной попытки возврата за всю историю (сначала неудачная, потом,
+-- когда-нибудь в будущем, повторная — уже не автоматически в этой версии).
+-- requested/processing — durable-резервация до сетевого вызова
+-- провайдера (тот же принцип, что payment_initial_attempts); succeeded/failed —
+-- терминальны для КОНКРЕТНОЙ строки. failed НЕ порождает новую строку
+-- автоматически — это сознательное архитектурное решение этого этапа (см.
+-- server/docs/refund-architecture-review.md): у нас нет реального провайдера,
+-- значит нет и данных о том, какие причины отказа временные, а какие нет —
+-- строить многоступенчатую auto-retry политику вслепую было бы преждевременно.
+CREATE TABLE IF NOT EXISTS refunds (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  payment_id INTEGER NOT NULL REFERENCES payments(id) ON DELETE CASCADE,
+  provider TEXT NOT NULL DEFAULT 'mock',
+  amount INTEGER NOT NULL CHECK(amount > 0),
+  status TEXT NOT NULL DEFAULT 'requested'
+    CHECK(status IN ('requested', 'processing', 'succeeded', 'failed')),
+  reason TEXT NOT NULL CHECK(reason IN ('customer_cancel', 'restaurant_decline', 'timeout')),
+  provider_refund_id TEXT,
+  provider_idempotency_key TEXT NOT NULL UNIQUE,
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  last_attempt_at TEXT,
+  next_attempt_at TEXT,
+  last_error_code TEXT CHECK(last_error_code IS NULL OR last_error_code IN
+    ('provider_failed', 'provider_unavailable', 'timeout', 'invariant_violation')),
+  last_error_message_safe TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  completed_at TEXT
+);
+
+-- Не более одной незавершённой попытки возврата на платёж одновременно.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_refunds_one_active_per_payment
+  ON refunds(payment_id) WHERE status IN ('requested', 'processing');
+-- Платёж нельзя успешно вернуть дважды — навсегда блокирует будущие строки.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_refunds_one_succeeded_per_payment
+  ON refunds(payment_id) WHERE status = 'succeeded';
+CREATE UNIQUE INDEX IF NOT EXISTS ux_refunds_provider_reference
+  ON refunds(provider, provider_refund_id) WHERE provider_refund_id IS NOT NULL;
+
+-- Партиальные возвраты запрещены для MVP: amount строго равен сумме платежа.
+CREATE TRIGGER IF NOT EXISTS trg_refunds_amount_matches_payment
+BEFORE INSERT ON refunds
+WHEN NEW.amount <> (SELECT amount FROM payments WHERE id = NEW.payment_id)
+BEGIN
+  SELECT RAISE(ABORT, 'refund amount must equal payment amount (full-refund-only for MVP)');
+END;
+
+-- DB-backstop поверх reserveRefundRow(): partial-индекс сам по себе не мешает
+-- вставить НОВУЮ requested-строку, если уже есть succeeded (индекс применяется
+-- только к строкам со status='succeeded', не к вставляемой requested-строке).
+CREATE TRIGGER IF NOT EXISTS trg_refunds_block_after_succeeded
+BEFORE INSERT ON refunds
+WHEN EXISTS (SELECT 1 FROM refunds WHERE payment_id = NEW.payment_id AND status = 'succeeded')
+BEGIN
+  SELECT RAISE(ABORT, 'refunds: payment already successfully refunded');
+END;
+
+-- payment_id/amount/provider/reason/provider_idempotency_key фиксируются один
+-- раз при создании строки и не должны меняться никаким UPDATE — это финансовые
+-- факты конкретной попытки, а не изменяемое состояние.
+CREATE TRIGGER IF NOT EXISTS trg_refunds_immutable_fields
+BEFORE UPDATE ON refunds
+WHEN NEW.payment_id <> OLD.payment_id
+  OR NEW.amount <> OLD.amount
+  OR NEW.provider <> OLD.provider
+  OR NEW.reason <> OLD.reason
+  OR NEW.provider_idempotency_key <> OLD.provider_idempotency_key
+BEGIN
+  SELECT RAISE(ABORT, 'refunds: payment_id/amount/provider/reason/provider_idempotency_key are immutable');
+END;

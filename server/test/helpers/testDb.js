@@ -52,7 +52,7 @@ function basicOrderPayload(restaurantId, menuItemId, overrides = {}) {
     customerPhone: overrides.customerPhone || '+79281234567',
     address: 'ул. Тестовая, 1',
     comment: '',
-    fulfillmentType: 'delivery',
+    fulfillmentType: overrides.fulfillmentType || 'delivery',
     items: [{ menuItemId, name: 'Тестовое блюдо', price: 300, qty: 1 }],
     orderAccessToken: overrides.orderAccessToken || `yaam_ord_v1_${crypto.randomBytes(32).toString('base64url')}`,
     createIdempotencyKey: overrides.createIdempotencyKey || `yaam_create_v1_${crypto.randomBytes(32).toString('base64url')}`,

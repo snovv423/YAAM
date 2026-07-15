@@ -30,8 +30,11 @@ async function getPaymentStatus(providerPaymentId) {
   return provider.getStatus(providerPaymentId);
 }
 
-async function refundPayment(providerPaymentId, amount) {
-  return provider.refund(providerPaymentId, amount);
+async function refundPayment(providerPaymentId, amount, idempotencyKey) {
+  if (typeof idempotencyKey !== 'string' || !idempotencyKey) {
+    throw new Error('provider idempotency key обязателен для возврата');
+  }
+  return provider.refund(providerPaymentId, amount, idempotencyKey);
 }
 
 function verifyWebhook(rawBody, headers) {

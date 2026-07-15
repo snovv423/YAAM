@@ -14,6 +14,14 @@ const RESTAURANT_RESPONSE_WINDOW_SEC = 180;
 const RATING_ELIGIBLE_STATUS = 'delivered';
 const initialAttemptInFlight = new Map();
 const retryAttemptInFlight = new Map();
+const refundAttemptInFlight = new Map();
+
+// Возврат считается "зависшим" (провайдер не ответил однозначно), если к этому
+// моменту ещё не наступил — минимум для первой попытки задел над таймаутом
+// провайдера (PAYMENT_REFUND_TIMEOUT_MS), чтобы sweep не соревновался за один
+// и тот же возврат с ещё реально идущим первым вызовом в этом же процессе.
+const REFUND_BACKOFF_BASE_SEC = 10;
+const REFUND_BACKOFF_CAP_SEC = 300;
 
 class OrderCreationInputError extends Error {
   constructor(message) {
@@ -73,6 +81,15 @@ class PaymentRetryInvariantError extends Error {
   }
 }
 
+class RefundInvariantError extends Error {
+  constructor(internalMessage) {
+    super('Не удалось безопасно завершить возврат средств');
+    this.name = 'RefundInvariantError';
+    this.statusCode = 500;
+    this.internalMessage = internalMessage;
+  }
+}
+
 function providerCreateTimeoutMs() {
   const configured = Number(process.env.PAYMENT_CREATE_TIMEOUT_MS || 10000);
   return Number.isFinite(configured) && configured >= 10 && configured <= 120000
@@ -102,6 +119,47 @@ function paymentInvariant(message) {
 function initialPaymentInvariant(message) {
   console.error(`[orderService] initial payment invariant: ${message}`);
   return new PaymentInitialInvariantError(message);
+}
+
+function refundInvariant(message) {
+  console.error(`[orderService] refund invariant: ${message}`);
+  return new RefundInvariantError(message);
+}
+
+// Отдельный (не refund-специфичный) инвариант для restaurantAccept/
+// restaurantAdvance — их conditional UPDATE защищён db.immediateTransaction()
+// точно так же, как и refund-переходы, но сам конфликт не имеет отношения к
+// возврату денег; переиспользование refundInvariant() здесь давало бы
+// вводящее в заблуждение сообщение "не удалось завершить возврат средств"
+// для чисто ресторанского конфликта статуса (независимый ревьюер отметил это
+// как Low-severity cosmetic issue). Путь защитный — при однопроцессной
+// синхронной архитектуре (см. db/index.js) он структурно недостижим, но текст
+// ошибки должен оставаться точным на случай, если он всё же когда-нибудь
+// сработает.
+function orderTransitionInvariant(message) {
+  console.error(`[orderService] order transition invariant: ${message}`);
+  return new Error('Не удалось безопасно обновить статус заказа');
+}
+
+function providerRefundTimeoutMs() {
+  const configured = Number(process.env.PAYMENT_REFUND_TIMEOUT_MS || 10000);
+  return Number.isFinite(configured) && configured >= 10 && configured <= 120000
+    ? configured
+    : 10000;
+}
+
+async function refundPaymentWithTimeout(params) {
+  let timer;
+  try {
+    return await Promise.race([
+      payments.refundPayment(params.providerPaymentId, params.amount, params.idempotencyKey),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('payment refund provider timeout')), providerRefundTimeoutMs());
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // UUID v4 укладывается в ограничение Idempotence-Key реальных провайдеров и
@@ -310,14 +368,25 @@ async function ensureInitialAttemptReady(attempt) {
   }
 }
 
+// Возврат — отдельная таблица (refunds), не поле orders/payments, поэтому
+// последний статус возврата заказа подтягивается сюда подзапросом: один заказ
+// может (по дизайну схемы) когда-нибудь иметь больше одной строки в refunds,
+// но для клиента и внутренних вызовов важен только самый свежий.
+const LATEST_REFUND_STATUS_SUBQUERY = `(
+  SELECT rf.status FROM refunds rf
+  JOIN payments p ON p.id = rf.payment_id
+  WHERE p.order_id = o.id
+  ORDER BY rf.id DESC LIMIT 1
+) AS latest_refund_status`;
+
 function getOrder(idOrCode) {
   const row = Number.isInteger(idOrCode)
     ? db.prepare(`
-        SELECT o.*, r.name AS restaurant_name, r.phone AS restaurant_phone
+        SELECT o.*, r.name AS restaurant_name, r.phone AS restaurant_phone, ${LATEST_REFUND_STATUS_SUBQUERY}
         FROM orders o JOIN restaurants r ON r.id = o.restaurant_id WHERE o.id = ?
       `).get(idOrCode)
     : db.prepare(`
-        SELECT o.*, r.name AS restaurant_name, r.phone AS restaurant_phone
+        SELECT o.*, r.name AS restaurant_name, r.phone AS restaurant_phone, ${LATEST_REFUND_STATUS_SUBQUERY}
         FROM orders o JOIN restaurants r ON r.id = o.restaurant_id WHERE o.public_code = ?
       `).get(idOrCode);
   if (!row) return null;
@@ -334,15 +403,28 @@ function getOrder(idOrCode) {
 // pollOrderOnce()/resumeExistingPayment()). Использовать ТОЛЬКО в публичном
 // HTTP-обработчике — orderService.getOrder() для бота/админки/внутренних
 // вызовов остаётся полным, им нужен полный объект (см. bot/index.js).
+// Внутренние статусы refunds (requested/processing/succeeded/failed) наружу не
+// уходят — публичный словарь сознательно уже (none/processing/done/failed),
+// чтобы клиент не завязывался на внутренние промежуточные состояния и их
+// будущие изменения (например, появление нового терминального состояния).
+function toPublicRefundStatus(latestRefundStatus) {
+  if (!latestRefundStatus) return 'none';
+  if (latestRefundStatus === 'succeeded') return 'done';
+  if (latestRefundStatus === 'failed') return 'failed';
+  return 'processing'; // requested | processing
+}
+
 function toPublicOrderDTO(order) {
   if (!order) return null;
   const {
     public_code, status, status_updated_at, items_total,
     estimated_ready_minutes, restaurant_phone, fulfillment_type, rating,
+    latest_refund_status,
   } = order;
   return {
     public_code, status, status_updated_at, items_total,
     estimated_ready_minutes, restaurant_phone, fulfillment_type, rating,
+    refund_status: toPublicRefundStatus(latest_refund_status),
   };
 }
 
@@ -573,23 +655,60 @@ async function createOrder({
   return resolveCreationOrder(orderId);
 }
 
-function setStatus(orderId, status) {
-  db.prepare('UPDATE orders SET status = ?, status_updated_at = datetime(\'now\') WHERE id = ?').run(status, orderId);
-  const order = getOrder(orderId);
-  orderEvents.emit('order:status', order);
-  return order;
-}
-
 // Вызывается вебхуком/dev-роутом оплаты, когда провайдер подтвердил платёж.
+//
+// Adversarial-аудит перед коммитом (см. server/docs/): чтение status ЗАКАЗА
+// раньше шло первым, и любой status кроме awaiting_payment (в первую очередь
+// cancelled) приводил к молчаливому return false — платёж так и оставался
+// pending навсегда. Для cancel-ветки это реальная потеря денег: клиент может
+// отменить awaiting_payment-заказ (см. cancelByCustomer — при отмене именно
+// из awaiting_payment платёж НЕ трогается, потому что ожидается, что оплаты
+// не будет), а провайдер в этот же момент может уже обрабатывать более раннее
+// платёжное намерение и прислать succeeded ПОСЛЕ отмены (реалистичная гонка
+// с реальным банком/вебхуком, воспроизведена эмпирически throwaway-скриптом).
+// Раньше это означало: деньги реально списаны провайдером, а наша БД никогда
+// не узнаёт, что их нужно вернуть — ни одной строки в refunds, ни одного лога.
+// Теперь читаем именно PENDING-платёж первым (единственная строка, которая
+// вообще может быть "поздней" — succeeded/failed/refunded уже разрешены
+// другим событием и остаются чистым idempotent no-op), и явно ветвим cancelled
+// как единственный на сегодня реально достижимый гоночный случай.
 function markPaid(orderId, paymentId) {
   if (!Number.isInteger(paymentId)) throw new Error('paymentId обязателен для подтверждения оплаты');
+  let lateRefundRow = null;
   const changed = db.immediateTransaction(() => {
-    const order = db.prepare('SELECT status FROM orders WHERE id = ?').get(orderId);
-    if (!order || order.status !== 'awaiting_payment') return false;
     const payment = db.prepare(
-      "SELECT id FROM payments WHERE id = ? AND order_id = ? AND status = 'pending'",
+      "SELECT * FROM payments WHERE id = ? AND order_id = ? AND status = 'pending'",
     ).get(paymentId, orderId);
-    if (!payment) return false;
+    if (!payment) return false; // уже разрешён другим событием — чистый idempotent no-op
+    const order = db.prepare('SELECT status FROM orders WHERE id = ?').get(orderId);
+    if (!order) throw refundInvariant('заказ для подтверждения оплаты не найден');
+    if (order.status === 'cancelled') {
+      const succeededLate = db.prepare(`
+        UPDATE payments SET status = 'succeeded', updated_at = datetime('now')
+        WHERE id = ? AND order_id = ? AND status = 'pending'
+      `).run(payment.id, orderId);
+      if (succeededLate.changes !== 1) {
+        throw refundInvariant('не удалось зафиксировать позднюю оплату уже отменённого заказа');
+      }
+      // Заказ НЕ воскрешаем — клиент уже явно от него отказался. Только
+      // честно фиксируем факт оплаты (payment.status='succeeded' — провайдер
+      // объективно получил деньги) и сразу резервируем возврат тем же
+      // атомарным принципом, что и cancelByCustomer/restaurantDecline/
+      // sweepTimeouts: обязательство "деньги нужно вернуть" коммитится в
+      // ОДНОЙ транзакции с фиксацией факта поздней оплаты, сетевой вызов
+      // провайдера — уже после COMMIT (см. scheduleRefundProcessing ниже).
+      lateRefundRow = reserveRefundRow(payment, 'customer_cancel');
+      return false; // статус заказа не меняется — остаётся cancelled
+    }
+    if (order.status !== 'awaiting_payment') {
+      // Структурно недостижимо текущими переходами (markPaymentFailed уже
+      // переводит ЭТОТ ЖЕ платёж в failed в своей собственной транзакции —
+      // значит здесь он не мог бы остаться pending; declined/timed_out/
+      // accepted и т.д. достижимы только из awaiting_restaurant, куда нельзя
+      // попасть без уже состоявшегося markPaid). Fail-loud, а не молчаливая
+      // потеря события, если это всё же когда-нибудь произойдёт.
+      throw refundInvariant(`подтверждение оплаты пришло для заказа в неожиданном статусе ${order.status}`);
+    }
     const paid = db.prepare(`
       UPDATE payments SET status = 'succeeded', updated_at = datetime('now')
       WHERE id = ? AND order_id = ? AND status = 'pending'
@@ -607,6 +726,7 @@ function markPaid(orderId, paymentId) {
     orderEvents.emit('order:status', updated);
     orderEvents.emit('order:new', updated); // сюда подписан бот — уйдёт уведомление ресторану
   }
+  if (lateRefundRow) scheduleRefundProcessing(lateRefundRow.id);
   return updated;
 }
 
@@ -808,43 +928,274 @@ async function retryPayment(orderId, retryKey) {
   return ensureRetryAttemptReady(attempt);
 }
 
-async function refundOrder(orderId) {
-  const order = getOrder(orderId);
-  if (!order) throw new Error('заказ не найден');
-  const payment = db.prepare(
-    "SELECT * FROM payments WHERE order_id = ? AND status = 'succeeded' ORDER BY id DESC LIMIT 1"
-  ).get(orderId);
-  if (payment) {
-    await payments.refundPayment(payment.provider_payment_id, payment.amount);
-    db.prepare("UPDATE payments SET status='refunded', updated_at=datetime('now') WHERE id = ?").run(payment.id);
-  }
-  return order;
+// --- Возврат средств: state machine (requested -> processing -> succeeded|failed) ---
+//
+// Вариант A (минимальный, согласован до подключения реальной ЮKassa, см.
+// server/docs/refund-architecture-review.md): один payment имеет не более
+// одной "активной цепочки" возврата за раз (partial UNIQUE-индексы в схеме).
+// requested/processing — durable-резервация, тот же принцип, что и у
+// payment_initial_attempts/payment_retry_attempts: обязательство "деньги нужно
+// вернуть" фиксируется в БД ДО любого сетевого вызова провайдера и в ОДНОЙ
+// транзакции с бизнес-переходом заказа (cancelled/declined/timed_out) — без
+// этого был бы crash-window, где заказ уже отменён, а факт "деньги должны
+// вернуться" нигде не сохранён. succeeded/failed терминальны для конкретной
+// строки; failed НЕ порождает новую строку автоматически — это сознательно
+// вынесено за рамки текущего этапа (нет реального провайдера => нет данных о
+// том, какие причины отказа временные, а какие постоянные).
+
+// Только для вызова изнутри уже открытой db.immediateTransaction() (см.
+// cancelByCustomer/restaurantDecline/sweepTimeouts ниже) — сама транзакцию не
+// открывает. payment — строка succeeded-платежа заказа или null/undefined,
+// если оплаты не было (тогда возвращать нечего, см. cancelAwaitingPayment.test.js).
+function reserveRefundRow(payment, reason) {
+  if (!payment) return null;
+  // Идемпотентность на уровне бизнес-перехода: повторный вход в этот же
+  // переход (например, sweepTimeouts дважды увидел один и тот же заказ до
+  // того, как первая попытка успела сменить его статус) не должен пытаться
+  // вставить вторую строку — partial UNIQUE-индексы в схеме всё равно бы это
+  // отклонили, но явная проверка здесь даёт понятный возврат, а не ошибку БД.
+  const existing = db.prepare('SELECT * FROM refunds WHERE payment_id = ? ORDER BY id DESC LIMIT 1').get(payment.id);
+  if (existing) return existing;
+  const idempotencyKey = newProviderIdempotencyKey();
+  const info = db.prepare(`
+    INSERT INTO refunds (payment_id, provider, amount, status, reason, provider_idempotency_key)
+    VALUES (?, ?, ?, 'requested', ?, ?)
+  `).run(payment.id, payment.provider, payment.amount, reason, idempotencyKey);
+  return db.prepare('SELECT * FROM refunds WHERE id = ?').get(info.lastInsertRowid);
 }
 
-// Отмена клиентом — только пока ресторан ещё не принял заказ (см. архив, часть 16.4).
-async function cancelByCustomer(orderId) {
-  const order = getOrder(orderId);
-  if (!order) throw new Error('заказ не найден');
-  if (!['awaiting_payment', 'awaiting_restaurant'].includes(order.status)) {
-    throw new Error('заказ уже готовится — отменить нельзя, свяжитесь с рестораном');
+function finalizeRefundSucceeded(refundId, providerRefundId) {
+  return db.immediateTransaction(() => {
+    const current = db.prepare('SELECT * FROM refunds WHERE id = ?').get(refundId);
+    if (!current) throw refundInvariant('строка возврата для финализации не найдена');
+    if (current.status === 'succeeded') return current; // повторный вызов — уже финализирован, безопасный no-op
+    if (current.status !== 'processing') {
+      throw refundInvariant(`финализация succeeded невозможна из состояния ${current.status}`);
+    }
+    const updated = db.prepare(`
+      UPDATE refunds SET status = 'succeeded', provider_refund_id = ?,
+        next_attempt_at = NULL, completed_at = datetime('now'), updated_at = datetime('now')
+      WHERE id = ? AND status = 'processing'
+    `).run(providerRefundId, refundId);
+    if (updated.changes !== 1) throw refundInvariant('не удалось атомарно зафиксировать успешный возврат');
+    db.prepare(`
+      UPDATE payments SET status = 'refunded', updated_at = datetime('now')
+      WHERE id = ? AND status = 'succeeded'
+    `).run(current.payment_id);
+    return db.prepare('SELECT * FROM refunds WHERE id = ?').get(refundId);
+  })();
+}
+
+function finalizeRefundFailed(refundId, errorCode) {
+  return db.immediateTransaction(() => {
+    const current = db.prepare('SELECT * FROM refunds WHERE id = ?').get(refundId);
+    if (!current) throw refundInvariant('строка возврата для финализации не найдена');
+    if (current.status === 'failed') return current;
+    if (current.status !== 'processing') {
+      throw refundInvariant(`финализация failed невозможна из состояния ${current.status}`);
+    }
+    const updated = db.prepare(`
+      UPDATE refunds SET status = 'failed', last_error_code = ?,
+        next_attempt_at = NULL, completed_at = datetime('now'), updated_at = datetime('now')
+      WHERE id = ? AND status = 'processing'
+    `).run(errorCode, refundId);
+    if (updated.changes !== 1) throw refundInvariant('не удалось атомарно зафиксировать неуспешный возврат');
+    return db.prepare('SELECT * FROM refunds WHERE id = ?').get(refundId);
+  })();
+}
+
+// Зеркалит ensureInitialAttemptReady/ensureRetryAttemptReady: claim (атомарный
+// переход в processing + фиксация дедлайна следующей попытки) строго ДО
+// сетевого вызова, сам вызов провайдера — после COMMIT. next_attempt_at
+// выставляется здесь же, ДО await: если процесс упадёт прямо во время
+// сетевого вызова, sweepStuckRefunds() после рестарта всё равно найдёт эту
+// строку по истёкшему дедлайну и безопасно повторит попытку тем же
+// idempotency key — отдельного "просроченного/зависшего" состояния не нужно.
+// In-flight Map — только оптимизация в рамках процесса; единственная реальная
+// защита от двойного успешного возврата — conditional UPDATE в
+// finalizeRefundSucceeded/Failed (WHERE status = 'processing').
+async function ensureRefundReady(refundId) {
+  if (refundAttemptInFlight.has(refundId)) return refundAttemptInFlight.get(refundId);
+
+  const operation = (async () => {
+    const refund = db.prepare('SELECT * FROM refunds WHERE id = ?').get(refundId);
+    if (!refund) throw refundInvariant('строка возврата не найдена');
+    if (refund.status === 'succeeded' || refund.status === 'failed') return refund;
+    if (refund.status !== 'requested' && refund.status !== 'processing') {
+      throw refundInvariant('строка возврата в неизвестном состоянии');
+    }
+
+    const claimed = db.immediateTransaction(() => {
+      const current = db.prepare('SELECT * FROM refunds WHERE id = ?').get(refundId);
+      if (!current || !['requested', 'processing'].includes(current.status)) return null;
+      const nextAttemptCount = current.attempt_count + 1;
+      const delaySec = Math.min(REFUND_BACKOFF_BASE_SEC * (2 ** nextAttemptCount), REFUND_BACKOFF_CAP_SEC);
+      db.prepare(`
+        UPDATE refunds SET status = 'processing', attempt_count = ?,
+          last_attempt_at = datetime('now'),
+          next_attempt_at = datetime('now', '+' || ? || ' seconds'),
+          updated_at = datetime('now')
+        WHERE id = ?
+      `).run(nextAttemptCount, delaySec, refundId);
+      return db.prepare('SELECT * FROM refunds WHERE id = ?').get(refundId);
+    })();
+    if (!claimed) return db.prepare('SELECT * FROM refunds WHERE id = ?').get(refundId); // уже терминальна
+
+    const payment = db.prepare('SELECT * FROM payments WHERE id = ?').get(claimed.payment_id);
+    if (!payment || !payment.provider_payment_id) {
+      throw refundInvariant('платёж для возврата не найден или не содержит provider id');
+    }
+
+    let result;
+    try {
+      result = await refundPaymentWithTimeout({
+        providerPaymentId: payment.provider_payment_id,
+        amount: claimed.amount,
+        idempotencyKey: claimed.provider_idempotency_key,
+      });
+    } catch (err) {
+      // Неизвестно, успел ли провайдер выполнить возврат. Строка остаётся
+      // processing с уже выставленным next_attempt_at — следующий sweep
+      // безопасно повторит тот же idempotency key. Не бросаем наружу: у этой
+      // функции нет синхронного HTTP-вызывающего, которому нужен статус-код —
+      // и cancelByCustomer/scheduleRefundProcessing, и sweepStuckRefunds сами
+      // лишь логируют .catch(), поэтому кидать здесь нечего ловить осмысленно.
+      console.error(`[orderService] refund provider unavailable refund=${refundId} type=${err?.name || 'Error'}`);
+      return db.prepare('SELECT * FROM refunds WHERE id = ?').get(refundId);
+    }
+    if (!result || (result.status !== 'succeeded' && result.status !== 'failed')) {
+      throw refundInvariant(`провайдер вернул неизвестный статус возврата: ${result && result.status}`);
+    }
+    if (result.status === 'succeeded') return finalizeRefundSucceeded(refundId, result.refundId || null);
+    return finalizeRefundFailed(refundId, 'provider_failed');
+  })();
+  refundAttemptInFlight.set(refundId, operation);
+  try {
+    return await operation;
+  } finally {
+    if (refundAttemptInFlight.get(refundId) === operation) refundAttemptInFlight.delete(refundId);
   }
-  if (order.status === 'awaiting_restaurant') await refundOrder(orderId);
-  return setStatus(orderId, 'cancelled');
+}
+
+// Запуск строго ПОСЛЕ COMMIT транзакции, создавшей строку возврата — сам
+// вызов провайдера никогда не выполняется внутри db.immediateTransaction
+// (синхронный SQLite-коннекшн не должен держать открытую транзакцию во время
+// await). Возвращает Promise для удобства тестов; вызывающая продакшен-функция
+// (cancelByCustomer и т.п.) сознательно НЕ ждёт его — клиент узнаёт о
+// завершении возврата через order.refund_status при следующем poll. Ошибка
+// уже залогирована и проглочена здесь же, так что fire-and-forget вызов
+// (без await/.catch) безопасен и не создаёт unhandled rejection.
+function scheduleRefundProcessing(refundId) {
+  return ensureRefundReady(refundId).catch((err) => {
+    console.error(`[orderService] refund processing failed refund=${refundId}:`, err.message);
+  });
+}
+
+// Периодический свип — как sweepTimeouts()/sweepPauseExpiry(), переживает
+// рестарт сервера. Подхватывает: (1) requested-строки, чей провайдер-вызов
+// вообще не успел стартовать (процесс упал между COMMIT и вызовом
+// scheduleRefundProcessing); (2) processing-строки с истёкшим next_attempt_at
+// (предыдущая попытка закончилась неоднозначно, либо процесс упал во время
+// сетевого вызова). Активная попытка в ЭТОМ ЖЕ процессе никогда не
+// подхватывается повторно раньше собственного дедлайна, потому что
+// next_attempt_at всегда выставляется на claim ещё до await. Возвращает
+// Promise (для тестов); вызов из setInterval в server.js его не ждёт —
+// как и у scheduleRefundProcessing, все ошибки уже пойманы внутри.
+function sweepStuckRefunds() {
+  const stale = db.prepare(`
+    SELECT id FROM refunds
+    WHERE status IN ('requested', 'processing')
+      AND (next_attempt_at IS NULL OR next_attempt_at <= datetime('now'))
+  `).all();
+  return Promise.all(stale.map(({ id }) => ensureRefundReady(id).catch((err) => {
+    console.error(`[orderService] sweep refund retry failed refund=${id}:`, err.message);
+  })));
+}
+
+// Отмена клиентом — только пока ресторан ещё не принял заказ (см. архив, часть
+// 16.4). Бизнес-переход заказа (-> cancelled) и резервация обязательства
+// вернуть деньги коммитятся ОДНОЙ транзакцией — без этого возможен
+// crash-window, где заказ уже отменён, а строка возврата ещё не записана.
+// Сам сетевой возврат выполняется уже после COMMIT и не блокирует ответ
+// клиенту: отмена — бизнес-решение, возврат денег — отдельная асинхронная
+// финансовая операция (см. order.refund_status).
+async function cancelByCustomer(orderId) {
+  let refundRow = null;
+  const order = db.immediateTransaction(() => {
+    const current = getOrder(orderId);
+    if (!current) throw new Error('заказ не найден');
+    if (!['awaiting_payment', 'awaiting_restaurant'].includes(current.status)) {
+      throw new Error('заказ уже готовится — отменить нельзя, свяжитесь с рестораном');
+    }
+    if (current.status === 'awaiting_restaurant') {
+      const payment = db.prepare(
+        "SELECT * FROM payments WHERE order_id = ? AND status = 'succeeded' ORDER BY id DESC LIMIT 1",
+      ).get(orderId);
+      refundRow = reserveRefundRow(payment, 'customer_cancel');
+    }
+    const updated = db.prepare(`
+      UPDATE orders SET status = 'cancelled', status_updated_at = datetime('now')
+      WHERE id = ? AND status = ?
+    `).run(orderId, current.status);
+    if (updated.changes !== 1) throw refundInvariant('не удалось атомарно отменить заказ');
+    return getOrder(orderId);
+  })();
+  orderEvents.emit('order:status', order);
+  if (refundRow) scheduleRefundProcessing(refundRow.id);
+  return order;
 }
 
 // --- Действия ресторана (вызывается ботом) ---
 
+// До этого фикса read-then-write здесь ничем не был защищён на уровне БД —
+// безопасность держалась исключительно на том, что между чтением и записью
+// нет await (см. server/docs/refund-architecture-review.md — независимый
+// аудит явно это подтвердил и одновременно предупредил, что это неявный,
+// ничем не закреплённый инвариант, который сломает первая же будущая async-
+// вставка между ними). Теперь чтение текущего статуса и conditional UPDATE
+// выполняются в ОДНОЙ db.immediateTransaction — приём заказа больше не может
+// "воскресить" заказ, который параллельно успел стать cancelled/declined/
+// timed_out (в т.ч. с уже зарезервированным или завершённым возвратом).
 function restaurantAccept(orderId) {
-  const order = getOrder(orderId);
-  if (!order || order.status !== 'awaiting_restaurant') return order;
-  return setStatus(orderId, 'accepted');
+  const result = db.immediateTransaction(() => {
+    const current = getOrder(orderId);
+    if (!current || current.status !== 'awaiting_restaurant') {
+      return { order: current, changed: false };
+    }
+    const applied = db.prepare(`
+      UPDATE orders SET status = 'accepted', status_updated_at = datetime('now')
+      WHERE id = ? AND status = 'awaiting_restaurant'
+    `).run(orderId);
+    if (applied.changes !== 1) throw orderTransitionInvariant('не удалось атомарно принять заказ');
+    return { order: getOrder(orderId), changed: true };
+  })();
+  if (result.changed) orderEvents.emit('order:status', result.order);
+  return result.order;
 }
 
+// Тот же атомарный принцип, что и cancelByCustomer: переход в declined и
+// резервация возврата — одна транзакция, сетевой вызов провайдера — после неё.
 async function restaurantDecline(orderId) {
-  const order = getOrder(orderId);
-  if (!order || order.status !== 'awaiting_restaurant') return order;
-  await refundOrder(orderId);
-  return setStatus(orderId, 'declined');
+  let refundRow = null;
+  const order = db.immediateTransaction(() => {
+    const current = getOrder(orderId);
+    if (!current || current.status !== 'awaiting_restaurant') return current;
+    const payment = db.prepare(
+      "SELECT * FROM payments WHERE order_id = ? AND status = 'succeeded' ORDER BY id DESC LIMIT 1",
+    ).get(orderId);
+    refundRow = reserveRefundRow(payment, 'restaurant_decline');
+    const updated = db.prepare(`
+      UPDATE orders SET status = 'declined', status_updated_at = datetime('now')
+      WHERE id = ? AND status = 'awaiting_restaurant'
+    `).run(orderId);
+    if (updated.changes !== 1) throw refundInvariant('не удалось атомарно отклонить заказ');
+    return getOrder(orderId);
+  })();
+  if (order && order.status === 'declined') {
+    orderEvents.emit('order:status', order);
+    if (refundRow) scheduleRefundProcessing(refundRow.id);
+  }
+  return order;
 }
 
 // У самовывоза нет курьера — ресторан переводит заказ сразу из "preparing" в
@@ -853,17 +1204,32 @@ const ADVANCE_MAP = {
   delivery: { accepted: 'preparing', preparing: 'courier', courier: 'delivered' },
   pickup: { accepted: 'preparing', preparing: 'delivered' },
 };
+// Тот же принцип, что и restaurantAccept выше: чтение текущего статуса,
+// проверка ADVANCE_MAP (единственный допустимый следующий шаг — пропуск
+// этапов и откат назад структурно невозможны, не только по соглашению) и
+// conditional UPDATE — всё внутри одной db.immediateTransaction, без единого
+// await между ними. estimated_ready_minutes пишется в той же транзакции, что
+// и сам переход статуса — оба поля коммитятся или откатываются вместе.
 function restaurantAdvance(orderId, nextStatus, { estimatedMinutes } = {}) {
-  const order = getOrder(orderId);
-  if (!order) throw new Error('заказ не найден');
-  const allowed = ADVANCE_MAP[order.fulfillment_type] || ADVANCE_MAP.delivery;
-  if (allowed[order.status] !== nextStatus) {
-    throw new Error(`нельзя перейти из ${order.status} в ${nextStatus}`);
-  }
-  if (nextStatus === 'preparing' && estimatedMinutes) {
-    db.prepare('UPDATE orders SET estimated_ready_minutes = ? WHERE id = ?').run(estimatedMinutes, orderId);
-  }
-  return setStatus(orderId, nextStatus);
+  const order = db.immediateTransaction(() => {
+    const current = getOrder(orderId);
+    if (!current) throw new Error('заказ не найден');
+    const allowed = ADVANCE_MAP[current.fulfillment_type] || ADVANCE_MAP.delivery;
+    if (allowed[current.status] !== nextStatus) {
+      throw new Error(`нельзя перейти из ${current.status} в ${nextStatus}`);
+    }
+    if (nextStatus === 'preparing' && estimatedMinutes) {
+      db.prepare('UPDATE orders SET estimated_ready_minutes = ? WHERE id = ?').run(estimatedMinutes, orderId);
+    }
+    const applied = db.prepare(`
+      UPDATE orders SET status = ?, status_updated_at = datetime('now')
+      WHERE id = ? AND status = ?
+    `).run(nextStatus, orderId, current.status);
+    if (applied.changes !== 1) throw orderTransitionInvariant('не удалось атомарно продвинуть заказ');
+    return getOrder(orderId);
+  })();
+  orderEvents.emit('order:status', order);
+  return order;
 }
 
 // --- Перерыв ресторана (снимается сам по истечении, см. sweepPauseExpiry) ---
@@ -929,8 +1295,12 @@ function rateOrder(orderId, rating) {
 }
 
 // Периодический свип вместо setTimeout на процесс — переживает рестарт сервера.
-// Если ресторан не ответил за RESTAURANT_RESPONSE_WINDOW_SEC, заказ отменяется и
-// деньги возвращаются автоматически (см. архив, часть 16.4).
+// Если ресторан не ответил за RESTAURANT_RESPONSE_WINDOW_SEC, заказ переходит в
+// timed_out и деньги возвращаются автоматически (см. архив, часть 16.4).
+// Каждый заказ — своя отдельная BEGIN IMMEDIATE транзакция (не общая на весь
+// батч): падение/исключение на одном заказе не откатывает уже обработанные
+// соседние заказы того же свипа, и переход статуса + резервация возврата
+// коммитятся вместе, тем же принципом, что и cancelByCustomer/restaurantDecline.
 function sweepTimeouts() {
   const stale = db.prepare(`
     SELECT id FROM orders
@@ -939,9 +1309,31 @@ function sweepTimeouts() {
   `).all(RESTAURANT_RESPONSE_WINDOW_SEC);
 
   for (const { id } of stale) {
-    refundOrder(id)
-      .then(() => setStatus(id, 'timed_out'))
-      .catch((err) => console.error(`[orderService] timeout-refund failed for order ${id}:`, err.message));
+    let refundRow = null;
+    let order;
+    try {
+      order = db.immediateTransaction(() => {
+        const current = getOrder(id);
+        if (!current || current.status !== 'awaiting_restaurant') return current;
+        const payment = db.prepare(
+          "SELECT * FROM payments WHERE order_id = ? AND status = 'succeeded' ORDER BY id DESC LIMIT 1",
+        ).get(id);
+        refundRow = reserveRefundRow(payment, 'timeout');
+        const updated = db.prepare(`
+          UPDATE orders SET status = 'timed_out', status_updated_at = datetime('now')
+          WHERE id = ? AND status = 'awaiting_restaurant'
+        `).run(id);
+        if (updated.changes !== 1) throw refundInvariant('не удалось атомарно просрочить заказ');
+        return getOrder(id);
+      })();
+    } catch (err) {
+      console.error(`[orderService] sweepTimeouts failed for order ${id}:`, err.message);
+      continue;
+    }
+    if (order && order.status === 'timed_out') {
+      orderEvents.emit('order:status', order);
+      if (refundRow) scheduleRefundProcessing(refundRow.id);
+    }
   }
 }
 
@@ -955,8 +1347,8 @@ module.exports = {
   markPaid,
   markPaymentFailed,
   retryPayment,
-  refundOrder,
   cancelByCustomer,
+  sweepStuckRefunds,
   restaurantAccept,
   restaurantDecline,
   restaurantAdvance,

@@ -91,6 +91,41 @@ test('backupDatabase() сохраняет ambiguous initial attempt в creating 
   assert.equal(attempt.presentations, 0);
 });
 
+test('backupDatabase() сохраняет ambiguous (processing) возврат для продолжения после restore', async () => {
+  const { restaurantId, menuItemId } = seedMinimalRestaurant(db, { name: 'Ресторан refund backup' });
+  const created = await orderService.createOrder(
+    basicOrderPayload(restaurantId, menuItemId, { customerPhone: '+79280002004' }),
+  );
+  const paymentRow = db.prepare("SELECT id FROM payments WHERE order_id = ? AND status = 'pending'").get(created.order.id);
+  await orderService.markPaid(created.order.id, paymentRow.id);
+
+  const originalRefundPayment = paymentService.refundPayment;
+  paymentService.refundPayment = async () => { throw new Error('ambiguous refund response'); };
+  try {
+    await orderService.cancelByCustomer(created.order.id);
+    await new Promise((resolve) => setImmediate(resolve));
+  } finally {
+    paymentService.refundPayment = originalRefundPayment;
+  }
+
+  const destPath = await backupDatabase({ dbPath, backupDir });
+  const { DatabaseSync } = require('node:sqlite');
+  const backupDb = new DatabaseSync(destPath, { readOnly: true });
+  const refund = backupDb.prepare(`
+    SELECT r.status, r.attempt_count, r.next_attempt_at, r.provider_idempotency_key, r.amount,
+      p.amount AS payment_amount
+    FROM refunds r JOIN payments p ON p.id = r.payment_id
+    WHERE p.order_id = ?
+  `).get(created.order.id);
+  backupDb.close();
+
+  assert.equal(refund.status, 'processing');
+  assert.equal(refund.attempt_count, 1);
+  assert.ok(refund.next_attempt_at, 'дедлайн следующей попытки должен быть сохранён в бэкапе');
+  assert.match(refund.provider_idempotency_key, /^[0-9a-f-]{36}$/);
+  assert.equal(refund.amount, refund.payment_amount, 'частичные возвраты запрещены — сумма всегда равна сумме платежа');
+});
+
 test('backupDatabase() сохраняет ledger повторной оплаты без исходного client retry-key', async () => {
   const { restaurantId, menuItemId } = seedMinimalRestaurant(db, { name: 'Ресторан retry backup' });
   const created = await orderService.createOrder(

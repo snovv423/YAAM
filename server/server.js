@@ -2,15 +2,16 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const basicAuth = require('express-basic-auth');
-
-const apiRoutes = require('./routes/api');
-const adminRoutes = require('./routes/admin');
-const orderService = require('./services/orderService');
-const { buildCorsOptions } = require('./config/cors');
 const { acquireLock, releaseLock } = require('./singleInstanceLock');
 
 // orderService/автосвипы полагаются на единственный процесс (см.
 // singleInstanceLock.js) — отказываемся стартовать, если другой экземпляр уже жив.
+// Лок нужно взять ДО require('./routes/api') и любых других require, которые
+// транзитивно трогают ../db — иначе миграция схемы (db/index.js) успевает
+// выполниться до того, как лок вообще проверен, и два процесса, стартующие
+// одновременно на немигрированной legacy-БД, гонятся за BEGIN IMMEDIATE друг
+// с другом вместо того, чтобы один из них аккуратно отказался стартовать
+// (независимый аудит SQLite migration/backup воспроизвёл это эмпирически).
 let lockPath;
 try {
   lockPath = acquireLock();
@@ -18,6 +19,11 @@ try {
   console.error(`[server] ${err.message}`);
   process.exit(1);
 }
+
+const apiRoutes = require('./routes/api');
+const adminRoutes = require('./routes/admin');
+const orderService = require('./services/orderService');
+const { buildCorsOptions } = require('./config/cors');
 
 function shutdown() {
   releaseLock(lockPath);
@@ -77,6 +83,11 @@ app.use((err, req, res, next) => {
 setInterval(() => orderService.sweepTimeouts(), 10_000);
 // Автосвип истёкших перерывов ресторанов (33 мин / 3 часа / 11 часов).
 setInterval(() => orderService.sweepPauseExpiry(), 30_000);
+// Автосвип "зависших" возвратов — requested/processing строк, чья попытка не
+// стартовала (падение процесса между commit и fire-and-forget вызовом) или
+// закончилась неоднозначно (throw/timeout у провайдера). Тот же интервал, что
+// и у sweepTimeouts — возвраты не более срочны, чем истечение ответа ресторана.
+setInterval(() => orderService.sweepStuckRefunds(), 10_000);
 
 app.listen(PORT, HOST, () => {
   console.log(`[server] YAAM API слушает на ${HOST}:${PORT}`);

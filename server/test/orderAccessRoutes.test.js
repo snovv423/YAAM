@@ -73,6 +73,7 @@ const FORBIDDEN_FIELDS = [
   'id', 'restaurant_id', 'city', 'customer_name', 'customer_phone', 'address',
   'comment', 'commission_amount', 'created_at', 'restaurant_name',
   'access_token_hash', 'token_hash', 'create_key_hash', 'request_hash', 'providerPaymentId',
+  'provider_idempotency_key', 'provider_refund_id',
 ];
 
 function assertNoInternalFields(value) {
@@ -114,7 +115,7 @@ test('POST /orders с корректной парой создаёт заказ,
   assert.deepEqual(Object.keys(body).sort(), ['context', 'order', 'payment']);
   assert.deepEqual(Object.keys(body.order).sort(), [
     'estimated_ready_minutes', 'fulfillment_type', 'items_total', 'public_code',
-    'rating', 'restaurant_phone', 'status', 'status_updated_at',
+    'rating', 'refund_status', 'restaurant_phone', 'status', 'status_updated_at',
   ]);
   assert.match(body.order.public_code, /^YAAM-\d+$/);
   assert.deepEqual(Object.keys(body.payment).sort(), ['paymentUrl', 'qrPayload']);

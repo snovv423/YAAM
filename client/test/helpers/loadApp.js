@@ -25,7 +25,21 @@ function makeFakeElement(id) {
     value: '',
     disabled: false,
     style: new Proxy({}, { get: () => '', set: () => true }),
-    classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
+    // Реальный, а не всегда-false стаб — нужен для cur(id) (используется и
+    // существующим app.js, и новыми тестами order-state-machine hardening,
+    // проверяющими go('status')/go('rejected') через cur()). Прежний
+    // всегда-false стаб ни один существующий тест не проверял напрямую (см.
+    // отсутствие classList/cur( в остальных test/*.test.js), так что это
+    // расширение возможностей, а не смена уже проверяемого поведения.
+    classList: (() => {
+      const set = new Set();
+      return {
+        add(cls) { set.add(cls); },
+        remove(cls) { set.delete(cls); },
+        toggle(cls) { if (set.has(cls)) { set.delete(cls); return false; } set.add(cls); return true; },
+        contains(cls) { return set.has(cls); },
+      };
+    })(),
     dataset: {},
     attributes: {},
     onclick: null,
@@ -40,6 +54,14 @@ function makeFakeElement(id) {
     focus() {},
     click() {},
     closest() { return this; }, // достаточно для validateCheckout() (toggle .err на "ближайшем" поле)
+    offsetHeight: 0,
+    // Раньше classList.contains() был всегда-false стабом (см. выше), поэтому
+    // cur('home')-guard в onScroll() (initIntroLayerFX(), app.js) никогда не
+    // пропускал выполнение дальше и getBoundingClientRect() не вызывался.
+    // Теперь classList стал реальным — go('home') может делать cur('home')
+    // истинным, и без этого стаба это падало бы TypeError на любом тесте,
+    // вызывающем resetAll()/go('home').
+    getBoundingClientRect() { return { top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 }; },
   };
 }
 

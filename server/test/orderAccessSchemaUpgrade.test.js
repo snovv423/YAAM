@@ -74,6 +74,14 @@ test('аддитивное обновление закрывает legacy-зак
     db.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name='payment_presentations'").get().count,
     1,
   );
+  // refunds — самая новая таблица в этой цепочке аддитивных обновлений: у
+  // legacy-БД (даже уже прошедшей через все предыдущие миграции этого файла)
+  // её тоже не было. Проверяем, что она создаётся поверх реально существующих
+  // orders/payments без ручного вмешательства.
+  assert.equal(
+    db.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name='refunds'").get().count,
+    1,
+  );
   const initialColumns = db.prepare('PRAGMA table_info(payment_initial_attempts)').all().map((row) => row.name);
   assert.deepEqual(
     initialColumns,

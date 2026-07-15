@@ -32,7 +32,7 @@ class YookassaProvider extends PaymentProviderInterface {
 
   async createPayment(_params) { throw new Error('not implemented'); }
   async getStatus(_providerPaymentId) { throw new Error('not implemented'); }
-  async refund(_providerPaymentId, _amount) { throw new Error('not implemented'); }
+  async refund(_providerPaymentId, _amount, _idempotencyKey) { throw new Error('not implemented'); }
   verifyWebhook(_rawBody, _headers) { throw new Error('not implemented'); }
 }
 

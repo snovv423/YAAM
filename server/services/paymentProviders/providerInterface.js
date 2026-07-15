@@ -21,9 +21,13 @@
  *   -> 'pending' | 'succeeded' | 'failed'
  *   Опрос статуса (используется как запасной путь, если webhook не пришёл).
  *
- * refund(providerPaymentId, amount)
+ * refund(providerPaymentId, amount, idempotencyKey)
  *   -> { refundId, status: 'succeeded' | 'failed' }
- *   Частичный или полный возврат.
+ *   Полный возврат (частичные возвраты вне MVP). idempotencyKey обязателен —
+ *   тот же принцип, что у createPayment: устойчивый серверный ключ конкретной
+ *   попытки возврата, реальный провайдер обязан передать его в свой
+ *   idempotency-заголовок, чтобы повтор (после таймаута/обрыва связи) не создал
+ *   второй реальный возврат денег.
  *
  * verifyWebhook(rawBody, headers)
  *   -> { providerPaymentId, status } | null
@@ -33,7 +37,7 @@
 class PaymentProviderInterface {
   async createPayment(_params) { throw new Error('not implemented'); }
   async getStatus(_providerPaymentId) { throw new Error('not implemented'); }
-  async refund(_providerPaymentId, _amount) { throw new Error('not implemented'); }
+  async refund(_providerPaymentId, _amount, _idempotencyKey) { throw new Error('not implemented'); }
   verifyWebhook(_rawBody, _headers) { throw new Error('not implemented'); }
 }
 
