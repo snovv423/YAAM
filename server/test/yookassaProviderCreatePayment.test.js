@@ -60,11 +60,10 @@ test('конструктор успешно создаёт экземпляр с
   assert.doesNotThrow(() => new YookassaProvider());
 });
 
-test('getStatus/refund/verifyWebhook по-прежнему бросают not implemented (вне scope этой задачи)', async () => {
+test('refund/verifyWebhook по-прежнему бросают not implemented (вне scope этой задачи; getStatus реализован — см. yookassaProviderGetStatus.test.js)', async () => {
   setFakeTestCredentials();
   const YookassaProvider = freshProviderClass();
   const provider = new YookassaProvider();
-  await assert.rejects(() => provider.getStatus('mock_id'), /not implemented/);
   await assert.rejects(() => provider.refund('mock_id', 300, 'key'), /not implemented/);
   assert.throws(() => provider.verifyWebhook('{}', {}), /not implemented/);
 });

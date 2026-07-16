@@ -64,6 +64,43 @@ const {
 //   другой статус (включая валидные для других этапов жизненного цикла —
 //   succeeded/canceled/waiting_for_capture) на ЭТОМ конкретном вызове —
 //   fail-safe UNKNOWN_RESULT, не успех.
+//
+// getStatus(): comparative architecture research перед кодом (не изобретаем
+// заново) — официальная документация ЮKassa (GET /v3/payments/{id}, статусы
+// pending/waiting_for_capture/succeeded/canceled, HTTP 404 code='not_found'
+// "объект создан в другом магазине или содержится опечатка в идентификаторе",
+// cancellation_details.party/reason — 23 документированные причины отмены) +
+// архитектурные паттерны трёх зрелых систем (только как примеры, не как
+// источник истины):
+// - Stripe (PaymentIntent.retrieve): нормализует provider-специфичный статус
+//   в собственный enum, а не пробрасывает "сырую" строку провайдера наружу;
+//   resource_missing (аналог 404) — отдельная, явно отличимая от обычного
+//   декоративного ответа категория ошибки, не молчаливое "не найдено = плохо".
+// - Adyen: чёткое разделение технической ошибки транспорта (нет ответа) и
+//   бизнес-исхода (платёж отклонён) — те же две принципиально разные ветки,
+//   что уже closed в providerErrorTaxonomy.js через isMutatingOperation.
+// - Medusa.js (PaymentProviderService.getStatus): маппит provider-специфичный
+//   статус в общий внутренний словарь (authorized/pending/captured/canceled/
+//   error); НЕИЗВЕСТНЫЙ/непредвиденный provider-статус — не молчаливо
+//   игнорируется и не угадывается, а требует явной обработки (fail-safe,
+//   тот же принцип, что уже применён в createPayment() для status='pending').
+//
+// Вывод из research, применённый ниже: GET — операция ЧТЕНИЯ, не мутирует
+// состояние на стороне провайдера — поэтому classifyProviderError() вызывается
+// с isMutatingOperation:false (см. JSDoc в providerErrorTaxonomy.js: для
+// операции чтения транспортная неопределённость — RETRYABLE, не
+// UNKNOWN_RESULT, т.к. нечего сверять, можно просто повторить запрос).
+// HTTP 404 — по официальной семантике ("не найден/чужой магазин") — НЕ
+// приравнивается молча к нормализованному статусу 'failed': если у нас уже
+// есть providerPaymentId от собственного ранее успешного createPayment(),
+// повторный 404 на НЕГО — это красный флаг (рассинхронизация credentials/
+// окружения или повреждение данных), а не бизнес-факт "платёж не удался".
+// В отличие от mockProvider.getStatus() (который для демо-простоты трактует
+// отсутствие записи как 'failed') — реальный провайдер, работающий с
+// настоящими деньгами, обязан здесь fail-loud, а не угадывать: 404
+// классифицируется через существующую taxonomy (NOT_FOUND,
+// needsReconciliation:true) и бросается как ошибка, не возвращается как
+// нормализованный статус.
 const YOOKASSA_API_BASE_URL = 'https://api.yookassa.ru/v3';
 
 // Официальные лимиты ЮKassa для СБП (перепроверено на странице интеграции
@@ -95,6 +132,55 @@ function resolveCreateTimeoutMs() {
     : 10000;
 }
 
+// Тот же паттерн, что и у providerCreateTimeoutMs()/providerRefundTimeoutMs()
+// в orderService.js (PAYMENT_<OPERATION>_TIMEOUT_MS, диапазон [10, 120000] мс,
+// baseline 10000) — переиспользуем существующую конвенцию именования, не
+// вводим новую. getStatus() пока не вызывается из orderService.js (вне scope
+// этой задачи — только получение и нормализация статуса, без reconciliation/
+// подключения к polling-логике), поэтому здесь только provider-уровневый
+// AbortController-таймаут, без внешнего orderService-уровневого Promise.race.
+function resolveStatusTimeoutMs() {
+  const configured = Number(process.env.PAYMENT_STATUS_TIMEOUT_MS || 10000);
+  return Number.isFinite(configured) && configured >= 10 && configured <= 120000
+    ? configured
+    : 10000;
+}
+
+// Официальные статусы платежа ЮKassa (см. жизненный цикл платежа) и их
+// маппинг в нормализованный 3-значный enum контракта интерфейса
+// (providerInterface.js: 'pending' | 'succeeded' | 'failed'). 'succeeded' —
+// терминальный успех. 'canceled' — терминальный провал (включает ЛЮБУЮ
+// причину из cancellation_details.reason — 23 документированные причины,
+// от 3d_secure_failed до fraud_suspected — интерфейс не поддерживает передачу
+// конкретной причины дальше, только сам факт отмены; для СБП без
+// payment_method_data ограничений это по-прежнему безопасно, т.к. 'canceled'
+// у ЮKassa всегда терминален и однозначен независимо от причины). 'pending' и
+// 'waiting_for_capture' — оба ещё НЕ финальны (waiting_for_capture возможен
+// только теоретически при capture=true, если списание почему-то ещё не
+// произошло атомарно вместе с подтверждением — MVP всегда шлёт capture=true,
+// но провайдер не должен полагаться на то, что сам гарантировал, поэтому этот
+// статус явно обработан, а не проигнорирован) — оба маппятся в 'pending', не
+// в 'succeeded': до 'succeeded' деньги ещё не считаются окончательно списанными.
+const YOOKASSA_STATUS_TO_NORMALIZED = Object.freeze({
+  pending: 'pending',
+  waiting_for_capture: 'pending',
+  succeeded: 'succeeded',
+  canceled: 'failed',
+});
+
+// Неизвестный/будущий статус (ЮKassa может добавить новый статус, которого
+// нет в документации на момент написания) — НЕ угадываем ни 'succeeded', ни
+// 'failed': оба варианта потенциально опасны (первый рискует деньгами
+// ресторана, второй — необоснованной отменой реально идущего заказа).
+// Тот же fail-safe принцип, что уже применён к response.status в
+// createPayment() и подтверждён паттерном Medusa.js (getPaymentStatus не
+// угадывает неизвестный provider-статус, а требует явной обработки).
+function normalizeStatus(rawStatus) {
+  return Object.prototype.hasOwnProperty.call(YOOKASSA_STATUS_TO_NORMALIZED, rawStatus)
+    ? YOOKASSA_STATUS_TO_NORMALIZED[rawStatus]
+    : null;
+}
+
 // Ошибка конфигурации — недостижима с валидными ENV, fail-closed по тому же
 // принципу, что и отсутствующий YOOKASSA_SHOP_ID/SECRET_KEY в конструкторе.
 class YookassaConfigurationError extends Error {
@@ -118,15 +204,34 @@ class YookassaCreatePaymentError extends Error {
   }
 }
 
+// Аналог YookassaCreatePaymentError, но для getStatus(). Отдельный класс, а
+// не переименование существующего в operation-agnostic: YookassaCreatePaymentError
+// уже прошла независимое review и опубликована (claude/yookassa-create-payment),
+// 47 существующих тестов проверяют err.name==='YookassaCreatePaymentError' —
+// трогать её ради одного слова в сообщении означало бы риск регресса уже
+// проверенного и опубликованного кода без необходимости. Три похожих строки
+// дешевле преждевременной общей абстракции (см. CLAUDE.md).
+class YookassaGetStatusError extends Error {
+  constructor(category, context) {
+    super('Платёжный сервис вернул ошибку при получении статуса платежа');
+    this.name = 'YookassaGetStatusError';
+    this.category = category;
+    this.rules = CATEGORY_RULES[category];
+    this.context = context;
+  }
+}
+
 // Локальная (до-сетевая) payload-ошибка — на нашей стороне, провайдер не
 // вызывался вообще. Категория FATAL_REQUEST точно отражает семантику из
 // providerErrorTaxonomy.js: retryable:false, sameIdempotencyKey:false (после
-// исправления payload нужен НОВЫЙ ключ, а не повтор со старым — старый ключ
-// официально считается использованным для предыдущей, пусть и невалидной,
-// попытки). Не заводим отдельный класс/категорию ради одной локальной
-// проверки — переиспользуем существующую таксономию как и просит review.
-function localValidationError(operation, orderId, reason) {
-  return new YookassaCreatePaymentError(CATEGORIES.FATAL_REQUEST, { operation, orderId, reason });
+// исправления payload нужен НОВЫЙ ключ/значение, а не повтор со старым).
+// Не заводим отдельный класс/категорию ради локальной проверки — переиспользуем
+// существующую таксономию. ErrorClass параметризована (не хардкожен
+// YookassaCreatePaymentError): getStatus()'s providerPaymentId-валидация
+// использует тот же helper, но должна бросать YookassaGetStatusError, чтобы
+// имя ошибки было консистентно предсказуемым для конкретной операции.
+function localValidationError(operation, context, reason, ErrorClass = YookassaCreatePaymentError) {
+  return new ErrorClass(CATEGORIES.FATAL_REQUEST, { operation, ...context, reason });
 }
 
 // amount приходит от вызывающего кода (paymentService.js) как число рублей.
@@ -135,14 +240,14 @@ function localValidationError(operation, orderId, reason) {
 // fail-closed проверка ключей/return_url в конструкторе/createPayment).
 function validateAmount(amount, orderId) {
   if (typeof amount !== 'number' || !Number.isFinite(amount)) {
-    throw localValidationError('createPayment', orderId, 'amount должен быть конечным числом');
+    throw localValidationError('createPayment', { orderId }, 'amount должен быть конечным числом');
   }
   if (amount <= 0) {
-    throw localValidationError('createPayment', orderId, 'amount должен быть строго больше нуля');
+    throw localValidationError('createPayment', { orderId }, 'amount должен быть строго больше нуля');
   }
   if (amount < SBP_MIN_AMOUNT_RUB || amount > SBP_MAX_AMOUNT_RUB) {
     throw localValidationError(
-      'createPayment', orderId,
+      'createPayment', { orderId },
       `amount вне поддерживаемого диапазона ЮKassa для СБП (${SBP_MIN_AMOUNT_RUB}..${SBP_MAX_AMOUNT_RUB} руб.)`,
     );
   }
@@ -150,7 +255,7 @@ function validateAmount(amount, orderId) {
   // представление числа (не умножение на 100) специально выбрано, чтобы не
   // зависеть от погрешности плавающей точки при умножении/делении.
   if (!/^\d+(\.\d{1,2})?$/.test(String(amount))) {
-    throw localValidationError('createPayment', orderId, 'amount не может иметь больше двух знаков после запятой');
+    throw localValidationError('createPayment', { orderId }, 'amount не может иметь больше двух знаков после запятой');
   }
 }
 
@@ -160,20 +265,33 @@ function validateAmount(amount, orderId) {
 // нормализовать/обрезать значение перед отправкой в заголовке.
 function validateIdempotencyKey(idempotencyKey, orderId) {
   if (typeof idempotencyKey !== 'string') {
-    throw localValidationError('createPayment', orderId, 'idempotencyKey должен быть строкой');
+    throw localValidationError('createPayment', { orderId }, 'idempotencyKey должен быть строкой');
   }
   if (idempotencyKey.trim().length === 0) {
-    throw localValidationError('createPayment', orderId, 'idempotencyKey не может быть пустым');
+    throw localValidationError('createPayment', { orderId }, 'idempotencyKey не может быть пустым');
   }
   if (idempotencyKey.length > IDEMPOTENCE_KEY_MAX_LENGTH) {
     throw localValidationError(
-      'createPayment', orderId,
+      'createPayment', { orderId },
       `idempotencyKey длиннее ${IDEMPOTENCE_KEY_MAX_LENGTH} символов (официальный лимит ЮKassa)`,
     );
   }
   // eslint-disable-next-line no-control-regex
   if (/[\x00-\x1f\x7f]/.test(idempotencyKey)) {
-    throw localValidationError('createPayment', orderId, 'idempotencyKey содержит недопустимые управляющие символы');
+    throw localValidationError('createPayment', { orderId }, 'idempotencyKey содержит недопустимые управляющие символы');
+  }
+}
+
+// providerPaymentId уже гарантированно непустая строка на уровне
+// paymentService.js (хранится как payments.provider_payment_id из
+// собственного успешного createPayment()), но provider, вызванный напрямую,
+// не должен молча доверять этому — тот же defense-in-depth принцип, что и у
+// validateAmount()/validateIdempotencyKey().
+function validateProviderPaymentId(providerPaymentId) {
+  if (typeof providerPaymentId !== 'string' || providerPaymentId.trim().length === 0) {
+    throw localValidationError(
+      'getStatus', { providerPaymentId }, 'providerPaymentId должен быть непустой строкой', YookassaGetStatusError,
+    );
   }
 }
 
@@ -345,12 +463,94 @@ class YookassaProvider extends PaymentProviderInterface {
     };
   }
 
-  _toError(category, context) {
+  // ErrorClass параметризована (backward-compatible default = createPayment'а
+  // класс) — существующие вызовы из createPayment() не меняются ни поведением,
+  // ни сигнатурой вызова.
+  _toError(category, context, ErrorClass = YookassaCreatePaymentError) {
     if (category === CATEGORIES.UNKNOWN_RESULT) return new ProviderResultUnknownError(context);
-    return new YookassaCreatePaymentError(category, context);
+    return new ErrorClass(category, context);
   }
 
-  async getStatus(_providerPaymentId) { throw new Error('not implemented'); }
+  async getStatus(providerPaymentId) {
+    validateProviderPaymentId(providerPaymentId);
+
+    const controller = new AbortController();
+    const timeoutMs = resolveStatusTimeoutMs();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    let response;
+    try {
+      response = await fetch(`${YOOKASSA_API_BASE_URL}/payments/${encodeURIComponent(providerPaymentId)}`, {
+        method: 'GET',
+        headers: { Authorization: this._authHeader() },
+        signal: controller.signal,
+      });
+    } catch (err) {
+      clearTimeout(timer);
+      const isTimeout = err?.name === 'AbortError';
+      // GET — операция чтения: isMutatingOperation:false (см. комментарий в
+      // начале файла — вывод comparative research). Транспортная
+      // неопределённость здесь RETRYABLE, не UNKNOWN_RESULT: нечего сверять,
+      // можно просто повторить запрос на чтение.
+      const category = classifyProviderError({
+        isTimeout,
+        isNetworkError: !isTimeout,
+        isMutatingOperation: false,
+      });
+      throw this._toError(
+        category, { operation: 'getStatus', providerPaymentId, cause: err?.name || 'Error' }, YookassaGetStatusError,
+      );
+    }
+    clearTimeout(timer);
+
+    let parsedBody;
+    let isMalformed = false;
+    try {
+      parsedBody = await response.json();
+    } catch {
+      isMalformed = true;
+    }
+
+    if (!isMalformed && response.ok) {
+      // Тот же fail-loud принцип, что и в createPayment(): успешный HTTP-статус
+      // ещё не значит, что телу можно доверять. id — непустая строка (не просто
+      // typeof==='string' — извлечённый вывод из предыдущего review createPayment,
+      // применённый здесь сразу, а не как отложенный технический долг).
+      const hasExpectedShape = typeof parsedBody?.id === 'string' && parsedBody.id.length > 0
+        && typeof parsedBody?.status === 'string';
+      if (!hasExpectedShape) isMalformed = true;
+    }
+
+    if (isMalformed) {
+      const category = classifyProviderError({ isMalformed: true, isMutatingOperation: false });
+      throw this._toError(
+        category, { operation: 'getStatus', providerPaymentId, httpStatus: response.status }, YookassaGetStatusError,
+      );
+    }
+
+    if (!response.ok) {
+      // HTTP 404 (официально: code='not_found', "объект создан в другом
+      // магазине или содержится опечатка в идентификаторе") тоже проходит
+      // здесь — classifyProviderError уже классифицирует его как NOT_FOUND.
+      // Осознанно НЕ трактуем это как нормализованный статус 'failed' — см.
+      // обоснование в комментарии в начале файла (comparative research).
+      const category = classifyProviderError({ httpStatus: response.status, isMutatingOperation: false });
+      throw this._toError(
+        category, { operation: 'getStatus', providerPaymentId, httpStatus: response.status }, YookassaGetStatusError,
+      );
+    }
+
+    const normalized = normalizeStatus(parsedBody.status);
+    if (normalized === null) {
+      // Неизвестный/будущий provider-статус — не угадываем (см. normalizeStatus).
+      const category = classifyProviderError({ isMalformed: true, isMutatingOperation: false });
+      throw this._toError(
+        category, { operation: 'getStatus', providerPaymentId, httpStatus: response.status }, YookassaGetStatusError,
+      );
+    }
+    return normalized;
+  }
+
   async refund(_providerPaymentId, _amount, _idempotencyKey) { throw new Error('not implemented'); }
   verifyWebhook(_rawBody, _headers) { throw new Error('not implemented'); }
 }
