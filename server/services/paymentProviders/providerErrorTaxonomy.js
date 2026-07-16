@@ -203,23 +203,46 @@ class ProviderResultUnknownError extends Error {
 // вообще (проверяет уже готовое тело), а reconciliation может сравнивать
 // два самостоятельно полученных объекта, а не HTTP-ответ напрямую.
 //
+// idField (найдено при реализации createRefund(), YAAM-yookassa-create-refund-
+// implementation-report.pdf): изначально helper всегда сравнивал requestedId
+// с response.id — верно для getStatus (response.id — СОБСТВЕННАЯ identity
+// запрошенного платежа). Но у Refund два разных id: refund.id — собственная
+// identity НОВОГО объекта (мы её не запрашивали, ЮKassa сама назначает — этой
+// проверке не подлежит), и refund.payment_id — ССЫЛКА на исходный платёж,
+// который мы как раз и запрашивали. Простой if внутри createRefund() уже
+// покрыл бы этот случай, но семантика идентична — "проверить, что поле
+// ответа с заданным именем совпадает с ожидаемым id", просто под другим
+// именем поля — поэтому здесь не новый helper, а обратно-совместимый
+// параметр у уже существующего: opts.idField по умолчанию 'id' (поведение
+// для getStatus не меняется ни на бит), явно 'payment_id' для createRefund.
+// Пригодится так же для getRefund() (сверка response.id как у getStatus) и
+// для webhook verification (сверка object.id/object.payment_id с локально
+// известным id ДО того, как событие будет принято) — тот же класс риска.
+//
 // @param {string} requestedId — id, который был запрошен/ожидается.
 // @param {unknown} response — уже распарсенное тело ответа провайдера.
 // @param {object} [context] — дополнительные безопасные для лога поля
 //   (operation/httpStatus и т.п.) — сливаются в context брошенной ошибки как
 //   есть; helper их не задаёт сам, чтобы не привязываться к HTTP-специфике.
+// @param {object} [opts]
+// @param {string} [opts.idField='id'] — имя поля в response, которое должно
+//   совпасть с requestedId (например, 'payment_id' для Refund).
 // @throws {ProviderResultUnknownError} если response — не объект (в т.ч.
-//   null/массив), response.id отсутствует/пустой/не строка, или
-//   response.id !== requestedId.
-function assertMatchingProviderObject(requestedId, response, context = {}) {
+//   null/массив), response[idField] отсутствует/пустой/не строка, или
+//   response[idField] !== requestedId.
+function assertMatchingProviderObject(requestedId, response, context = {}, opts = {}) {
+  const idField = opts.idField || 'id';
   const isPlainObject = response !== null && typeof response === 'object' && !Array.isArray(response);
-  const receivedId = isPlainObject ? response.id : undefined;
+  const receivedId = isPlainObject ? response[idField] : undefined;
   const matches = typeof receivedId === 'string' && receivedId.length > 0 && receivedId === requestedId;
   if (matches) return;
   // Несовпадение/отсутствие id — тот же уровень недоверия к ответу, что и
   // malformed body (classifyProviderError: isMalformed всегда -> UNKNOWN_RESULT,
   // см. выше) — получили ответ, но не можем безопасно доверять, что он
-  // относится к запрошенному объекту.
+  // относится к запрошенному объекту. context остаётся requestedId/receivedId
+  // (без idField) — сохраняет уже проверенную, стабильную форму ошибки для
+  // getStatus; вызывающий код может сам добавить уточнение в свой context,
+  // если нужно (см. createRefund()).
   throw new ProviderResultUnknownError({ ...context, requestedId, receivedId });
 }
 

@@ -147,6 +147,48 @@ function resolveStatusTimeoutMs() {
     : 10000;
 }
 
+// PAYMENT_REFUND_TIMEOUT_MS — та же env-переменная, что УЖЕ существует и
+// используется в orderService.js (providerRefundTimeoutMs()) для внешнего
+// Promise.race-таймаута вокруг payments.refundPayment(). Здесь — provider-
+// уровневый AbortController-таймаут (defense-in-depth на другом уровне, тот
+// же принцип, что и у createPayment()/getStatus()). Совпадение имени
+// намеренное — единая точка конфигурации таймаута возврата для всего стека.
+function resolveRefundTimeoutMs() {
+  const configured = Number(process.env.PAYMENT_REFUND_TIMEOUT_MS || 10000);
+  return Number.isFinite(configured) && configured >= 10 && configured <= 120000
+    ? configured
+    : 10000;
+}
+
+// Официальные статусы Refund у ЮKassa — ПЕРЕПРОВЕРЕНО отдельно от Payment
+// тремя независимыми точечными выборками официальной документации перед
+// реализацией createRefund(): в отличие от Payment (pending/waiting_for_capture/
+// succeeded/canceled), у Refund официально документированы ТОЛЬКО ДВА статуса —
+// succeeded и canceled. Ни на одной из проверенных страниц (основы возвратов,
+// общий сценарий возврата, объект Refund) 'pending' не упоминается ни разу —
+// создание возврата, судя по документации, синхронно возвращает финальный
+// исход. Это точно совпадает с уже существующим (не изменяемым в этой задаче)
+// контрактом providerInterface.js: refund() -> {refundId, status: 'succeeded'
+// | 'failed'} — бинарный результат, без 'pending' вообще. 'canceled' -> 'failed'
+// включает ЛЮБУЮ причину cancellation_details.reason (party: yoo_money/
+// refund_network — ДРУГОЙ набор значений, чем у Payment, где есть ещё
+// merchant), в т.ч. insufficient_funds — согласно документации это НЕ HTTP-
+// ошибка, а нормальный canceled-исход внутри успешного 2xx-ответа.
+const YOOKASSA_REFUND_STATUS_TO_NORMALIZED = Object.freeze({
+  succeeded: 'succeeded',
+  canceled: 'failed',
+});
+
+// Неизвестный статус (включая гипотетический 'pending', которого сегодня нет
+// в документации Refund, и 'waiting_for_capture'/'pending', которые
+// документированы только для Payment, не для Refund) — не угадываем, тот же
+// fail-safe принцип, что и normalizeStatus() для getStatus().
+function normalizeRefundStatus(rawStatus) {
+  return Object.prototype.hasOwnProperty.call(YOOKASSA_REFUND_STATUS_TO_NORMALIZED, rawStatus)
+    ? YOOKASSA_REFUND_STATUS_TO_NORMALIZED[rawStatus]
+    : null;
+}
+
 // Официальные статусы платежа ЮKassa (см. жизненный цикл платежа) и их
 // маппинг в нормализованный 3-значный enum контракта интерфейса
 // (providerInterface.js: 'pending' | 'succeeded' | 'failed'). 'succeeded' —
@@ -222,6 +264,20 @@ class YookassaGetStatusError extends Error {
   }
 }
 
+// Аналог для refund() (createRefund в терминологии задачи — фактический
+// метод интерфейса называется refund(), см. providerInterface.js). Тот же
+// принцип, что и у YookassaGetStatusError: отдельный класс, не переименование
+// существующих — ноль риска для уже опубликованных createPayment/getStatus.
+class YookassaRefundError extends Error {
+  constructor(category, context) {
+    super('Платёжный сервис вернул ошибку при создании возврата');
+    this.name = 'YookassaRefundError';
+    this.category = category;
+    this.rules = CATEGORY_RULES[category];
+    this.context = context;
+  }
+}
+
 // Локальная (до-сетевая) payload-ошибка — на нашей стороне, провайдер не
 // вызывался вообще. Категория FATAL_REQUEST точно отражает семантику из
 // providerErrorTaxonomy.js: retryable:false, sameIdempotencyKey:false (после
@@ -235,51 +291,65 @@ function localValidationError(operation, context, reason, ErrorClass = YookassaC
   return new ErrorClass(CATEGORIES.FATAL_REQUEST, { operation, ...context, reason });
 }
 
-// amount приходит от вызывающего кода (paymentService.js) как число рублей.
+// amount приходит от вызывающего кода (paymentService.js) как число рублей —
+// та же семантика для createPayment (сумма платежа) и refund() (сумма
+// возврата): официальный минимум для СБП — 1 руб. для обеих операций,
+// максимум для refund официально не задан отдельно, а ограничен размером
+// исходного платежа (сам provider этого не знает и не обязан — это уже
+// проверено выше по стеку при создании платежа; локально проверяем те же
+// структурные правила, что уже применялись бы к любой валидной СБП-сумме).
 // Проверяем ДО сетевого вызова — провайдер не должен полагаться на то, что
 // выше по стеку это уже сделали (defense-in-depth, тот же принцип, что и
 // fail-closed проверка ключей/return_url в конструкторе/createPayment).
-function validateAmount(amount, orderId) {
+// context/operation/ErrorClass параметризованы (backward-compatible default
+// = createPayment) — второй вызывающий (refund()) передаёт свой context
+// ({providerPaymentId}, не {orderId} — у refund() нет orderId) и свой класс.
+function validateAmount(amount, context = {}, operation = 'createPayment', ErrorClass = YookassaCreatePaymentError) {
   if (typeof amount !== 'number' || !Number.isFinite(amount)) {
-    throw localValidationError('createPayment', { orderId }, 'amount должен быть конечным числом');
+    throw localValidationError(operation, context, 'amount должен быть конечным числом', ErrorClass);
   }
   if (amount <= 0) {
-    throw localValidationError('createPayment', { orderId }, 'amount должен быть строго больше нуля');
+    throw localValidationError(operation, context, 'amount должен быть строго больше нуля', ErrorClass);
   }
   if (amount < SBP_MIN_AMOUNT_RUB || amount > SBP_MAX_AMOUNT_RUB) {
     throw localValidationError(
-      'createPayment', { orderId },
+      operation, context,
       `amount вне поддерживаемого диапазона ЮKassa для СБП (${SBP_MIN_AMOUNT_RUB}..${SBP_MAX_AMOUNT_RUB} руб.)`,
+      ErrorClass,
     );
   }
   // Ровно два знака после запятой — без скрытого округления. Строковое
   // представление числа (не умножение на 100) специально выбрано, чтобы не
   // зависеть от погрешности плавающей точки при умножении/делении.
   if (!/^\d+(\.\d{1,2})?$/.test(String(amount))) {
-    throw localValidationError('createPayment', { orderId }, 'amount не может иметь больше двух знаков после запятой');
+    throw localValidationError(operation, context, 'amount не может иметь больше двух знаков после запятой', ErrorClass);
   }
 }
 
-// idempotencyKey уже проверяется в paymentService.js выше по стеку, но
+// idempotencyKey уже проверяется в paymentService.js выше по стеку (и для
+// createPayment, и для refund() — см. paymentService.refundPayment()), но
 // провайдер, вызванный напрямую (в обход paymentService.js — например, из
 // теста или будущего кода), не должен молча доверять этому и не должен молча
-// нормализовать/обрезать значение перед отправкой в заголовке.
-function validateIdempotencyKey(idempotencyKey, orderId) {
+// нормализовать/обрезать значение перед отправкой в заголовке. Официальные
+// правила Idempotence-Key (макс. 64 символа) одинаковы для любой операции —
+// не переоткрываем их отдельно для refund.
+function validateIdempotencyKey(idempotencyKey, context = {}, operation = 'createPayment', ErrorClass = YookassaCreatePaymentError) {
   if (typeof idempotencyKey !== 'string') {
-    throw localValidationError('createPayment', { orderId }, 'idempotencyKey должен быть строкой');
+    throw localValidationError(operation, context, 'idempotencyKey должен быть строкой', ErrorClass);
   }
   if (idempotencyKey.trim().length === 0) {
-    throw localValidationError('createPayment', { orderId }, 'idempotencyKey не может быть пустым');
+    throw localValidationError(operation, context, 'idempotencyKey не может быть пустым', ErrorClass);
   }
   if (idempotencyKey.length > IDEMPOTENCE_KEY_MAX_LENGTH) {
     throw localValidationError(
-      'createPayment', { orderId },
+      operation, context,
       `idempotencyKey длиннее ${IDEMPOTENCE_KEY_MAX_LENGTH} символов (официальный лимит ЮKassa)`,
+      ErrorClass,
     );
   }
   // eslint-disable-next-line no-control-regex
   if (/[\x00-\x1f\x7f]/.test(idempotencyKey)) {
-    throw localValidationError('createPayment', { orderId }, 'idempotencyKey содержит недопустимые управляющие символы');
+    throw localValidationError(operation, context, 'idempotencyKey содержит недопустимые управляющие символы', ErrorClass);
   }
 }
 
@@ -287,12 +357,12 @@ function validateIdempotencyKey(idempotencyKey, orderId) {
 // paymentService.js (хранится как payments.provider_payment_id из
 // собственного успешного createPayment()), но provider, вызванный напрямую,
 // не должен молча доверять этому — тот же defense-in-depth принцип, что и у
-// validateAmount()/validateIdempotencyKey().
-function validateProviderPaymentId(providerPaymentId) {
+// validateAmount()/validateIdempotencyKey(). operation/ErrorClass
+// параметризованы (backward-compatible default = getStatus, единственный
+// вызывающий на момент введения этой функции) — refund() передаёт свои.
+function validateProviderPaymentId(providerPaymentId, operation = 'getStatus', ErrorClass = YookassaGetStatusError) {
   if (typeof providerPaymentId !== 'string' || providerPaymentId.trim().length === 0) {
-    throw localValidationError(
-      'getStatus', { providerPaymentId }, 'providerPaymentId должен быть непустой строкой', YookassaGetStatusError,
-    );
+    throw localValidationError(operation, { providerPaymentId }, 'providerPaymentId должен быть непустой строкой', ErrorClass);
   }
 }
 
@@ -355,8 +425,8 @@ class YookassaProvider extends PaymentProviderInterface {
     // (в обход paymentService.js), не должен молча доверять этому: локальная
     // fail-closed проверка ниже — defense-in-depth, не дублирование бизнес-
     // логики (см. комментарий к localValidationError выше).
-    validateAmount(amount, orderId);
-    validateIdempotencyKey(idempotencyKey, orderId);
+    validateAmount(amount, { orderId });
+    validateIdempotencyKey(idempotencyKey, { orderId });
 
     const returnUrl = process.env.YOOKASSA_RETURN_URL;
     if (!returnUrl) {
@@ -564,7 +634,147 @@ class YookassaProvider extends PaymentProviderInterface {
     return normalized;
   }
 
-  async refund(_providerPaymentId, _amount, _idempotencyKey) { throw new Error('not implemented'); }
+  // "createRefund" в терминологии задачи — фактический метод существующего
+  // provider interface называется refund() (providerInterface.js), позиционные
+  // аргументы (providerPaymentId, amount, idempotencyKey), возврат
+  // {refundId, status: 'succeeded'|'failed'}. Не переименован и не изменена
+  // сигнатура — уже вызывается из paymentService.refundPayment(), которая (как
+  // и создание платежа) сама уже проверяет idempotencyKey до вызова провайдера;
+  // локальная валидация ниже — defense-in-depth, тот же принцип, что и в
+  // createPayment()/getStatus().
+  async refund(providerPaymentId, amount, idempotencyKey) {
+    validateProviderPaymentId(providerPaymentId, 'refund', YookassaRefundError);
+    validateAmount(amount, { providerPaymentId }, 'refund', YookassaRefundError);
+    validateIdempotencyKey(idempotencyKey, { providerPaymentId }, 'refund', YookassaRefundError);
+
+    const requestBody = {
+      payment_id: providerPaymentId,
+      amount: { value: amount.toFixed(2), currency: 'RUB' },
+    };
+    // Официальный минимальный пример тела запроса POST /v3/refunds
+    // (перепроверено точечно перед реализацией): только payment_id и amount —
+    // description НЕ подтверждён документацией для возврата (в отличие от
+    // createPayment, где он есть), поэтому не добавляется. metadata тоже не
+    // добавлена: существующий interface не передаёт в refund() никакого
+    // внутреннего id попытки возврата (только providerPaymentId/amount/
+    // idempotencyKey) — добавлять здесь нечего, придумывать новый id внутри
+    // provider для metadata было бы созданием identity, которого durable
+    // refund idempotency key (см. orderService.newProviderIdempotencyKey())
+    // уже и так безопасно решает на уровне вызывающего кода.
+
+    const controller = new AbortController();
+    const timeoutMs = resolveRefundTimeoutMs();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    let response;
+    try {
+      response = await fetch(`${YOOKASSA_API_BASE_URL}/refunds`, {
+        method: 'POST',
+        headers: {
+          Authorization: this._authHeader(),
+          'Content-Type': 'application/json',
+          'Idempotence-Key': idempotencyKey,
+        },
+        body: JSON.stringify(requestBody),
+        signal: controller.signal,
+      });
+    } catch (err) {
+      clearTimeout(timer);
+      const isTimeout = err?.name === 'AbortError';
+      // refund() — мутирующая операция (создаёт реальный возврат денег),
+      // ровно как createPayment(): isMutatingOperation:true — транспортная
+      // неопределённость здесь ВСЕГДА UNKNOWN_RESULT (провайдер мог успеть
+      // создать возврат несмотря на неудачный ответ), не RETRYABLE, в отличие
+      // от getStatus() (чтение, нечего сверять).
+      const category = classifyProviderError({
+        isTimeout,
+        isNetworkError: !isTimeout,
+        isMutatingOperation: true,
+      });
+      throw this._toError(
+        category, { operation: 'refund', providerPaymentId, cause: err?.name || 'Error' }, YookassaRefundError,
+      );
+    }
+    clearTimeout(timer);
+
+    let parsedBody;
+    let isMalformed = false;
+    try {
+      parsedBody = await response.json();
+    } catch {
+      isMalformed = true;
+    }
+
+    if (!isMalformed && response.ok) {
+      // refund.id — СОБСТВЕННАЯ identity нового объекта, назначенная ЮKassa —
+      // мы её не запрашивали заранее, поэтому здесь только проверка формы
+      // (непустая строка), не identity-сверка (assertMatchingProviderObject
+      // сравнивает с requestedId, а тут просто нечего сравнивать).
+      const hasRefundId = typeof parsedBody?.id === 'string' && parsedBody.id.length > 0;
+      if (!hasRefundId) {
+        isMalformed = true;
+      } else {
+        // refund.payment_id — ССЫЛКА на исходный платёж, который мы как раз
+        // запрашивали (providerPaymentId) — это именно тот случай, для
+        // которого assertMatchingProviderObject() спроектирован, просто под
+        // другим именем поля (idField:'payment_id', не 'id' по умолчанию).
+        // Бросает ProviderResultUnknownError сам при отсутствии/несовпадении.
+        assertMatchingProviderObject(
+          providerPaymentId, parsedBody, { operation: 'refund', httpStatus: response.status }, { idField: 'payment_id' },
+        );
+        // amount/currency — best-effort defense-in-depth: официальная
+        // документация НЕ гарантирует явно эхо запрошенной суммы в ответе
+        // (в отличие от подтверждённого статус-контракта createPayment), но
+        // ответ с суммой/валютой, не совпадающей с запрошенной, — та же
+        // степень недоверия, что и id-несовпадение.
+        const responseAmountValue = parsedBody?.amount?.value;
+        const responseCurrency = parsedBody?.amount?.currency;
+        if (responseAmountValue !== amount.toFixed(2) || responseCurrency !== 'RUB') {
+          isMalformed = true;
+        }
+      }
+    }
+
+    if (isMalformed) {
+      const category = classifyProviderError({ isMalformed: true, isMutatingOperation: true });
+      throw this._toError(
+        category, { operation: 'refund', providerPaymentId, httpStatus: response.status }, YookassaRefundError,
+      );
+    }
+
+    if (!response.ok) {
+      // HTTP 404/409/429/401/403/400/415/5xx классифицируются существующей
+      // taxonomy без специального маппинга под refund — официальные коды
+      // ошибок ЮKassa (invalid_request/invalid_credentials/forbidden/
+      // not_found/too_many_requests/internal_server_error) идентичны для
+      // POST /v3/payments и POST /v3/refunds (общий HTTP-уровень API).
+      // Недостаток средств для возврата и превышение доступного остатка —
+      // согласно документации НЕ отдельные HTTP-коды, а обычный canceled-исход
+      // внутри успешного 2xx-ответа (см. normalizeRefundStatus выше) —
+      // отдельного маппинга для них здесь намеренно нет, они уже безопасно
+      // проходят через 'canceled' -> 'failed'.
+      const category = classifyProviderError({ httpStatus: response.status, isMutatingOperation: true });
+      throw this._toError(
+        category, { operation: 'refund', providerPaymentId, httpStatus: response.status }, YookassaRefundError,
+      );
+    }
+
+    const normalized = normalizeRefundStatus(parsedBody.status);
+    if (normalized === null) {
+      // Неизвестный/будущий refund-статус (в т.ч. гипотетический 'pending',
+      // не документированный сегодня для Refund) — не угадываем.
+      const category = classifyProviderError({ isMalformed: true, isMutatingOperation: true });
+      throw this._toError(
+        category, { operation: 'refund', providerPaymentId, httpStatus: response.status }, YookassaRefundError,
+      );
+    }
+
+    // Нормализованный контракт — строго по существующему providerInterface.js
+    // (refundId, не providerRefundId: уже вызывается из
+    // orderService.ensureRefundReady(), которая читает именно result.refundId).
+    // Никакого сырого provider body, credentials, idempotency key наружу.
+    return { refundId: parsedBody.id, status: normalized };
+  }
   verifyWebhook(_rawBody, _headers) { throw new Error('not implemented'); }
 }
 
