@@ -44,7 +44,42 @@ const {
 // type = 'redirect' (пользователь либо сканирует QR на десктопе, либо
 // выбирает банк на мобильном — то и другое отображается на СТОРОНЕ ЮKassa
 // после редиректа, не строится нами). Используется здесь.
+//
+// fix(payments): enforce SBP create payment contract — исправления по
+// результатам независимого pre-push review commit 333c951 (см.
+// YAAM-yookassa-createpayment-pre-push-review.pdf):
+// - HIGH: request body не форсировал СБП (payment_method_data отсутствовал) —
+//   добавлено ниже, точный формат подтверждён повторным fetch официальной
+//   страницы интеграции СБП: { "type": "sbp" }, без дополнительных вложенных
+//   полей ("В request можно передавать любые другие параметры, кроме
+//   payment_method_id, payment_token, airline").
+// - MEDIUM: amount/idempotencyKey не валидировались локально до сетевого
+//   вызова — validateAmount()/validateIdempotencyKey() ниже, fail-closed до
+//   fetch, категория FATAL_REQUEST (payload-проблема на нашей стороне,
+//   retryable:false, sameIdempotencyKey:false — см. providerErrorTaxonomy.js).
+// - MEDIUM: response.status валидировался только как typeof==='string', не
+//   как конкретное ожидаемое значение — официальная документация жизненного
+//   цикла платежа подтверждает: 'pending' — единственный корректный статус
+//   в ответе на POST /v3/payments, независимо от способа оплаты. Любой
+//   другой статус (включая валидные для других этапов жизненного цикла —
+//   succeeded/canceled/waiting_for_capture) на ЭТОМ конкретном вызове —
+//   fail-safe UNKNOWN_RESULT, не успех.
 const YOOKASSA_API_BASE_URL = 'https://api.yookassa.ru/v3';
+
+// Официальные лимиты ЮKassa для СБП (перепроверено на странице интеграции
+// СБП): минимум 1 рубль, максимум 700 000 рублей (порог можно увеличить
+// только через менеджера ЮKassa — здесь фиксируем стандартный документированный
+// диапазон, не пытаемся угадывать индивидуальные лимиты конкретного магазина).
+const SBP_MIN_AMOUNT_RUB = 1;
+const SBP_MAX_AMOUNT_RUB = 700000;
+
+// Официальный лимит Idempotence-Key (см. "Формат взаимодействия" в
+// документации ЮKassa): "Длина не больше 64 символов". Минимальная длина и
+// допустимый набор символов официально не оговорены — единственное
+// дополнительное ограничение ниже (запрет управляющих символов) добавлено не
+// как требование ЮKassa, а как defense-in-depth против HTTP header injection
+// через сырое значение, которое напрямую становится значением заголовка.
+const IDEMPOTENCE_KEY_MAX_LENGTH = 64;
 
 // Тот же env var и та же защитная логика диапазона, что уже использует
 // providerCreateTimeoutMs() в orderService.js (10 baseline, [10, 120000] мс) —
@@ -83,6 +118,100 @@ class YookassaCreatePaymentError extends Error {
   }
 }
 
+// Локальная (до-сетевая) payload-ошибка — на нашей стороне, провайдер не
+// вызывался вообще. Категория FATAL_REQUEST точно отражает семантику из
+// providerErrorTaxonomy.js: retryable:false, sameIdempotencyKey:false (после
+// исправления payload нужен НОВЫЙ ключ, а не повтор со старым — старый ключ
+// официально считается использованным для предыдущей, пусть и невалидной,
+// попытки). Не заводим отдельный класс/категорию ради одной локальной
+// проверки — переиспользуем существующую таксономию как и просит review.
+function localValidationError(operation, orderId, reason) {
+  return new YookassaCreatePaymentError(CATEGORIES.FATAL_REQUEST, { operation, orderId, reason });
+}
+
+// amount приходит от вызывающего кода (paymentService.js) как число рублей.
+// Проверяем ДО сетевого вызова — провайдер не должен полагаться на то, что
+// выше по стеку это уже сделали (defense-in-depth, тот же принцип, что и
+// fail-closed проверка ключей/return_url в конструкторе/createPayment).
+function validateAmount(amount, orderId) {
+  if (typeof amount !== 'number' || !Number.isFinite(amount)) {
+    throw localValidationError('createPayment', orderId, 'amount должен быть конечным числом');
+  }
+  if (amount <= 0) {
+    throw localValidationError('createPayment', orderId, 'amount должен быть строго больше нуля');
+  }
+  if (amount < SBP_MIN_AMOUNT_RUB || amount > SBP_MAX_AMOUNT_RUB) {
+    throw localValidationError(
+      'createPayment', orderId,
+      `amount вне поддерживаемого диапазона ЮKassa для СБП (${SBP_MIN_AMOUNT_RUB}..${SBP_MAX_AMOUNT_RUB} руб.)`,
+    );
+  }
+  // Ровно два знака после запятой — без скрытого округления. Строковое
+  // представление числа (не умножение на 100) специально выбрано, чтобы не
+  // зависеть от погрешности плавающей точки при умножении/делении.
+  if (!/^\d+(\.\d{1,2})?$/.test(String(amount))) {
+    throw localValidationError('createPayment', orderId, 'amount не может иметь больше двух знаков после запятой');
+  }
+}
+
+// idempotencyKey уже проверяется в paymentService.js выше по стеку, но
+// провайдер, вызванный напрямую (в обход paymentService.js — например, из
+// теста или будущего кода), не должен молча доверять этому и не должен молча
+// нормализовать/обрезать значение перед отправкой в заголовке.
+function validateIdempotencyKey(idempotencyKey, orderId) {
+  if (typeof idempotencyKey !== 'string') {
+    throw localValidationError('createPayment', orderId, 'idempotencyKey должен быть строкой');
+  }
+  if (idempotencyKey.trim().length === 0) {
+    throw localValidationError('createPayment', orderId, 'idempotencyKey не может быть пустым');
+  }
+  if (idempotencyKey.length > IDEMPOTENCE_KEY_MAX_LENGTH) {
+    throw localValidationError(
+      'createPayment', orderId,
+      `idempotencyKey длиннее ${IDEMPOTENCE_KEY_MAX_LENGTH} символов (официальный лимит ЮKassa)`,
+    );
+  }
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1f\x7f]/.test(idempotencyKey)) {
+    throw localValidationError('createPayment', orderId, 'idempotencyKey содержит недопустимые управляющие символы');
+  }
+}
+
+// LOW-усиление: YOOKASSA_RETURN_URL — операторская конфигурация, не ввод
+// пользователя, но всё равно должна быть валидным URL; в production —
+// обязательно https (redirect с реальными деньгами не должен идти на http).
+function validateReturnUrl(returnUrl) {
+  let parsed;
+  try {
+    parsed = new URL(returnUrl);
+  } catch {
+    throw new YookassaConfigurationError('YOOKASSA_RETURN_URL не является валидным URL');
+  }
+  const isProduction = process.env.NODE_ENV === 'production';
+  if (isProduction && parsed.protocol !== 'https:') {
+    throw new YookassaConfigurationError('YOOKASSA_RETURN_URL должен использовать https в production');
+  }
+  if (!isProduction && parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw new YookassaConfigurationError('YOOKASSA_RETURN_URL должен использовать http или https');
+  }
+}
+
+// LOW-усиление: confirmation_url приходит от провайдера, но мы не должны
+// вслепую доверять протоколу перед тем, как передать его клиенту для
+// редиректа (window.location.href на стороне client/js/app.js). Проверяем
+// только протокол (https) — сознательно НЕ вводим allowlist конкретных
+// доменов ЮKassa: их набор официально не зафиксирован как исчерпывающий и
+// может измениться, а хрупкий allowlist сломается тише, чем отсутствие
+// проверки протокола решает реальную угрозу (javascript:/data:/file:).
+function isHttpsUrl(value) {
+  if (typeof value !== 'string') return false;
+  try {
+    return new URL(value).protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 class YookassaProvider extends PaymentProviderInterface {
   constructor() {
     super();
@@ -101,10 +230,15 @@ class YookassaProvider extends PaymentProviderInterface {
   }
 
   async createPayment({ orderId, amount, description, idempotencyKey }) {
-    // idempotencyKey уже гарантированно непустая строка — проверено на
-    // уровне paymentService.createPayment() до вызова любого провайдера
-    // (см. server/services/paymentService.js); повторная проверка здесь была
-    // бы избыточной защитой поверх уже существующей.
+    // idempotencyKey и amount УЖЕ проверяются на уровне
+    // paymentService.createPayment() до вызова любого провайдера (см.
+    // server/services/paymentService.js) — но provider, вызванный напрямую
+    // (в обход paymentService.js), не должен молча доверять этому: локальная
+    // fail-closed проверка ниже — defense-in-depth, не дублирование бизнес-
+    // логики (см. комментарий к localValidationError выше).
+    validateAmount(amount, orderId);
+    validateIdempotencyKey(idempotencyKey, orderId);
+
     const returnUrl = process.env.YOOKASSA_RETURN_URL;
     if (!returnUrl) {
       // Fail-closed, тот же принцип, что и отсутствующие ключи в конструкторе —
@@ -115,9 +249,16 @@ class YookassaProvider extends PaymentProviderInterface {
         'YOOKASSA_RETURN_URL не задан — обязателен для confirmation.type=redirect (СБП)'
       );
     }
+    validateReturnUrl(returnUrl);
 
     const requestBody = {
-      amount: { value: Number(amount).toFixed(2), currency: 'RUB' },
+      amount: { value: amount.toFixed(2), currency: 'RUB' },
+      // HIGH-исправление (pre-push review commit 333c951): без этого поля
+      // ЮKassa показывает пользователю ПОЛНЫЙ выбор способов оплаты (карта,
+      // кошелёк и т.д.), а не только СБП — прямое нарушение MVP-решения
+      // "только СБП" (см. ADR). Формат подтверждён официальной документацией
+      // интеграции СБП: единственное поле type='sbp', без вложенных полей.
+      payment_method_data: { type: 'sbp' },
       // MVP-решение зафиксировано ADR (YAAM-payment-capture-model-ADR.pdf) —
       // capture=true всегда, явно (не полагаемся на дефолт ЮKassa).
       capture: true,
@@ -171,10 +312,19 @@ class YookassaProvider extends PaymentProviderInterface {
       // не доверяем "200 значит успех", проверяем реальную форму ответа (тот
       // же принцип, что уже применяется в mockProvider/ensureRefundReady:
       // fail-loud на неожиданную форму, не молчаливое приведение к успеху).
+      //
+      // MEDIUM-исправление (pre-push review commit 333c951): status
+      // проверялся только как typeof==='string' — любой статус (в т.ч.
+      // succeeded/canceled на СОЗДАНИИ платежа, что официально
+      // недокументировано для этого запроса) молча считался успехом.
+      // Официальная документация жизненного цикла платежа подтверждает:
+      // 'pending' — единственный корректный статус в ответе именно на
+      // POST /v3/payments, независимо от способа оплаты. Любой другой статус
+      // здесь — не "другой валидный случай", а fail-safe UNKNOWN_RESULT.
       const hasExpectedShape = typeof parsedBody?.id === 'string'
-        && typeof parsedBody?.status === 'string'
-        && typeof parsedBody?.confirmation === 'object'
-        && parsedBody.confirmation !== null;
+        && parsedBody?.status === 'pending'
+        && parsedBody?.confirmation?.type === 'redirect'
+        && isHttpsUrl(parsedBody?.confirmation?.confirmation_url);
       if (!hasExpectedShape) isMalformed = true;
     }
 

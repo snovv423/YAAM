@@ -123,7 +123,7 @@ test('amount форматируется как строка с ровно дву
   let capturedOptions;
   global.fetch = async (url, options) => {
     capturedOptions = options;
-    return { ok: true, status: 200, json: async () => ({ id: 'x', status: 'pending', confirmation: { confirmation_url: 'https://x' } }) };
+    return { ok: true, status: 200, json: async () => ({ id: 'x', status: 'pending', confirmation: { type: 'redirect', confirmation_url: 'https://x' } }) };
   };
   const YookassaProvider = freshProviderClass();
   const provider = new YookassaProvider();
@@ -286,4 +286,261 @@ test('context в ошибке содержит только безопасные
     assert.deepEqual(Object.keys(err.context).sort(), ['httpStatus', 'operation', 'orderId']);
     assert.equal(err.context.orderId, 99);
   }
+});
+
+// ===========================================================================
+// fix(payments): enforce SBP create payment contract — тесты по находкам
+// независимого pre-push review commit 333c951
+// ===========================================================================
+
+function fetchShouldNotBeCalled() {
+  return async () => { throw new Error('fetch не должен вызываться — валидация должна остановить запрос раньше'); };
+}
+
+// --- HIGH: payment_method_data ---------------------------------------------
+
+test('HIGH-исправление: requestBody содержит payment_method_data: { type: "sbp" } (официальный формат ЮKassa)', async () => {
+  setFakeTestCredentials();
+  let capturedOptions;
+  global.fetch = async (url, options) => {
+    capturedOptions = options;
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        id: 'yk_payment_sbp',
+        status: 'pending',
+        confirmation: { type: 'redirect', confirmation_url: 'https://yookassa.ru/checkout/redirect/sbp' },
+      }),
+    };
+  };
+  const YookassaProvider = freshProviderClass();
+  const provider = new YookassaProvider();
+  await provider.createPayment({ orderId: 1, amount: 300, description: 'd', idempotencyKey: 'k' });
+
+  const body = JSON.parse(capturedOptions.body);
+  assert.ok(Object.prototype.hasOwnProperty.call(body, 'payment_method_data'), 'payment_method_data должен присутствовать в теле запроса');
+  assert.deepEqual(body.payment_method_data, { type: 'sbp' }, 'единственное официально документированное поле для СБП');
+});
+
+// --- MEDIUM: валидация amount -----------------------------------------------
+
+const INVALID_AMOUNTS = [
+  ['undefined', undefined],
+  ['null', null],
+  ['строка вместо числа', '300'],
+  ['NaN', NaN],
+  ['Infinity', Infinity],
+  ['-Infinity', -Infinity],
+  ['ноль', 0],
+  ['отрицательное', -100],
+  ['дробные копейки (3 знака)', 100.001],
+  ['чрезмерно большая сумма (> 700000)', 5000000],
+];
+
+for (const [label, amount] of INVALID_AMOUNTS) {
+  test(`MEDIUM-исправление: amount отклоняется до fetch — ${label}`, async () => {
+    setFakeTestCredentials();
+    global.fetch = fetchShouldNotBeCalled();
+    const YookassaProvider = freshProviderClass();
+    const { CATEGORIES } = require('../services/paymentProviders/providerErrorTaxonomy');
+    const provider = new YookassaProvider();
+    await assert.rejects(
+      () => provider.createPayment({ orderId: 1, amount, description: 'd', idempotencyKey: 'k' }),
+      (err) => err.name === 'YookassaCreatePaymentError' && err.category === CATEGORIES.FATAL_REQUEST,
+    );
+  });
+}
+
+test('MEDIUM-исправление: корректный amount с двумя знаками (например, 199.99) проходит валидацию и уходит как есть', async () => {
+  setFakeTestCredentials();
+  let capturedOptions;
+  global.fetch = async (url, options) => {
+    capturedOptions = options;
+    return { ok: true, status: 200, json: async () => ({ id: 'x', status: 'pending', confirmation: { type: 'redirect', confirmation_url: 'https://yookassa.ru/x' } }) };
+  };
+  const YookassaProvider = freshProviderClass();
+  const provider = new YookassaProvider();
+  await provider.createPayment({ orderId: 1, amount: 199.99, description: 'd', idempotencyKey: 'k' });
+  assert.equal(JSON.parse(capturedOptions.body).amount.value, '199.99');
+});
+
+// --- MEDIUM: валидация idempotencyKey ---------------------------------------
+
+const INVALID_IDEMPOTENCY_KEYS = [
+  ['пустая строка', ''],
+  ['только пробелы', '   '],
+  ['длиннее 64 символов', 'k'.repeat(65)],
+  ['управляющий символ (перевод строки — риск header injection)', 'valid-key\nX-Injected: evil'],
+  ['управляющий символ NUL', 'valid-key\x00'],
+];
+
+for (const [label, key] of INVALID_IDEMPOTENCY_KEYS) {
+  test(`MEDIUM-исправление: idempotencyKey отклоняется до fetch — ${label}`, async () => {
+    setFakeTestCredentials();
+    global.fetch = fetchShouldNotBeCalled();
+    const YookassaProvider = freshProviderClass();
+    const { CATEGORIES } = require('../services/paymentProviders/providerErrorTaxonomy');
+    const provider = new YookassaProvider();
+    await assert.rejects(
+      () => provider.createPayment({ orderId: 1, amount: 300, description: 'd', idempotencyKey: key }),
+      (err) => err.name === 'YookassaCreatePaymentError' && err.category === CATEGORIES.FATAL_REQUEST,
+    );
+  });
+}
+
+test('MEDIUM-исправление: валидный idempotencyKey передаётся в заголовке побайтово, без trim/нормализации', async () => {
+  setFakeTestCredentials();
+  let capturedOptions;
+  const KEY = '  idem-key-with-spaces-1  ';
+  global.fetch = async (url, options) => {
+    capturedOptions = options;
+    return { ok: true, status: 200, json: async () => ({ id: 'x', status: 'pending', confirmation: { type: 'redirect', confirmation_url: 'https://yookassa.ru/x' } }) };
+  };
+  const YookassaProvider = freshProviderClass();
+  const provider = new YookassaProvider();
+  await provider.createPayment({ orderId: 1, amount: 300, description: 'd', idempotencyKey: KEY });
+  assert.equal(capturedOptions.headers['Idempotence-Key'], KEY, 'ключ не должен быть изменён/обрезан перед отправкой');
+});
+
+// --- MEDIUM: валидация response.status --------------------------------------
+
+const UNEXPECTED_STATUS_RESPONSES = [
+  ['canceled', { id: 'x', status: 'canceled', confirmation: { type: 'redirect', confirmation_url: 'https://yookassa.ru/x' } }],
+  ['succeeded', { id: 'x', status: 'succeeded', confirmation: { type: 'redirect', confirmation_url: 'https://yookassa.ru/x' } }],
+  ['неизвестная строка', { id: 'x', status: 'some_unknown_status', confirmation: { type: 'redirect', confirmation_url: 'https://yookassa.ru/x' } }],
+  ['status отсутствует', { id: 'x', confirmation: { type: 'redirect', confirmation_url: 'https://yookassa.ru/x' } }],
+];
+
+for (const [label, body] of UNEXPECTED_STATUS_RESPONSES) {
+  test(`MEDIUM-исправление: 200 OK с status="${label}" -> ProviderResultUnknownError, не считается успехом`, async () => {
+    setFakeTestCredentials();
+    global.fetch = async () => ({ ok: true, status: 200, json: async () => body });
+    const YookassaProvider = freshProviderClass();
+    const { ProviderResultUnknownError } = require('../services/paymentProviders/providerErrorTaxonomy');
+    const provider = new YookassaProvider();
+    await assert.rejects(
+      () => provider.createPayment({ orderId: 1, amount: 300, description: 'd', idempotencyKey: 'k' }),
+      (err) => err instanceof ProviderResultUnknownError,
+    );
+  });
+}
+
+test('MEDIUM-исправление: 200 OK со status="pending" (нормальный путь) по-прежнему считается успехом', async () => {
+  setFakeTestCredentials();
+  global.fetch = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ id: 'yk_ok', status: 'pending', confirmation: { type: 'redirect', confirmation_url: 'https://yookassa.ru/checkout/redirect/ok' } }),
+  });
+  const YookassaProvider = freshProviderClass();
+  const provider = new YookassaProvider();
+  const result = await provider.createPayment({ orderId: 1, amount: 300, description: 'd', idempotencyKey: 'k' });
+  assert.equal(result.providerPaymentId, 'yk_ok');
+  assert.equal(result.paymentUrl, 'https://yookassa.ru/checkout/redirect/ok');
+});
+
+// --- LOW: confirmation_url протокол ------------------------------------------
+
+test('LOW-усиление: confirmation_url с протоколом javascript: -> ProviderResultUnknownError, не возвращается клиенту', async () => {
+  setFakeTestCredentials();
+  global.fetch = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ id: 'x', status: 'pending', confirmation: { type: 'redirect', confirmation_url: 'javascript:alert(1)' } }),
+  });
+  const YookassaProvider = freshProviderClass();
+  const { ProviderResultUnknownError } = require('../services/paymentProviders/providerErrorTaxonomy');
+  const provider = new YookassaProvider();
+  await assert.rejects(
+    () => provider.createPayment({ orderId: 1, amount: 300, description: 'd', idempotencyKey: 'k' }),
+    (err) => err instanceof ProviderResultUnknownError,
+  );
+});
+
+test('LOW-усиление: confirmation_url с протоколом http: (не https) -> ProviderResultUnknownError', async () => {
+  setFakeTestCredentials();
+  global.fetch = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ id: 'x', status: 'pending', confirmation: { type: 'redirect', confirmation_url: 'http://yookassa.ru/checkout/redirect/insecure' } }),
+  });
+  const YookassaProvider = freshProviderClass();
+  const { ProviderResultUnknownError } = require('../services/paymentProviders/providerErrorTaxonomy');
+  const provider = new YookassaProvider();
+  await assert.rejects(
+    () => provider.createPayment({ orderId: 1, amount: 300, description: 'd', idempotencyKey: 'k' }),
+    (err) => err instanceof ProviderResultUnknownError,
+  );
+});
+
+// --- LOW: YOOKASSA_RETURN_URL валидация --------------------------------------
+
+test('LOW-усиление: YOOKASSA_RETURN_URL невалидный URL -> YookassaConfigurationError, fetch не вызывается', async () => {
+  setFakeTestCredentials();
+  process.env.YOOKASSA_RETURN_URL = 'не-url-совсем';
+  global.fetch = fetchShouldNotBeCalled();
+  const YookassaProvider = freshProviderClass();
+  const provider = new YookassaProvider();
+  await assert.rejects(
+    () => provider.createPayment({ orderId: 1, amount: 300, description: 'd', idempotencyKey: 'k' }),
+    /YOOKASSA_RETURN_URL/,
+  );
+});
+
+test('LOW-усиление: YOOKASSA_RETURN_URL на http запрещён при NODE_ENV=production', async () => {
+  setFakeTestCredentials();
+  process.env.YOOKASSA_RETURN_URL = 'http://yaam.su/return-test';
+  const previousNodeEnv = process.env.NODE_ENV;
+  process.env.NODE_ENV = 'production';
+  global.fetch = fetchShouldNotBeCalled();
+  try {
+    const YookassaProvider = freshProviderClass();
+    const provider = new YookassaProvider();
+    await assert.rejects(
+      () => provider.createPayment({ orderId: 1, amount: 300, description: 'd', idempotencyKey: 'k' }),
+      /https/,
+    );
+  } finally {
+    if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = previousNodeEnv;
+  }
+});
+
+// --- LOW: провайдер-уровневые тесты HTTP 403/409/415 -------------------------
+
+test('LOW-усиление: HTTP 403 -> категория fatal_configuration (провайдер-уровневый regression)', async () => {
+  setFakeTestCredentials();
+  global.fetch = async () => ({ ok: false, status: 403, json: async () => ({ type: 'error', code: 'forbidden' }) });
+  const YookassaProvider = freshProviderClass();
+  const { CATEGORIES } = require('../services/paymentProviders/providerErrorTaxonomy');
+  const provider = new YookassaProvider();
+  await assert.rejects(
+    () => provider.createPayment({ orderId: 1, amount: 300, description: 'd', idempotencyKey: 'k' }),
+    (err) => err.category === CATEGORIES.FATAL_CONFIGURATION,
+  );
+});
+
+test('LOW-усиление: HTTP 409 -> категория conflict (провайдер-уровневый regression)', async () => {
+  setFakeTestCredentials();
+  global.fetch = async () => ({ ok: false, status: 409, json: async () => ({ type: 'error', code: 'idempotence_key_duplicate' }) });
+  const YookassaProvider = freshProviderClass();
+  const { CATEGORIES } = require('../services/paymentProviders/providerErrorTaxonomy');
+  const provider = new YookassaProvider();
+  await assert.rejects(
+    () => provider.createPayment({ orderId: 1, amount: 300, description: 'd', idempotencyKey: 'k' }),
+    (err) => err.category === CATEGORIES.CONFLICT,
+  );
+});
+
+test('LOW-усиление: HTTP 415 -> категория fatal_request (провайдер-уровневый regression)', async () => {
+  setFakeTestCredentials();
+  global.fetch = async () => ({ ok: false, status: 415, json: async () => ({ type: 'error', code: 'unsupported_media_type' }) });
+  const YookassaProvider = freshProviderClass();
+  const { CATEGORIES } = require('../services/paymentProviders/providerErrorTaxonomy');
+  const provider = new YookassaProvider();
+  await assert.rejects(
+    () => provider.createPayment({ orderId: 1, amount: 300, description: 'd', idempotencyKey: 'k' }),
+    (err) => err.category === CATEGORIES.FATAL_REQUEST,
+  );
 });
