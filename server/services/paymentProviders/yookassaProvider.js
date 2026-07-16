@@ -160,6 +160,20 @@ function resolveRefundTimeoutMs() {
     : 10000;
 }
 
+// Отдельная env-переменная от PAYMENT_REFUND_TIMEOUT_MS (та настраивает
+// таймаут POST-создания возврата) — тот же принцип "один таймаут на операцию",
+// что уже применён для PAYMENT_STATUS_TIMEOUT_MS отдельно от
+// PAYMENT_CREATE_TIMEOUT_MS. getRefund() — независимая GET-операция чтения,
+// не вызывается из orderService.js (нет там ещё аналога providerGetRefundTimeoutMs()
+// — вне scope этой задачи), поэтому здесь только provider-уровневый
+// AbortController-таймаут.
+function resolveGetRefundTimeoutMs() {
+  const configured = Number(process.env.PAYMENT_GET_REFUND_TIMEOUT_MS || 10000);
+  return Number.isFinite(configured) && configured >= 10 && configured <= 120000
+    ? configured
+    : 10000;
+}
+
 // Официальные статусы Refund у ЮKassa — ПЕРЕПРОВЕРЕНО отдельно от Payment
 // тремя независимыми точечными выборками официальной документации перед
 // реализацией createRefund(): в отличие от Payment (pending/waiting_for_capture/
@@ -186,6 +200,50 @@ const YOOKASSA_REFUND_STATUS_TO_NORMALIZED = Object.freeze({
 function normalizeRefundStatus(rawStatus) {
   return Object.prototype.hasOwnProperty.call(YOOKASSA_REFUND_STATUS_TO_NORMALIZED, rawStatus)
     ? YOOKASSA_REFUND_STATUS_TO_NORMALIZED[rawStatus]
+    : null;
+}
+
+// ВАЖНОЕ УТОЧНЕНИЕ, обнаруженное при реализации getRefund() (перепроверка
+// официального OpenAPI-описания ЮKassa, не только нарративных страниц
+// документации, которые использовались при написании createRefund() выше):
+// схема RefundStatus в официальной OpenAPI-спецификации ЮKassa
+// (yookassa-openapi-specification.yaml) документирует enum из ТРЁХ значений —
+// "pending" (возврат создан, но пока ещё обрабатывается), "succeeded",
+// "canceled" — а не двух, как предполагалось в комментарии к
+// YOOKASSA_REFUND_STATUS_TO_NORMALIZED/normalizeRefundStatus() выше (три
+// независимые нарративные страницы документации, использованные при
+// реализации createRefund(), не показывали 'pending' ни в одном примере).
+// Это расхождение НЕ исправлено в normalizeRefundStatus()/refund() в рамках
+// этой задачи (scope — только getRefund(), createRefund()/refund() уже
+// независимо проверены и опубликованы отдельным review) — практическое
+// поведение refund() при этом не меняется и остаётся безопасным: 'pending'
+// сегодня всё равно классифицируется как неизвестный статус -> UNKNOWN_RESULT,
+// что структурно совпадает с тем, как СЛЕДОВАЛО бы явно обрабатывать
+// подлинный pending-возврат (ещё не финальный исход, нужна отдельная
+// GET-сверка — см. getRefund() ниже) — расхождение только в точности
+// комментария/обоснования, не в наблюдаемом поведении или риске для денег.
+// Рекомендуется отдельный follow-up на обновление комментариев в refund().
+//
+// getRefund() — отдельная, ПОЛНАЯ 3-значная нормализация (pending/succeeded/
+// canceled -> pending/succeeded/failed), намеренно не переиспользующая
+// нормализацию refund() (та осталась 2-значной, привязанной к уже
+// опубликованному бинарному контракту providerInterface.js refund() ->
+// {status: 'succeeded'|'failed'}). getRefund() — НОВЫЙ метод без
+// предшествующего контракта (не объявлен в providerInterface.js) и
+// архитектурно ближе к getStatus() (чтение уже существующего объекта по его
+// собственному id), поэтому использует ТОТ ЖЕ 3-значный enum, что и
+// normalizeStatus() для платежа — 'pending' здесь не теряется молча.
+const YOOKASSA_GET_REFUND_STATUS_TO_NORMALIZED = Object.freeze({
+  pending: 'pending',
+  succeeded: 'succeeded',
+  canceled: 'failed',
+});
+
+// Неизвестный/будущий статус — не угадываем, тот же fail-safe принцип, что и
+// у normalizeStatus()/normalizeRefundStatus().
+function normalizeGetRefundStatus(rawStatus) {
+  return Object.prototype.hasOwnProperty.call(YOOKASSA_GET_REFUND_STATUS_TO_NORMALIZED, rawStatus)
+    ? YOOKASSA_GET_REFUND_STATUS_TO_NORMALIZED[rawStatus]
     : null;
 }
 
@@ -278,6 +336,19 @@ class YookassaRefundError extends Error {
   }
 }
 
+// Аналог для getRefund() — четвёртый по счёту отдельный класс операции
+// (тот же принцип, что и у YookassaGetStatusError/YookassaRefundError): ноль
+// риска для уже опубликованных createPayment/getStatus/refund.
+class YookassaGetRefundError extends Error {
+  constructor(category, context) {
+    super('Платёжный сервис вернул ошибку при получении информации о возврате');
+    this.name = 'YookassaGetRefundError';
+    this.category = category;
+    this.rules = CATEGORY_RULES[category];
+    this.context = context;
+  }
+}
+
 // Локальная (до-сетевая) payload-ошибка — на нашей стороне, провайдер не
 // вызывался вообще. Категория FATAL_REQUEST точно отражает семантику из
 // providerErrorTaxonomy.js: retryable:false, sameIdempotencyKey:false (после
@@ -363,6 +434,20 @@ function validateIdempotencyKey(idempotencyKey, context = {}, operation = 'creat
 function validateProviderPaymentId(providerPaymentId, operation = 'getStatus', ErrorClass = YookassaGetStatusError) {
   if (typeof providerPaymentId !== 'string' || providerPaymentId.trim().length === 0) {
     throw localValidationError(operation, { providerPaymentId }, 'providerPaymentId должен быть непустой строкой', ErrorClass);
+  }
+}
+
+// Та же проверка, что validateProviderPaymentId(), но для refund id — не
+// переиспользуем ту функцию напрямую: её context-ключ ("providerPaymentId")
+// захардкожен внутри и маркировал бы refund id как payment id, вводя в
+// заблуждение диагностику/логи. Обобщать уже опубликованную и независимо
+// проверенную validateProviderPaymentId() (используется в getStatus()/
+// refund(), оба уже прошли review) ради этого было бы риском для чужого
+// уже одобренного кода без нужды — три похожие строки дешевле (тот же
+// принцип, что и у YookassaGetRefundError выше).
+function validateProviderRefundId(providerRefundId, operation = 'getRefund', ErrorClass = YookassaGetRefundError) {
+  if (typeof providerRefundId !== 'string' || providerRefundId.trim().length === 0) {
+    throw localValidationError(operation, { providerRefundId }, 'providerRefundId должен быть непустой строкой', ErrorClass);
   }
 }
 
@@ -775,6 +860,112 @@ class YookassaProvider extends PaymentProviderInterface {
     // Никакого сырого provider body, credentials, idempotency key наружу.
     return { refundId: parsedBody.id, status: normalized };
   }
+
+  // getRefund() — НЕ часть providerInterface.js (не объявлен в базовом
+  // классе, в отличие от createPayment/getStatus/refund/verifyWebhook) —
+  // новая, самостоятельная возможность, не вызывается ниоткуда в этой
+  // задаче (не подключается к orderService/paymentService — явное
+  // ограничение scope). Архитектурно ближе к getStatus(), чем к refund():
+  // читает уже существующий объект по ЕГО СОБСТВЕННОМУ id (GET
+  // /v3/refunds/{refund_id}), а не создаёт новый — поэтому:
+  // - GET, без тела, без Idempotence-Key (официально не требуется для GET);
+  // - isMutatingOperation:false (не мутирует, транспортная неопределённость
+  //   здесь RETRYABLE, не UNKNOWN_RESULT — нечего сверять, читать можно
+  //   просто повторно, тот же принцип, что и у getStatus());
+  // - возвращает нормализованный 3-значный статус ('pending'|'succeeded'|
+  //   'failed'), а не {refundId, status} — вызывающий уже знает id (это его
+  //   собственный входной параметр), эхо не нужно (тот же паттерн, что и
+  //   getStatus(), которая тоже возвращает голую строку, не объект).
+  async getRefund(providerRefundId) {
+    validateProviderRefundId(providerRefundId);
+
+    const controller = new AbortController();
+    const timeoutMs = resolveGetRefundTimeoutMs();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    let response;
+    try {
+      response = await fetch(`${YOOKASSA_API_BASE_URL}/refunds/${encodeURIComponent(providerRefundId)}`, {
+        method: 'GET',
+        headers: { Authorization: this._authHeader() },
+        signal: controller.signal,
+      });
+    } catch (err) {
+      clearTimeout(timer);
+      const isTimeout = err?.name === 'AbortError';
+      const category = classifyProviderError({
+        isTimeout,
+        isNetworkError: !isTimeout,
+        isMutatingOperation: false,
+      });
+      throw this._toError(
+        category, { operation: 'getRefund', providerRefundId, cause: err?.name || 'Error' }, YookassaGetRefundError,
+      );
+    }
+    clearTimeout(timer);
+
+    let parsedBody;
+    let isMalformed = false;
+    try {
+      parsedBody = await response.json();
+    } catch {
+      isMalformed = true;
+    }
+
+    if (!isMalformed && response.ok) {
+      // refund.id — СОБСТВЕННАЯ identity запрошенного объекта (мы запросили
+      // именно этот providerRefundId по GET) — в отличие от refund()'s
+      // проверки refund.payment_id (там ССЫЛКА на другой объект), здесь
+      // используется default idField='id' — тот же вызов, что и в
+      // getStatus(), ничего нового не изобретается.
+      assertMatchingProviderObject(providerRefundId, parsedBody, { operation: 'getRefund', httpStatus: response.status });
+
+      // payment_id/amount — обязательные поля по официальной схеме Refund
+      // (OpenAPI: required: [id, payment_id, amount, status, created_at|]) —
+      // проверяются только на форму (нечего сравнивать: getRefund() не знает
+      // заранее, какому payment_id или amount должен соответствовать ответ —
+      // в отличие от createRefund(), которая сама формировала запрос и знает
+      // ожидаемые значения). Отсутствие любого из них — та же степень
+      // недоверия к ответу, что и отсутствие/пустой id.
+      const hasPaymentId = typeof parsedBody?.payment_id === 'string' && parsedBody.payment_id.length > 0;
+      const hasAmount = parsedBody?.amount !== null && typeof parsedBody?.amount === 'object'
+        && typeof parsedBody.amount.value === 'string' && typeof parsedBody.amount.currency === 'string';
+      if (!hasPaymentId || !hasAmount || typeof parsedBody?.status !== 'string') {
+        isMalformed = true;
+      }
+    }
+
+    if (isMalformed) {
+      const category = classifyProviderError({ isMalformed: true, isMutatingOperation: false });
+      throw this._toError(
+        category, { operation: 'getRefund', providerRefundId, httpStatus: response.status }, YookassaGetRefundError,
+      );
+    }
+
+    if (!response.ok) {
+      // HTTP 400/401/403/404/500 официально документированы для этого
+      // конкретного GET-эндпоинта (OpenAPI); 429/409/415 явно не
+      // перечислены для GET (ожидаемо — нет idempotency-конфликта и body у
+      // чтения), но общая классификация ниже корректно обработает и их,
+      // если ЮKassa всё же их вернёт — без специального маппинга под
+      // getRefund(), тот же принцип, что и у refund()/getStatus().
+      const category = classifyProviderError({ httpStatus: response.status, isMutatingOperation: false });
+      throw this._toError(
+        category, { operation: 'getRefund', providerRefundId, httpStatus: response.status }, YookassaGetRefundError,
+      );
+    }
+
+    const normalized = normalizeGetRefundStatus(parsedBody.status);
+    if (normalized === null) {
+      // Неизвестный/будущий refund-статус — не угадываем.
+      const category = classifyProviderError({ isMalformed: true, isMutatingOperation: false });
+      throw this._toError(
+        category, { operation: 'getRefund', providerRefundId, httpStatus: response.status }, YookassaGetRefundError,
+      );
+    }
+    return normalized;
+  }
+
   verifyWebhook(_rawBody, _headers) { throw new Error('not implemented'); }
 }
 
