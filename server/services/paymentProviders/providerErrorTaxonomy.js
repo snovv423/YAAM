@@ -171,9 +171,62 @@ class ProviderResultUnknownError extends Error {
   }
 }
 
+// assertMatchingProviderObject — найдено по результатам независимого
+// pre-push review getStatus() (YAAM-yookassa-getstatus-final-review-and-push-report.pdf,
+// находка M1): getStatus() проверял форму ответа (id — непустая строка,
+// status — строка), но НЕ проверял, что ответ вообще относится к
+// ЗАПРОШЕННОМУ объекту (response.id === requestedId). Реальный сценарий: если
+// провайдер/сеть/инфраструктура когда-либо вернут данные ДРУГОГО платежа —
+// код молча принял бы чужой статус за статус своего.
+//
+// Research перед кодом (см. отчёт): ни ЮKassa, ни Stripe, ни Adyen НЕ
+// документируют это как формальное требование контракта API — это не
+// vendor-специфичная фича, а общий defensive engineering принцип, применяемый
+// именно потому, что ни один из них не даёт message-level подписи для
+// обычных REST-ответов (только TLS-транспорт + Basic Auth на исходящий
+// запрос — сам ответ ничем не подписан и не привязан к конкретному
+// запрошенному id на уровне протокола). Ближайшая параллель — принцип
+// "не доверяй объекту, не подтвердив его идентичность" (confused deputy
+// defense) и уже применённый в этом проекте паттерн Medusa.js: оркестрирующий
+// слой сам обязан сопоставить любой provider-ответ/событие с ожидаемой
+// сущностью ПЕРЕД тем, как на него полагаться — не провайдер это гарантирует.
+//
+// Спроектирован как ОБЩИЙ, provider- и operation-агностичный helper (не
+// бизнес-логика, не работа с БД — чистая функция) специально для
+// переиспользования везде, где провайдер возвращает объект с полем id по
+// конкретному запрошенному идентификатору: getStatus(), createRefund(),
+// getRefund(), webhook verification, reconciliation. Сегодня подключён
+// ТОЛЬКО в getStatus() (см. yookassaProvider.js) — остальные вызывающие
+// места не реализованы в этой задаче, но контракт уже пригоден для них:
+// context — открытый объект (a не хардкоженные operation/httpStatus),
+// потому что, например, webhook verification не имеет HTTP-статуса ответа
+// вообще (проверяет уже готовое тело), а reconciliation может сравнивать
+// два самостоятельно полученных объекта, а не HTTP-ответ напрямую.
+//
+// @param {string} requestedId — id, который был запрошен/ожидается.
+// @param {unknown} response — уже распарсенное тело ответа провайдера.
+// @param {object} [context] — дополнительные безопасные для лога поля
+//   (operation/httpStatus и т.п.) — сливаются в context брошенной ошибки как
+//   есть; helper их не задаёт сам, чтобы не привязываться к HTTP-специфике.
+// @throws {ProviderResultUnknownError} если response — не объект (в т.ч.
+//   null/массив), response.id отсутствует/пустой/не строка, или
+//   response.id !== requestedId.
+function assertMatchingProviderObject(requestedId, response, context = {}) {
+  const isPlainObject = response !== null && typeof response === 'object' && !Array.isArray(response);
+  const receivedId = isPlainObject ? response.id : undefined;
+  const matches = typeof receivedId === 'string' && receivedId.length > 0 && receivedId === requestedId;
+  if (matches) return;
+  // Несовпадение/отсутствие id — тот же уровень недоверия к ответу, что и
+  // malformed body (classifyProviderError: isMalformed всегда -> UNKNOWN_RESULT,
+  // см. выше) — получили ответ, но не можем безопасно доверять, что он
+  // относится к запрошенному объекту.
+  throw new ProviderResultUnknownError({ ...context, requestedId, receivedId });
+}
+
 module.exports = {
   CATEGORIES,
   CATEGORY_RULES,
   classifyProviderError,
   ProviderResultUnknownError,
+  assertMatchingProviderObject,
 };

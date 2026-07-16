@@ -13,6 +13,7 @@ const {
   CATEGORY_RULES,
   classifyProviderError,
   ProviderResultUnknownError,
+  assertMatchingProviderObject,
 } = require('../services/paymentProviders/providerErrorTaxonomy');
 
 test('CATEGORIES: ровно 9 значений, каждое имеет запись в CATEGORY_RULES', () => {
@@ -162,4 +163,77 @@ test('ProviderResultUnknownError: безопасное сообщение, ка�
   assert.deepEqual(err.context, { operation: 'createPayment', attemptId: 42 });
   assert.equal(err.message, 'Не удалось безопасно определить результат операции провайдера');
   assert.doesNotMatch(err.message, /secret|key|password|token/i, 'публичное сообщение не должно содержать намёков на секреты провайдера');
+});
+
+// ===========================================================================
+// assertMatchingProviderObject — найдено по результатам независимого
+// pre-push review getStatus() (находка M1, YAAM-yookassa-getstatus-final-
+// review-and-push-report.pdf). Общий, provider-агностичный helper, пригодный
+// для getStatus/createRefund/getRefund/webhook verification/reconciliation —
+// сегодня подключён только в getStatus() (см. yookassaProviderGetStatus.test.js
+// для интеграционного теста через сам провайдер).
+// ===========================================================================
+
+test('assertMatchingProviderObject: 1. response.id совпадает с requestedId -> PASS (не бросает)', () => {
+  assert.doesNotThrow(() => assertMatchingProviderObject('pay_123', { id: 'pay_123', status: 'pending' }));
+});
+
+test('assertMatchingProviderObject: 2. response.id отличается от requestedId -> UNKNOWN_RESULT', () => {
+  assert.throws(
+    () => assertMatchingProviderObject('pay_123', { id: 'pay_OTHER', status: 'pending' }),
+    (err) => err instanceof ProviderResultUnknownError && err.category === CATEGORIES.UNKNOWN_RESULT,
+  );
+});
+
+test('assertMatchingProviderObject: 3. response.id отсутствует -> UNKNOWN_RESULT', () => {
+  assert.throws(
+    () => assertMatchingProviderObject('pay_123', { status: 'pending' }),
+    (err) => err instanceof ProviderResultUnknownError,
+  );
+});
+
+test('assertMatchingProviderObject: 4. response.id пустой -> UNKNOWN_RESULT', () => {
+  assert.throws(
+    () => assertMatchingProviderObject('pay_123', { id: '', status: 'pending' }),
+    (err) => err instanceof ProviderResultUnknownError,
+  );
+});
+
+test('assertMatchingProviderObject: 5. response=null -> UNKNOWN_RESULT', () => {
+  assert.throws(
+    () => assertMatchingProviderObject('pay_123', null),
+    (err) => err instanceof ProviderResultUnknownError,
+  );
+});
+
+test('assertMatchingProviderObject: 6. response=[] (массив) -> UNKNOWN_RESULT', () => {
+  assert.throws(
+    () => assertMatchingProviderObject('pay_123', []),
+    (err) => err instanceof ProviderResultUnknownError,
+  );
+});
+
+test('assertMatchingProviderObject: 7. response.id не string (число) -> UNKNOWN_RESULT', () => {
+  assert.throws(
+    () => assertMatchingProviderObject('pay_123', { id: 12345, status: 'pending' }),
+    (err) => err instanceof ProviderResultUnknownError,
+  );
+});
+
+test('assertMatchingProviderObject: response=undefined -> UNKNOWN_RESULT (дополнительный edge case)', () => {
+  assert.throws(
+    () => assertMatchingProviderObject('pay_123', undefined),
+    (err) => err instanceof ProviderResultUnknownError,
+  );
+});
+
+test('assertMatchingProviderObject: context сливается с requestedId/receivedId, не теряется и не содержит сырой response', () => {
+  try {
+    assertMatchingProviderObject('pay_123', { id: 'pay_OTHER' }, { operation: 'getStatus', httpStatus: 200 });
+    assert.fail('должно было бросить');
+  } catch (err) {
+    assert.deepEqual(err.context, {
+      operation: 'getStatus', httpStatus: 200, requestedId: 'pay_123', receivedId: 'pay_OTHER',
+    });
+  }
 });

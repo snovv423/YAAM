@@ -4,6 +4,7 @@ const {
   CATEGORIES,
   CATEGORY_RULES,
   ProviderResultUnknownError,
+  assertMatchingProviderObject,
 } = require('./providerErrorTaxonomy');
 
 // ЮKassa, MVP-scope: только createPayment(), только СБП, только capture=true
@@ -512,13 +513,25 @@ class YookassaProvider extends PaymentProviderInterface {
     }
 
     if (!isMalformed && response.ok) {
+      // M1-исправление (pre-push review getStatus(), см.
+      // YAAM-yookassa-getstatus-final-review-and-push-report.pdf): раньше id
+      // проверялся только как "непустая строка", но НЕ сверялся с тем id,
+      // который мы запросили — ответ провайдера про ЧУЖОЙ платёж молча
+      // принимался бы за ответ про наш. assertMatchingProviderObject() —
+      // общий, provider-агностичный helper (providerErrorTaxonomy.js),
+      // спроектированный для переиспользования в createRefund/getRefund/
+      // webhook verification/reconciliation (см. комментарий там же); здесь
+      // подключён первым. Бросает ProviderResultUnknownError сам, если
+      // response не объект либо response.id отсутствует/пустой/не совпадает —
+      // поэтому дальнейшая проверка ниже гарантированно видит id, совпавший
+      // с providerPaymentId.
+      assertMatchingProviderObject(providerPaymentId, parsedBody, { operation: 'getStatus', httpStatus: response.status });
+
       // Тот же fail-loud принцип, что и в createPayment(): успешный HTTP-статус
-      // ещё не значит, что телу можно доверять. id — непустая строка (не просто
-      // typeof==='string' — извлечённый вывод из предыдущего review createPayment,
-      // применённый здесь сразу, а не как отложенный технический долг).
-      const hasExpectedShape = typeof parsedBody?.id === 'string' && parsedBody.id.length > 0
-        && typeof parsedBody?.status === 'string';
-      if (!hasExpectedShape) isMalformed = true;
+      // ещё не значит, что телу можно доверять — status тоже должен быть
+      // ожидаемого вида (сам helper выше не знает про status — это уже
+      // getStatus-специфичная, не переиспользуемая проверка).
+      if (typeof parsedBody?.status !== 'string') isMalformed = true;
     }
 
     if (isMalformed) {

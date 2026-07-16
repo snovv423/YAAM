@@ -76,7 +76,7 @@ test('getStatus() URL-кодирует providerPaymentId (защита от не
   let capturedUrl;
   global.fetch = async (url) => {
     capturedUrl = url;
-    return { ok: true, status: 200, json: async () => ({ id: 'x', status: 'pending' }) };
+    return { ok: true, status: 200, json: async () => ({ id: 'id with space/slash', status: 'pending' }) };
   };
   const YookassaProvider = freshProviderClass();
   const provider = new YookassaProvider();
@@ -158,6 +158,25 @@ test('getStatus(): неизвестный/будущий provider-статус -
   const { ProviderResultUnknownError } = require('../services/paymentProviders/providerErrorTaxonomy');
   const provider = new YookassaProvider();
   await assert.rejects(() => provider.getStatus('x'), (err) => err instanceof ProviderResultUnknownError);
+});
+
+// --- M1-исправление: response.id должен совпадать с requested id -----------
+// (через общий assertMatchingProviderObject() из providerErrorTaxonomy.js —
+// см. providerErrorTaxonomy.test.js для юнит-тестов самого helper'а; здесь —
+// интеграционный тест через реальный вызов provider.getStatus()).
+
+test('getStatus(): response.id ОТЛИЧАЕТСЯ от запрошенного providerPaymentId -> ProviderResultUnknownError, статус чужого платежа не принимается', async () => {
+  setFakeTestCredentials();
+  global.fetch = async () => ({ ok: true, status: 200, json: async () => ({ id: 'yk_DIFFERENT_PAYMENT', status: 'succeeded' }) });
+  const YookassaProvider = freshProviderClass();
+  const { ProviderResultUnknownError } = require('../services/paymentProviders/providerErrorTaxonomy');
+  const provider = new YookassaProvider();
+  await assert.rejects(
+    () => provider.getStatus('yk_REQUESTED_PAYMENT'),
+    (err) => err instanceof ProviderResultUnknownError
+      && err.context.requestedId === 'yk_REQUESTED_PAYMENT'
+      && err.context.receivedId === 'yk_DIFFERENT_PAYMENT',
+  );
 });
 
 // --- форма ответа --------------------------------------------------------------
