@@ -1,26 +1,25 @@
 'use strict';
 
-// YAAM — PostgreSQL orderService, Wave 1 (частичный, изолированный порт).
+// YAAM — PostgreSQL orderService, Wave 1+2 (частичный, изолированный порт).
 //
 // Этот модуль НЕ импортируется ни из server.js, ни из routes/, ни из bot/, ни
 // из server/services/orderService.js (SQLite) — рабочее приложение остаётся
-// полностью на SQLite. Это отдельная, параллельная реализация ровно трёх
-// функций, для которых concurrency-аудит (server/docs/postgresql-
-// concurrency-migration-matrix.md) однозначно выбрал стратегию "обычный
-// transaction() без опций, atomic conditional UPDATE, без SERIALIZABLE, без
+// полностью на SQLite. Это отдельная, параллельная реализация функций, для
+// которых concurrency-аудит (server/docs/postgresql-concurrency-migration-
+// matrix.md) выбрал стратегию "обычный transaction() без опций, atomic
+// conditional UPDATE / partial UNIQUE index, без SERIALIZABLE, без
 // SELECT...FOR UPDATE, без network-вызовов внутри транзакции":
 //
-//   - markPaymentFailed
-//   - restaurantAccept
-//   - restaurantAdvance
+//   Wave 1: markPaymentFailed, restaurantAccept, restaurantAdvance
+//   Wave 2: reserveRefundRow, markPaid, restaurantDecline, cancelByCustomer
 //
-// Почему НЕ markPaid / restaurantDecline / cancelByCustomer (несмотря на то,
-// что они значились в предпочтительном списке задания): все три на
-// определённых ветках вызывают reserveRefundRow() — то есть СОЗДАЮТ refund-
-// строку. Создание refund прямо запрещено на этом этапе ("не переносить...
-// refund creation"). Это не отсутствие времени — это найденная аудитом
-// СКРЫТАЯ ЗАВИСИМОСТЬ, из-за которой эти три функции откладываются на
-// будущую волну (вместе с самим refund-конвейером).
+// Wave 2 переносит ровно ту "связанную группу", для которой Wave 1 нашёл
+// скрытую зависимость (все три вызывающие функции создают refund-строку через
+// reserveRefundRow() на части веток) — теперь reserveRefundRow реализован, и
+// вместе с ним становятся переносимы markPaid/restaurantDecline/
+// cancelByCustomer. Всё, что после резервации требует сетевого вызова
+// провайдера (ensureRefundReady, finalizeRefundSucceeded/Failed), остаётся
+// вне scope — см. заголовочные комментарии над каждой Wave-2 функцией.
 //
 // Архитектурная граница: намеренно НЕТ никакого `if (process.env.DB ===
 // 'postgres')` переключателя ни здесь, ни в SQLite-версии. Два модуля с
@@ -33,15 +32,17 @@
 // драйвера `pg`, а не изменение бизнес-логики. Остальные аспекты контракта
 // (входные параметры, форма результата, текст сообщений об ошибках,
 // статусные переходы) воспроизведены дословно — расхождения, где они
-// существуют, явно перечислены в комментариях ниже и в
-// YAAM-postgresql-order-service-wave-1.pdf, раздел 12.
+// существуют, явно перечислены в комментариях ниже и в PDF-отчётах каждой волны.
 //
-// Ни одна из трёх функций не эмитит orderEvents (в отличие от SQLite-
-// версии) — этот модуль ни с чем не соединён (нет бота-подписчика на его
-// шину), эмиссия в никуда была бы мёртвым кодом. Это инфраструктурный, не
-// бизнес-логический вопрос: подключение уведомлений — часть будущей задачи
-// интеграции, не этой волны.
+// Ни одна функция этого модуля не эмитит orderEvents и не вызывает
+// scheduleRefundProcessing/ensureRefundReady (в отличие от SQLite-версии) —
+// этот модуль ни с чем не соединён (нет бота-подписчика, нет сетевого
+// провайдер-конвейера в scope) — эмиссия/сетевой вызов в никуда были бы
+// мёртвым кодом либо прямым нарушением запрета этой волны. Это
+// инфраструктурный, не бизнес-логический вопрос: подключение уведомлений и
+// провайдер-конвейера — часть будущих задач интеграции.
 
+const crypto = require('node:crypto');
 const db = require('../../db/postgresql');
 
 // Дословная копия ADVANCE_MAP из server/services/orderService.js — та же
@@ -60,6 +61,30 @@ const ADVANCE_MAP = {
 function orderTransitionInvariant(message) {
   console.error(`[services/postgresql/orderService] order transition invariant: ${message}`);
   return new Error('Не удалось безопасно обновить статус заказа');
+}
+
+// Дословная копия RefundInvariantError/refundInvariant() из orderService.js —
+// тот же паттерн, что и orderTransitionInvariant(): публичный .message всегда
+// фиксирован, диагностика уходит только в console.error/.internalMessage.
+// Нужен markPaid/restaurantDecline/cancelByCustomer (Wave 2).
+class RefundInvariantError extends Error {
+  constructor(internalMessage) {
+    super('Не удалось безопасно завершить возврат средств');
+    this.name = 'RefundInvariantError';
+    this.statusCode = 500;
+    this.internalMessage = internalMessage;
+  }
+}
+
+function refundInvariant(message) {
+  console.error(`[services/postgresql/orderService] refund invariant: ${message}`);
+  return new RefundInvariantError(message);
+}
+
+// UUID v4 — дословно тот же генератор, что и newProviderIdempotencyKey() в
+// SQLite-версии (crypto.randomUUID()).
+function newProviderIdempotencyKey() {
+  return crypto.randomUUID();
 }
 
 // Та же корреляция, что и LATEST_REFUND_STATUS_SUBQUERY в SQLite-версии —
@@ -93,6 +118,82 @@ async function getOrder(orderId, client = null) {
     client
   );
   return { ...row, items };
+}
+
+// ---------------------------------------------------------------------------
+// reserveRefundRow(payment, reason, client) — Wave 2
+// ---------------------------------------------------------------------------
+//
+// Только для вызова изнутри УЖЕ открытой db.transaction() (markPaid/
+// restaurantDecline/cancelByCustomer ниже) — сама транзакцию не открывает,
+// обязательно принимает `client` явно (в отличие от остальных helper'ов
+// этого модуля, где client опционален) — вызывающая транзакция должна была
+// уже определить набор изменений (order/payment/refund), которые обязаны
+// закоммититься вместе.
+//
+// SQL-стратегия (см. server/docs/postgresql-concurrency-migration-matrix.md,
+// пункт про резервацию): partial UNIQUE index ux_refunds_one_active_per_payment
+// (refunds(payment_id) WHERE status IN ('requested','processing')) — ПОСЛЕДНЯЯ
+// линия защиты, не JS-уровень. Предварительный SELECT здесь — не "проверка
+// статуса ради проверки" (которую задание просит избегать), а сохранение
+// СУЩЕСТВУЮЩЕГО UX-контракта оригинала: повторный вход в тот же бизнес-переход
+// должен молча вернуть уже зарезервированную строку, а не гонять лишний
+// INSERT/ROLLBACK цикл на частом, ожидаемом idempotent-пути. Настоящая
+// защита от гонки — не эта проверка (она может проиграть TOCTOU), а
+// partial UNIQUE index + SAVEPOINT ниже.
+//
+// Конкурентный сценарий: два вызова reserveRefundRow для ОДНОГО payment.id
+// одновременно видят "нет существующей строки" и оба пытаются INSERT.
+// Один побеждает; второй получает SQLSTATE 23505 от partial UNIQUE index.
+// 23505 — НЕ транзиентная ошибка, callback НЕ ретраится; вместо этого —
+// ROLLBACK TO SAVEPOINT (иначе всё под транзакцией "отравлено" — PostgreSQL
+// SQLSTATE 25P02 на любой следующий запрос, см. YAAM-postgresql-embedded-
+// live-validation.pdf) и повторное чтение — строка-победитель возвращается
+// вызывающему, ровно то поведение, которое имеет SQLite-контракт
+// (reserveRefundRow всегда возвращает существующую активную строку, если она
+// уже есть, независимо от того, кто её создал).
+//
+// Нет ни global lock, ни advisory lock, ни SERIALIZABLE — partial UNIQUE
+// index уже полностью описывает инвариант "не более одной активной
+// refund-строки на payment", механизм, требуемый заданием, не более.
+async function reserveRefundRow(payment, reason, client) {
+  if (!payment) return null;
+
+  const existingRows = await db.query(
+    'SELECT * FROM refunds WHERE payment_id = $1 ORDER BY id DESC LIMIT 1',
+    [payment.id],
+    client
+  );
+  if (existingRows[0]) return existingRows[0];
+
+  const idempotencyKey = newProviderIdempotencyKey();
+  await client.query('SAVEPOINT reserve_refund_row');
+  try {
+    const inserted = await db.execute(
+      `INSERT INTO refunds (payment_id, provider, amount, status, reason, provider_idempotency_key)
+       VALUES ($1, $2, $3, 'requested', $4, $5) RETURNING *`,
+      [payment.id, payment.provider, payment.amount, reason, idempotencyKey],
+      client
+    );
+    await client.query('RELEASE SAVEPOINT reserve_refund_row');
+    return inserted.rows[0];
+  } catch (err) {
+    await client.query('ROLLBACK TO SAVEPOINT reserve_refund_row');
+    if (err.code !== '23505') throw err; // не наш ожидаемый конфликт — пробрасываем как есть
+
+    const winnerRows = await db.query(
+      'SELECT * FROM refunds WHERE payment_id = $1 ORDER BY id DESC LIMIT 1',
+      [payment.id],
+      client
+    );
+    if (!winnerRows[0]) {
+      // Не должно произойти (конфликт по ux_refunds_one_active_per_payment
+      // означает, что активная строка ГАРАНТИРОВАННО существует) — fail loud,
+      // а не молча вернуть null, если инвариант всё же нарушен.
+      throw refundInvariant('конфликт партиального индекса refunds без найденной строки-победителя');
+    }
+    return winnerRows[0];
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -147,6 +248,93 @@ async function markPaymentFailed(orderId, paymentId) {
 }
 
 // ---------------------------------------------------------------------------
+// markPaid(orderId, paymentId) — Wave 2
+// ---------------------------------------------------------------------------
+//
+// Сохранены ВСЕ ветки SQLite-контракта дословно:
+//   1. payment не найден / уже не 'pending' -> тихий no-op (idempotent replay
+//      вебхука, повторный вызов).
+//   2. order не найден -> throw refundInvariant('заказ для подтверждения
+//      оплаты не найден').
+//   3. order.status === 'cancelled' -> "поздняя оплата уже отменённого
+//      заказа": payment всё равно помечается succeeded (провайдер объективно
+//      получил деньги), заказ НЕ воскрешается, атомарно резервируется refund
+//      (claim) — сетевой возврат НЕ вызывается (вне scope этой волны, в
+//      оригинале это scheduleRefundProcessing после commit).
+//   4. order.status не 'awaiting_payment' и не 'cancelled' -> throw
+//      refundInvariant(...) — в SQLite-оригинале помечено "структурно
+//      недостижимо"; под PostgreSQL это РЕАЛЬНО достижимо при гонке с
+//      markPaymentFailed на том же payment (см. concurrency-тесты) — throw
+//      сохранён и теперь имеет практический смысл, не мёртвый код.
+//   5. штатный путь: payment -> succeeded, order awaiting_payment ->
+//      awaiting_restaurant, оба conditional UPDATE в одной транзакции.
+//
+// SQL-стратегия: та же, что и markPaymentFailed — все проверки статуса
+// сделаны через SELECT ПЕРЕД записью только там, где значение прочитанного
+// (payment/order) реально нужно дальше по ветке (id платежа для UPDATE,
+// какая именно ветка исполняется) — не убираемый предварительный SELECT
+// "только ради проверки", а часть бизнес-ветвления. Оба conditional UPDATE
+// (payment/order) используют WHERE с полным ожидаемым предыдущим состоянием
+// и проверяют rowCount, как и требует задание.
+async function markPaid(orderId, paymentId) {
+  if (!Number.isInteger(paymentId)) throw new Error('paymentId обязателен для подтверждения оплаты');
+
+  await db.transaction(async (client) => {
+    const paymentRows = await db.query(
+      `SELECT * FROM payments WHERE id = $1 AND order_id = $2 AND status = 'pending'`,
+      [paymentId, orderId],
+      client
+    );
+    const payment = paymentRows[0];
+    if (!payment) return; // уже разрешён другим событием — чистый idempotent no-op
+
+    const orderRows = await db.query('SELECT status FROM orders WHERE id = $1', [orderId], client);
+    const order = orderRows[0];
+    if (!order) throw refundInvariant('заказ для подтверждения оплаты не найден');
+
+    if (order.status === 'cancelled') {
+      const succeededLate = await db.execute(
+        `UPDATE payments SET status = 'succeeded', updated_at = NOW()
+         WHERE id = $1 AND order_id = $2 AND status = 'pending'`,
+        [payment.id, orderId],
+        client
+      );
+      if (succeededLate.rowCount !== 1) {
+        throw refundInvariant('не удалось зафиксировать позднюю оплату уже отменённого заказа');
+      }
+      await reserveRefundRow(payment, 'customer_cancel', client);
+      return; // статус заказа не меняется — остаётся cancelled
+    }
+
+    if (order.status !== 'awaiting_payment') {
+      throw refundInvariant(`подтверждение оплаты пришло для заказа в неожиданном статусе ${order.status}`);
+    }
+
+    const paid = await db.execute(
+      `UPDATE payments SET status = 'succeeded', updated_at = NOW()
+       WHERE id = $1 AND order_id = $2 AND status = 'pending'`,
+      [payment.id, orderId],
+      client
+    );
+    if (paid.rowCount !== 1) return; // проиграли гонку — тихий no-op, как в оригинале
+
+    const advanced = await db.execute(
+      `UPDATE orders SET status = 'awaiting_restaurant', status_updated_at = NOW()
+       WHERE id = $1 AND status = 'awaiting_payment'`,
+      [orderId],
+      client
+    );
+    if (advanced.rowCount !== 1) throw new Error('не удалось атомарно подтвердить оплату заказа');
+  });
+
+  // Вне транзакции — дословно как в SQLite-оригинале. В оригинале здесь —
+  // scheduleRefundProcessing(lateRefundRow.id) (сетевой вызов, вне scope этой
+  // волны) — сама claim-резервация уже закоммичена внутри транзакции выше,
+  // это единственное, что требуется на этом этапе.
+  return getOrder(orderId);
+}
+
+// ---------------------------------------------------------------------------
 // restaurantAccept(orderId)
 // ---------------------------------------------------------------------------
 //
@@ -177,6 +365,53 @@ async function restaurantAccept(orderId) {
     );
   });
   return getOrder(orderId);
+}
+
+// ---------------------------------------------------------------------------
+// restaurantDecline(orderId) — Wave 2
+// ---------------------------------------------------------------------------
+//
+// Сохранены все ветки SQLite-контракта:
+//   1. order не найден / не 'awaiting_restaurant' -> тихий no-op, вернуть
+//      текущее состояние (или null, если заказа нет).
+//   2. допустимый отказ -> claim refund (если был succeeded-платёж, иначе
+//      reserveRefundRow(null,...) сама вернёт null — "нет оплаты, нечего
+//      возвращать", как и в оригинале), затем order.awaiting_restaurant ->
+//      declined, одной транзакцией.
+//
+// SQL-стратегия (отличается от буквального порядка операций оригинала,
+// сохраняя тот же итоговый набор side effects — см. обоснование ниже):
+// оригинал сначала (внутри уже открытой транзакции) резервирует refund,
+// ПОТОМ выполняет conditional UPDATE заказа. Здесь порядок ИНВЕРТИРОВАН —
+// conditional UPDATE выполняется ПЕРВЫМ (WHERE status='awaiting_restaurant',
+// константа, без предварительного SELECT ради проверки статуса — задание,
+// п.6), и только если rowCount===1 (переход РЕАЛЬНО произошёл) — ищется
+// succeeded-платёж и резервируется refund. Итоговый набор изменений,
+// коммитящихся вместе в ОДНОЙ транзакции, идентичен (оба выполняются, либо
+// оба откатываются) — порядок операций ВНУТРИ уже атомарной транзакции не
+// меняет наблюдаемый результат для вызывающего кода. Дополнительный плюс:
+// при гонке двух restaurantDecline на один заказ теперь reserveRefundRow()
+// вызывается ТОЛЬКО победителем UPDATE (проигравший rowCount=0 никогда не
+// доходит до поиска платежа/резервации) — не полагается только на partial
+// UNIQUE index как backstop, а структурно исключает лишний вызов.
+async function restaurantDecline(orderId) {
+  return db.transaction(async (client) => {
+    const updated = await db.execute(
+      `UPDATE orders SET status = 'declined', status_updated_at = NOW()
+       WHERE id = $1 AND status = 'awaiting_restaurant'`,
+      [orderId],
+      client
+    );
+    if (updated.rowCount === 1) {
+      const paymentRows = await db.query(
+        `SELECT * FROM payments WHERE order_id = $1 AND status = 'succeeded' ORDER BY id DESC LIMIT 1`,
+        [orderId],
+        client
+      );
+      await reserveRefundRow(paymentRows[0] || null, 'restaurant_decline', client);
+    }
+    return getOrder(orderId, client);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -233,10 +468,68 @@ async function restaurantAdvance(orderId, nextStatus, { estimatedMinutes } = {})
   });
 }
 
+// ---------------------------------------------------------------------------
+// cancelByCustomer(orderId) — Wave 2
+// ---------------------------------------------------------------------------
+//
+// Сохранены все ветки SQLite-контракта:
+//   1. order не найден -> throw new Error('заказ не найден').
+//   2. current.status НЕ в {'awaiting_payment','awaiting_restaurant'} ->
+//      throw new Error('заказ уже готовится — отменить нельзя, свяжитесь с
+//      рестораном') — дословный текст.
+//   3. awaiting_payment -> cancelled, БЕЗ резервации refund (оплаты ещё не
+//      было — reserveRefundRow(null,...) вызывается только для
+//      awaiting_restaurant ветки, как и в оригинале).
+//   4. awaiting_restaurant -> claim refund (если есть succeeded-платёж) + ->
+//      cancelled, одной транзакцией.
+//   5. race-проигрыш финального UPDATE -> throw refundInvariant('не удалось
+//      атомарно отменить заказ').
+//
+// SQL-стратегия: в отличие от restaurantAccept/restaurantDecline, здесь
+// предварительное чтение НЕОБХОДИМО (задание, п.6, исключение) — ожидаемый
+// предыдущий статус в финальном UPDATE ДВУЗНАЧЕН (awaiting_payment ИЛИ
+// awaiting_restaurant, не константа), и от того, какой именно, зависит,
+// нужно ли резервировать refund — это не выражается одним WHERE без
+// потери информации о том, какая ветка сработала. Как следствие (тот же
+// эффект, что и restaurantAdvance в Wave 1): окно между чтением current и
+// финальным conditional UPDATE РЕАЛЬНО существует и достижимо под
+// PostgreSQL — проверено живым concurrency-тестом.
+async function cancelByCustomer(orderId) {
+  return db.transaction(async (client) => {
+    const current = await getOrder(orderId, client);
+    if (!current) throw new Error('заказ не найден');
+    if (!['awaiting_payment', 'awaiting_restaurant'].includes(current.status)) {
+      throw new Error('заказ уже готовится — отменить нельзя, свяжитесь с рестораном');
+    }
+
+    if (current.status === 'awaiting_restaurant') {
+      const paymentRows = await db.query(
+        `SELECT * FROM payments WHERE order_id = $1 AND status = 'succeeded' ORDER BY id DESC LIMIT 1`,
+        [orderId],
+        client
+      );
+      await reserveRefundRow(paymentRows[0] || null, 'customer_cancel', client);
+    }
+
+    const updated = await db.execute(
+      `UPDATE orders SET status = 'cancelled', status_updated_at = NOW() WHERE id = $1 AND status = $2`,
+      [orderId, current.status],
+      client
+    );
+    if (updated.rowCount !== 1) throw refundInvariant('не удалось атомарно отменить заказ');
+
+    return getOrder(orderId, client);
+  });
+}
+
 module.exports = {
   getOrder,
+  reserveRefundRow,
   markPaymentFailed,
+  markPaid,
   restaurantAccept,
+  restaurantDecline,
   restaurantAdvance,
+  cancelByCustomer,
   ADVANCE_MAP,
 };
