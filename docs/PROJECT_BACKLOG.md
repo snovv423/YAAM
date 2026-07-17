@@ -8,7 +8,7 @@
 
 **Phase:** Production infrastructure preparation *(рабочее название этапа — в проекте пока нет утверждённой сквозной нумерации фаз, номер не присваивается)*
 
-**Status:** Ready to start — payment timer persistence fix закрыт (закоммичен `7adbdf4`), restaurant response timer persistence fix закрыт (закоммичен `10e1ae2`) и order creation time persistence fix закрыт (закоммичен `e13e52d`), все три запушены в `origin/main`, все три подтверждены на production через Chromium Playwright; read-only аудит готовности к Timeweb VPS проведён (`yaam-timeweb-vps-readiness-audit.pdf`), все три найденных Critical-риска (C1 — незащищённый webhook, C2 — нет бэкапов, C3 — нет защиты от нескольких процессов) закрыты и запушены (`26067fb`); backend по-прежнему работает только локально, VPS не выбран, миграция на PostgreSQL не начата.
+**Status:** Ready to start — payment timer persistence fix закрыт (закоммичен `7adbdf4`), restaurant response timer persistence fix закрыт (закоммичен `10e1ae2`) и order creation time persistence fix закрыт (закоммичен `e13e52d`), все три запушены в `origin/main`, все три подтверждены на production через Chromium Playwright; read-only аудит готовности к Timeweb VPS проведён (`yaam-timeweb-vps-readiness-audit.pdf`), все три найденных Critical-риска (C1 — незащищённый webhook, C2 — нет бэкапов, C3 — нет защиты от нескольких процессов) закрыты и запушены (`26067fb`); backend по-прежнему работает только локально, VPS не выбран. PostgreSQL-миграция **уже начата** параллельно, изолированно от рабочего приложения (схема, db-layer, concurrency-стратегия, Wave 1+2 переноса orderService.js — см. подраздел ниже и `server/docs/postgresql-migration-status.md`), но production-приложение всё ещё полностью на SQLite — переключение и деплой на VPS ещё не выполнены.
 
 **Current approved task:** Развернуть backend на Timeweb VPS.
 
@@ -31,8 +31,25 @@
 - 30 автоматических backend-тестов (`node:test`, без внешних зависимостей), `cd server && npm test`
 
 **Database:**
-- SQLite (`node:sqlite`, `server/db/yaam.db`)
-- Backup/restore механизм реализован и протестирован (`npm run backup`/`npm run restore`, `server/scripts/backup-db.js`/`restore-db.js`, round-trip покрыт тестами) — на реальном сервере по расписанию ещё не запускался, потому что VPS ещё не выбран; миграция на PostgreSQL — в планах
+- SQLite (`node:sqlite`, `server/db/yaam.db`) — **всё ещё единственная БД рабочего приложения**
+- Backup/restore механизм реализован и протестирован (`npm run backup`/`npm run restore`, `server/scripts/backup-db.js`/`restore-db.js`, round-trip покрыт тестами) — на реальном сервере по расписанию ещё не запускался, потому что VPS ещё не выбран
+
+**PostgreSQL migration** (параллельно, изолированно от рабочего приложения — подробный статус в `server/docs/postgresql-migration-status.md`):
+
+Выполнено:
+- DDL (целевая PostgreSQL-схема, `server/db/postgresql/schema.sql`)
+- Async db-layer (`server/db/postgresql/index.js`)
+- Embedded live validation против настоящего PostgreSQL 16.14
+- Concurrency strategy (`transaction()`/`serializableTransaction()` API, 12 live-доказанных сценариев)
+- Order Service Migration Wave 1 (`markPaymentFailed`, `restaurantAccept`, `restaurantAdvance`)
+- Order Service Migration Wave 2 (`reserveRefundRow`, `markPaid`, `restaurantDecline`, `cancelByCustomer`)
+
+Осталось:
+- Следующие orderService waves (refund-сетевой конвейер, `createOrder`, `rateOrder`, sweeper)
+- Полное подключение рабочего приложения к PostgreSQL (сейчас 100% на SQLite)
+- Перенос реальных данных, production backup/restore под PostgreSQL
+- VPS deployment
+- Production validation
 
 **Production:**
 - Ещё не развёрнут (нет VPS, нет production ENV, нет мониторинга/логирования)

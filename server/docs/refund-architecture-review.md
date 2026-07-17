@@ -4,6 +4,15 @@
 Reviewer, Security & QA Reviewer + отдельная независимая архитектурная
 критика) перед реализацией возвратов, до подключения реальной ЮKassa.
 
+> Этот документ описывает state machine и её обоснование на **SQLite**
+> (текущий production-движок). Для актуальной PostgreSQL concurrency-
+> стратегии и точной карты переноса каждого места (включая refund-конвейер)
+> см. [`server/docs/postgresql-concurrency-migration-matrix.md`](./postgresql-concurrency-migration-matrix.md)
+> и [`server/docs/postgresql-migration-status.md`](./postgresql-migration-status.md).
+> Документы не противоречат друг другу — этот описывает утверждённую бизнес-
+> логику state machine (что происходит), матрица — как та же логика
+> реализуется под PostgreSQL (какой SQL/технику использовать для каждого места).
+
 ## Состояния
 
 `requested -> processing -> succeeded` (терминально) | `processing -> failed`

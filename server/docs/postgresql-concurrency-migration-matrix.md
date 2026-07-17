@@ -10,6 +10,14 @@ API упоминаемый ниже — `server/db/postgresql/index.js`: `transa
 `serializableTransaction(fn, options)`. `options.retry` по умолчанию отсутствует
 (нет повторов); включается явно там, где отмечено.
 
+Бизнес-логика и утверждённые инварианты самой refund state machine (что
+происходит, независимо от движка БД) — см.
+[`server/docs/refund-architecture-review.md`](./refund-architecture-review.md).
+Этот файл описывает ТОЛЬКО техническую стратегию переноса под PostgreSQL —
+как та же логика реализуется конкретным SQL/техникой в каждом месте, не
+переопределяет и не отменяет бизнес-решения review'а. Текущий сводный статус
+волн переноса — [`server/docs/postgresql-migration-status.md`](./postgresql-migration-status.md).
+
 Legend локов/constraints: **CU** = conditional UPDATE (`WHERE id=? AND status=X`,
 проверка `rowCount`), **PUI** = partial UNIQUE index (последняя линия защиты),
 **FOR UPDATE** = `SELECT ... FOR UPDATE` перед read-modify-write.
