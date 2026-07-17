@@ -10,7 +10,8 @@
     "seed": "node db/seed.js",
     "backup": "node scripts/backup-db.js",
     "restore": "node scripts/restore-db.js",
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "test:postgresql": "NODE_ENV=test node --test test/postgresql/*.test.js"
   },
   "engines": {
     "node": ">=22.5.0"
@@ -23,5 +24,8 @@
     "express-rate-limit": "^8.5.2",
     "node-telegram-bot-api": "^1.1.2",
     "pg": "^8.22.0"
+  },
+  "devDependencies": {
+    "embedded-postgres": "16.14.0-beta.17"
   }
 }
