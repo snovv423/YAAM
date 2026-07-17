@@ -12,14 +12,27 @@
 //
 //   Wave 1: markPaymentFailed, restaurantAccept, restaurantAdvance
 //   Wave 2: reserveRefundRow, markPaid, restaurantDecline, cancelByCustomer
+//   Wave 3: sweepTimeouts, finalizeRefundSucceeded, finalizeRefundFailed
 //
 // Wave 2 переносит ровно ту "связанную группу", для которой Wave 1 нашёл
 // скрытую зависимость (все три вызывающие функции создают refund-строку через
 // reserveRefundRow() на части веток) — теперь reserveRefundRow реализован, и
 // вместе с ним становятся переносимы markPaid/restaurantDecline/
-// cancelByCustomer. Всё, что после резервации требует сетевого вызова
-// провайдера (ensureRefundReady, finalizeRefundSucceeded/Failed), остаётся
-// вне scope — см. заголовочные комментарии над каждой Wave-2 функцией.
+// cancelByCustomer.
+//
+// Wave 3 закрывает ВСЁ, что осталось от refund-жизненного-цикла и НЕ требует
+// сетевого вызова провайдера, SERIALIZABLE или SELECT...FOR UPDATE:
+//   - sweepTimeouts — та же claim-схема, что restaurantDecline/
+//     cancelByCustomer (последняя из этого семейства функций, явно
+//     рекомендована предыдущим отчётом волны как приоритет №1);
+//   - finalizeRefundSucceeded/finalizeRefundFailed — терминальные переходы
+//     refund-строки (processing -> succeeded|failed), симметричный "финализ"-
+//     аналог finalizeInitialAttempt/finalizeRetryAttempt из аудита, тот же
+//     низкорисковый класс, что и вся Wave 1.
+// Ещё не перенесено (сознательно, вне scope Wave 3): ensureRefundReady
+// claim-шаг (известный баг WHERE-guard — заменять НЕ Wave 3), createOrder/
+// reserveRetryAttempt (payment creation), rateOrder (требует FOR UPDATE),
+// реальные сетевые вызовы YooKassa.
 //
 // Архитектурная граница: намеренно НЕТ никакого `if (process.env.DB ===
 // 'postgres')` переключателя ни здесь, ни в SQLite-версии. Два модуля с
@@ -53,6 +66,11 @@ const ADVANCE_MAP = {
   delivery: { accepted: 'preparing', preparing: 'courier', courier: 'delivered' },
   pickup: { accepted: 'preparing', preparing: 'delivered' },
 };
+
+// Дословная копия RESTAURANT_RESPONSE_WINDOW_SEC из orderService.js — окно
+// ожидания ответа ресторана (секунды), после которого sweepTimeouts()
+// просрочивает заказ. Нужен только sweepTimeouts() (Wave 3).
+const RESTAURANT_RESPONSE_WINDOW_SEC = 180;
 
 // Дословная копия семантики orderTransitionInvariant() из orderService.js:
 // подробное сообщение логируется, но НАРУЖУ всегда уходит один и тот же
@@ -522,6 +540,154 @@ async function cancelByCustomer(orderId) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// finalizeRefundSucceeded(refundId, providerRefundId) — Wave 3
+// ---------------------------------------------------------------------------
+//
+// Сохранены все ветки SQLite-контракта:
+//   1. refund не найден -> throw refundInvariant('строка возврата для
+//      финализации не найдена').
+//   2. уже 'succeeded' -> тихий idempotent no-op, возвращает текущую строку
+//      (повторный вызов — уже финализирован).
+//   3. статус не 'processing' (и не 'succeeded') -> throw refundInvariant(...).
+//   4. штатный путь: refund -> succeeded (+ provider_refund_id/completed_at),
+//      payment succeeded -> refunded, одной транзакцией.
+//   5. race-проигрыш финального UPDATE -> throw refundInvariant('не удалось
+//      атомарно зафиксировать успешный возврат').
+//
+// Предварительный SELECT здесь НЕОБХОДИМ (задание, п.6, исключение) — нужно
+// различить "уже succeeded" (no-op, НЕ ошибка) от "неверный статус" (throw) —
+// эта развилка не выражается одним WHERE без потери информации о том, какая
+// ветка сработала. Как следствие (та же природа, что у restaurantAdvance в
+// Wave 1 и markPaid/cancelByCustomer в Wave 2): окно между чтением и финальным
+// UPDATE реально существует и достижимо под PostgreSQL — например, два
+// конкурентных вызова finalizeRefundSucceeded (дублированный webhook) на один
+// refund — проверено живым concurrency-тестом.
+async function finalizeRefundSucceeded(refundId, providerRefundId) {
+  return db.transaction(async (client) => {
+    const currentRows = await db.query('SELECT * FROM refunds WHERE id = $1', [refundId], client);
+    const current = currentRows[0];
+    if (!current) throw refundInvariant('строка возврата для финализации не найдена');
+    if (current.status === 'succeeded') return current; // повторный вызов — уже финализирован, безопасный no-op
+    if (current.status !== 'processing') {
+      throw refundInvariant(`финализация succeeded невозможна из состояния ${current.status}`);
+    }
+
+    const updated = await db.execute(
+      `UPDATE refunds SET status = 'succeeded', provider_refund_id = $1,
+         next_attempt_at = NULL, completed_at = NOW(), updated_at = NOW()
+       WHERE id = $2 AND status = 'processing'`,
+      [providerRefundId, refundId],
+      client
+    );
+    if (updated.rowCount !== 1) throw refundInvariant('не удалось атомарно зафиксировать успешный возврат');
+
+    await db.execute(
+      `UPDATE payments SET status = 'refunded', updated_at = NOW() WHERE id = $1 AND status = 'succeeded'`,
+      [current.payment_id],
+      client
+    );
+
+    const finalRows = await db.query('SELECT * FROM refunds WHERE id = $1', [refundId], client);
+    return finalRows[0];
+  });
+}
+
+// ---------------------------------------------------------------------------
+// finalizeRefundFailed(refundId, errorCode) — Wave 3
+// ---------------------------------------------------------------------------
+//
+// Тот же паттерн, что finalizeRefundSucceeded — ветки:
+//   1. refund не найден -> throw refundInvariant(...).
+//   2. уже 'failed' -> тихий idempotent no-op.
+//   3. статус не 'processing' -> throw refundInvariant(...).
+//   4. штатный путь: refund -> failed (+ last_error_code/completed_at),
+//      payment НЕ трогается (в отличие от succeeded — платёж остаётся
+//      succeeded, деньги ещё у нас, возврат не удался).
+//   5. race-проигрыш -> throw refundInvariant('не удалось атомарно
+//      зафиксировать неуспешный возврат').
+async function finalizeRefundFailed(refundId, errorCode) {
+  return db.transaction(async (client) => {
+    const currentRows = await db.query('SELECT * FROM refunds WHERE id = $1', [refundId], client);
+    const current = currentRows[0];
+    if (!current) throw refundInvariant('строка возврата для финализации не найдена');
+    if (current.status === 'failed') return current;
+    if (current.status !== 'processing') {
+      throw refundInvariant(`финализация failed невозможна из состояния ${current.status}`);
+    }
+
+    const updated = await db.execute(
+      `UPDATE refunds SET status = 'failed', last_error_code = $1,
+         next_attempt_at = NULL, completed_at = NOW(), updated_at = NOW()
+       WHERE id = $2 AND status = 'processing'`,
+      [errorCode, refundId],
+      client
+    );
+    if (updated.rowCount !== 1) throw refundInvariant('не удалось атомарно зафиксировать неуспешный возврат');
+
+    const finalRows = await db.query('SELECT * FROM refunds WHERE id = $1', [refundId], client);
+    return finalRows[0];
+  });
+}
+
+// ---------------------------------------------------------------------------
+// sweepTimeouts() — Wave 3
+// ---------------------------------------------------------------------------
+//
+// Периодический свип (см. server.js в оригинале — setInterval). Каждый
+// просроченный заказ — своя ОТДЕЛЬНАЯ транзакция (не общая на весь батч):
+// падение/исключение на одном заказе не должно останавливать обработку
+// остальных — сохранено через try/catch на каждой итерации, как в оригинале.
+//
+// SQL-стратегия: `strftime('%s','now') - strftime('%s', status_updated_at) >
+// ?` (SQLite epoch-diff) заменяется на `NOW() - status_updated_at > (? ||
+// ' seconds')::interval` (см. YAAM-postgresql-migration-analysis.pdf,
+// раздел про даты) — семантически идентично, дата хранится как TIMESTAMPTZ,
+// не TEXT.
+//
+// Как и restaurantDecline/cancelByCustomer в Wave 2: conditional UPDATE
+// заказа выполняется ПЕРВЫМ (WHERE status='awaiting_restaurant', константа),
+// reserveRefundRow вызывается ТОЛЬКО если переход реально применился —
+// проигравшая гонка (заказ уже обработан другим событием между SELECT
+// кандидатов и этой транзакцией) даёт тихий skip, не лишний вызов
+// reserveRefundRow и не ошибку. Тем же следствием, что и у restaurantAccept
+// в Wave 1 (нет предварительного getOrder-чтения внутри транзакции), здесь
+// нет отдельного "race после подтверждённой проверки" throw-пути, который
+// был у оригинала (тот путь SQLite тоже никогда не должен был исполняться).
+async function sweepTimeouts() {
+  const stale = await db.query(
+    `SELECT id FROM orders
+     WHERE status = 'awaiting_restaurant'
+       AND NOW() - status_updated_at > ($1 || ' seconds')::interval`,
+    [RESTAURANT_RESPONSE_WINDOW_SEC]
+  );
+
+  for (const { id } of stale) {
+    try {
+      await db.transaction(async (client) => {
+        const updated = await db.execute(
+          `UPDATE orders SET status = 'timed_out', status_updated_at = NOW()
+           WHERE id = $1 AND status = 'awaiting_restaurant'`,
+          [id],
+          client
+        );
+        if (updated.rowCount !== 1) return; // уже обработан другим событием — тихий skip
+
+        const paymentRows = await db.query(
+          `SELECT * FROM payments WHERE order_id = $1 AND status = 'succeeded' ORDER BY id DESC LIMIT 1`,
+          [id],
+          client
+        );
+        await reserveRefundRow(paymentRows[0] || null, 'timeout', client);
+      });
+    } catch (err) {
+      // Тот же принцип, что в оригинале: ошибка на одном заказе не должна
+      // останавливать обработку остальных заказов этого же свипа.
+      console.error(`[services/postgresql/orderService] sweepTimeouts failed for order ${id}:`, err.message);
+    }
+  }
+}
+
 module.exports = {
   getOrder,
   reserveRefundRow,
@@ -531,5 +697,9 @@ module.exports = {
   restaurantDecline,
   restaurantAdvance,
   cancelByCustomer,
+  finalizeRefundSucceeded,
+  finalizeRefundFailed,
+  sweepTimeouts,
   ADVANCE_MAP,
+  RESTAURANT_RESPONSE_WINDOW_SEC,
 };
