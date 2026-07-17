@@ -13,6 +13,7 @@
 //   Wave 1: markPaymentFailed, restaurantAccept, restaurantAdvance
 //   Wave 2: reserveRefundRow, markPaid, restaurantDecline, cancelByCustomer
 //   Wave 3: sweepTimeouts, finalizeRefundSucceeded, finalizeRefundFailed
+//   Wave 4: reserveRetryAttempt, finalizeInitialAttempt, finalizeRetryAttempt
 //
 // Wave 2 переносит ровно ту "связанную группу", для которой Wave 1 нашёл
 // скрытую зависимость (все три вызывающие функции создают refund-строку через
@@ -29,10 +30,21 @@
 //     refund-строки (processing -> succeeded|failed), симметричный "финализ"-
 //     аналог finalizeInitialAttempt/finalizeRetryAttempt из аудита, тот же
 //     низкорисковый класс, что и вся Wave 1.
-// Ещё не перенесено (сознательно, вне scope Wave 3): ensureRefundReady
-// claim-шаг (известный баг WHERE-guard — заменять НЕ Wave 3), createOrder/
-// reserveRetryAttempt (payment creation), rateOrder (требует FOR UPDATE),
-// реальные сетевые вызовы YooKassa.
+//
+// Wave 4 переносит payment-attempt lifecycle (claim → finalize, без самого
+// сетевого вызова провайдера — как и во всех предыдущих волнах):
+//   - reserveRetryAttempt — claim-резервация повторной попытки оплаты после
+//     payment_failed, аналог reserveRefundRow (Wave 2) для payments; тот же
+//     принцип "INSERT + partial UNIQUE index как последняя линия защиты",
+//     но с ДВУМЯ независимыми точками конфликта (payments и
+//     payment_retry_keys) — см. комментарий над функцией.
+//   - finalizeInitialAttempt/finalizeRetryAttempt — симметричная пара
+//     finalize-шагов (creating -> pending), тот же низкорисковый CU-класс,
+//     что и вся Wave 1/3, вызываются ПОСЛЕ ответа провайдера, сами сеть не
+//     трогают.
+// Ещё не перенесено (сознательно, вне scope Wave 4): ensureRefundReady
+// claim-шаг (известный баг WHERE-guard — не эта волна), createOrder
+// (SERIALIZABLE), rateOrder (FOR UPDATE), реальные сетевые вызовы YooKassa.
 //
 // Архитектурная граница: намеренно НЕТ никакого `if (process.env.DB ===
 // 'postgres')` переключателя ни здесь, ни в SQLite-версии. Два модуля с
@@ -103,6 +115,107 @@ function refundInvariant(message) {
 // SQLite-версии (crypto.randomUUID()).
 function newProviderIdempotencyKey() {
   return crypto.randomUUID();
+}
+
+// ---------------------------------------------------------------------------
+// Wave 4 — payment-attempt lifecycle: ошибки, чистые helper'ы, provider name
+// ---------------------------------------------------------------------------
+//
+// Дословные копии классов ошибок из orderService.js (SQLite) — тот же
+// паттерн, что RefundInvariantError выше: PaymentRetryInvariantError/
+// PaymentInitialInvariantError имеют ФИКСИРОВАННЫЙ публичный .message,
+// диагностика — только в console.error/.internalMessage.
+class PaymentRetryConflictError extends Error {
+  constructor(message = 'Повторная попытка оплаты уже завершена или недоступна') {
+    super(message);
+    this.name = 'PaymentRetryConflictError';
+    this.statusCode = 409;
+  }
+}
+
+class PaymentRetryInvariantError extends Error {
+  constructor(internalMessage) {
+    super('Не удалось безопасно завершить платёжную попытку');
+    this.name = 'PaymentRetryInvariantError';
+    this.statusCode = 500;
+    this.internalMessage = internalMessage;
+  }
+}
+
+class PaymentInitialInvariantError extends Error {
+  constructor(internalMessage) {
+    super('Не удалось безопасно завершить создание платежа');
+    this.name = 'PaymentInitialInvariantError';
+    this.statusCode = 500;
+    this.internalMessage = internalMessage;
+  }
+}
+
+function paymentInvariant(message) {
+  console.error(`[services/postgresql/orderService] payment retry invariant: ${message}`);
+  return new PaymentRetryInvariantError(message);
+}
+
+function initialPaymentInvariant(message) {
+  console.error(`[services/postgresql/orderService] initial payment invariant: ${message}`);
+  return new PaymentInitialInvariantError(message);
+}
+
+// ---------------------------------------------------------------------------
+// НАХОДКА АУДИТА (Wave 4): reserveRetryAttempt в SQLite-версии использует
+// server/services/orderAccessService.js.isValidRetryKey()/hashSecret() и
+// server/services/paymentService.js.providerName — оба модуля НЕЛЬЗЯ
+// импортировать сюда напрямую:
+//   - orderAccessService.js делает `const db = require('../db')` на верхнем
+//     уровне файла — просто require() этого модуля уже открыл бы SQLite-
+//     соединение внутри изолированного PostgreSQL-модуля (прямое нарушение
+//     границы "не смешивать SQLite и PostgreSQL");
+//   - paymentService.js на верхнем уровне конструирует ЖИВОЙ экземпляр
+//     провайдера (MockProvider/YookassaProvider) — не нужен для чистой
+//     claim-операции и не должен создаваться как побочный эффект require().
+// Обе используемые функции (isValidRetryKey/hashSecret) и класс
+// OrderAccessInputError — чистые (regex-проверка, SHA-256, никакого I/O), а
+// providerName — тривиальная деривация из ENV. Продублированы здесь ровно
+// тем же паттерном, что ADVANCE_MAP/RESTAURANT_RESPONSE_WINDOW_SEC в
+// предыдущих волнах — не новая абстракция, а сохранение уже установленной
+// границы изоляции модуля.
+class OrderAccessInputError extends Error {
+  constructor(message, statusCode = 400) {
+    super(message);
+    this.name = 'OrderAccessInputError';
+    this.statusCode = statusCode;
+  }
+}
+
+const RETRY_KEY_RE = /^yaam_retry_v1_[A-Za-z0-9_-]{43}$/;
+
+function isValidRetryKey(key) {
+  return typeof key === 'string' && RETRY_KEY_RE.test(key);
+}
+
+function hashSecret(value) {
+  return crypto.createHash('sha256').update(value, 'utf8').digest();
+}
+
+const PROVIDER_NAME = process.env.PAYMENT_PROVIDER || 'mock';
+
+// Асинхронный аналог paymentResultFromRow() из SQLite-версии — читает
+// payment_presentations (существующая строка, не создание) для сборки
+// публичного результата finalize-функций.
+async function paymentResultFromRow(paymentRow, client = null) {
+  if (!paymentRow || !paymentRow.provider_payment_id) return null;
+  const rows = await db.query(
+    'SELECT payment_url, qr_payload FROM payment_presentations WHERE payment_id = $1',
+    [paymentRow.id],
+    client
+  );
+  const presentation = rows[0];
+  if (!presentation) return null;
+  return {
+    providerPaymentId: paymentRow.provider_payment_id,
+    paymentUrl: presentation.payment_url || null,
+    qrPayload: presentation.qr_payload || null,
+  };
 }
 
 // Та же корреляция, что и LATEST_REFUND_STATUS_SUBQUERY в SQLite-версии —
@@ -688,6 +801,333 @@ async function sweepTimeouts() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// reserveRetryAttempt(orderId, retryKey) — Wave 4
+// ---------------------------------------------------------------------------
+//
+// Сохранены все ветки SQLite-контракта:
+//   1. невалидный retryKey -> throw new OrderAccessInputError('Некорректный
+//      ключ повторной оплаты') — ДО открытия транзакции, как и в оригинале.
+//   2. тот же client key уже использован:
+//      - для ДРУГОГО заказа -> throw new PaymentRetryConflictError() (дефолтное сообщение);
+//      - для этого заказа, попытка ещё активна (creating/pending) -> вернуть
+//        её (idempotent — повторный клик/replay тем же ключом);
+//      - для этого заказа, попытка уже терминальна -> throw
+//        PaymentRetryConflictError('Предыдущая попытка оплаты завершена — начните новую').
+//   3. другой (новый) client key, но для заказа УЖЕ есть активная попытка
+//      (creating/pending) -> привязать новый ключ к ней и вернуть её (сходимость
+//      нескольких вкладок/устройств к одной попытке).
+//   4. активной попытки нет:
+//      - заказ не найден -> throw new Error('заказ не найден') (обычный Error, не custom-класс);
+//      - order.status !== 'payment_failed' -> throw PaymentRetryConflictError('Повторная оплата возможна только после ошибки оплаты');
+//      - иначе: создать payments(creating)+payment_retry_attempts(creating)+payment_retry_keys, вернуть.
+//
+// SQL-стратегия и НАЙДЕННЫЙ concurrency-риск (задание явно просило проверить
+// "может ли retry получить одинаковый attempt number" / "что при двух
+// одновременных reserveRetryAttempt"): SQLite-комментарий над оригиналом прямо
+// признаёт, что partial UNIQUE index — ПОСЛЕДНЯЯ линия защиты, JS-проверки
+// выше — только UX-слой. Под PostgreSQL это РЕАЛЬНАЯ гонка с ДВУМЯ разными
+// точками конфликта:
+//   (a) ux_payments_one_active_per_order — два конкурентных вызова с РАЗНЫМИ
+//       client key, оба видят "активной попытки нет", оба пытаются INSERT в
+//       payments;
+//   (b) payment_retry_keys.client_key_hash (PRIMARY KEY) — два конкурентных
+//       вызова с ОДНИМ И ТЕМ ЖЕ client key (двойной клик/повтор запроса).
+// Оба случая закрыты SAVEPOINT + catch 23505 + повторное чтение
+// строки-победителя (тот же принцип, что reserveRefundRow в Wave 2) — НЕ
+// ретраится как транзиентная ошибка, конфликт разрешается чтением, а не
+// повтором callback'а. Живо доказано concurrency-тестами ниже.
+const RETRY_ATTEMPT_BY_CLIENT_KEY_SQL = `
+  SELECT p.*, p.order_id AS retry_order_id, a.provider_idempotency_key, a.state AS retry_state
+  FROM payment_retry_keys k
+  JOIN payment_retry_attempts a ON a.payment_id = k.payment_id
+  JOIN payments p ON p.id = a.payment_id
+  WHERE k.client_key_hash = $1`;
+
+const ACTIVE_RETRY_ATTEMPT_SQL = `
+  SELECT p.*, p.order_id AS retry_order_id, a.provider_idempotency_key, a.state AS retry_state
+  FROM payments p
+  LEFT JOIN payment_retry_attempts a ON a.payment_id = p.id
+  WHERE p.order_id = $1 AND p.status IN ('creating', 'pending')
+  ORDER BY p.id DESC LIMIT 1`;
+
+// Привязывает client key к уже существующей активной попытке. Отдельная
+// SAVEPOINT-защита: тот же client key мог конкурентно привязываться дважды
+// (двойной клик/повтор сетевого запроса тем же ключом) — PRIMARY KEY на
+// client_key_hash тогда даёт 23505, что здесь трактуется как идемпотентный
+// успех (строка с нужным содержимым уже существует), а не ошибка.
+async function linkRetryClientKey(client, clientKeyHash, paymentId) {
+  await client.query('SAVEPOINT link_retry_key');
+  try {
+    await db.execute(
+      'INSERT INTO payment_retry_keys (client_key_hash, payment_id) VALUES ($1, $2)',
+      [clientKeyHash, paymentId],
+      client
+    );
+    await client.query('RELEASE SAVEPOINT link_retry_key');
+  } catch (err) {
+    await client.query('ROLLBACK TO SAVEPOINT link_retry_key');
+    if (err.code !== '23505') throw err;
+    // Уже привязан конкурентно — идемпотентно, ничего делать не нужно.
+  }
+}
+
+async function reserveRetryAttempt(orderId, retryKey) {
+  if (!isValidRetryKey(retryKey)) {
+    throw new OrderAccessInputError('Некорректный ключ повторной оплаты');
+  }
+  const clientKeyHash = hashSecret(retryKey);
+
+  return db.transaction(async (client) => {
+    const sameKeyRows = await db.query(RETRY_ATTEMPT_BY_CLIENT_KEY_SQL, [clientKeyHash], client);
+    const sameKey = sameKeyRows[0];
+    if (sameKey) {
+      if (sameKey.retry_order_id !== orderId) throw new PaymentRetryConflictError();
+      if (['creating', 'pending'].includes(sameKey.status)) return sameKey;
+      throw new PaymentRetryConflictError('Предыдущая попытка оплаты завершена — начните новую');
+    }
+
+    const activeRows = await db.query(ACTIVE_RETRY_ATTEMPT_SQL, [orderId], client);
+    const active = activeRows[0];
+    if (active) {
+      if (!active.provider_idempotency_key) throw new PaymentRetryConflictError();
+      await linkRetryClientKey(client, clientKeyHash, active.id);
+      return active;
+    }
+
+    const orderRows = await db.query('SELECT * FROM orders WHERE id = $1', [orderId], client);
+    const order = orderRows[0];
+    if (!order) throw new Error('заказ не найден');
+    if (order.status !== 'payment_failed') {
+      throw new PaymentRetryConflictError('Повторная оплата возможна только после ошибки оплаты');
+    }
+
+    await client.query('SAVEPOINT reserve_retry_attempt');
+    try {
+      const paymentRows = await db.execute(
+        `INSERT INTO payments (order_id, provider, provider_payment_id, amount, status)
+         VALUES ($1, $2, NULL, $3, 'creating') RETURNING id`,
+        [orderId, PROVIDER_NAME, order.items_total],
+        client
+      );
+      const paymentId = paymentRows.rows[0].id;
+      const providerIdempotencyKey = newProviderIdempotencyKey();
+      await db.execute(
+        `INSERT INTO payment_retry_attempts (payment_id, provider_idempotency_key, state)
+         VALUES ($1, $2, 'creating')`,
+        [paymentId, providerIdempotencyKey],
+        client
+      );
+      await db.execute(
+        'INSERT INTO payment_retry_keys (client_key_hash, payment_id) VALUES ($1, $2)',
+        [clientKeyHash, paymentId],
+        client
+      );
+      await client.query('RELEASE SAVEPOINT reserve_retry_attempt');
+    } catch (err) {
+      await client.query('ROLLBACK TO SAVEPOINT reserve_retry_attempt');
+      if (err.code !== '23505') throw err;
+
+      // Проиграли гонку — кто-то другой уже зарезервировал активную попытку
+      // для этого заказа (либо уже использовал этот же client key) между
+      // нашей проверкой выше и этим INSERT. Не ретраим callback — читаем
+      // актуальное состояние и сходимся к нему, как и в штатных ветках 1-3.
+      const winnerSameKeyRows = await db.query(RETRY_ATTEMPT_BY_CLIENT_KEY_SQL, [clientKeyHash], client);
+      if (winnerSameKeyRows[0]) return winnerSameKeyRows[0];
+
+      const winnerActiveRows = await db.query(ACTIVE_RETRY_ATTEMPT_SQL, [orderId], client);
+      const winnerActive = winnerActiveRows[0];
+      if (!winnerActive) {
+        throw paymentInvariant('конфликт резервации retry-попытки без найденной строки-победителя');
+      }
+      if (!winnerActive.provider_idempotency_key) throw new PaymentRetryConflictError();
+      await linkRetryClientKey(client, clientKeyHash, winnerActive.id);
+      return winnerActive;
+    }
+
+    const finalRows = await db.query(ACTIVE_RETRY_ATTEMPT_SQL, [orderId], client);
+    return finalRows[0];
+  });
+}
+
+// ---------------------------------------------------------------------------
+// finalizeInitialAttempt(paymentRowId, payment) — Wave 4
+// ---------------------------------------------------------------------------
+//
+// Сохранены все ветки SQLite-контракта:
+//   1. попытка не найдена -> throw initialPaymentInvariant('зарезервированный
+//      первоначальный платёж не найден').
+//   2. order.status !== 'awaiting_payment' -> throw initialPaymentInvariant(...)
+//      — ПРОВЕРЯЕТСЯ ВСЕГДА, даже на idempotent-ветке ниже (дословно как в
+//      оригинале — намеренно не "оптимизировано").
+//   3. initial_state === 'ready' (idempotent-повтор):
+//      - provider_payment_id не совпадает с payment.providerPaymentId ->
+//        throw initialPaymentInvariant('провайдер вернул другой первоначальный
+//        платёж для того же ключа') — это НЕ idempotent-успех, а конфликт;
+//      - иначе вернуть уже готовый результат (без записи).
+//   4. НЕ (initial_state==='creating' И payments.status==='creating') ->
+//      throw initialPaymentInvariant('первоначальный платёж находится в
+//      несовместимом состоянии').
+//   5. штатный путь: payments creating->pending, upsert presentation,
+//      payment_initial_attempts creating->ready, одной транзакцией.
+//
+// Реально достижимая под PostgreSQL гонка (два конкурентных
+// finalizeInitialAttempt на один paymentRowId — недостижимо под SQLite):
+// один выигрывает conditional UPDATE, другой получает rowCount=0 и throw
+// initialPaymentInvariant('не удалось финализировать первоначальный платёж')
+// — сохранено, не "исправлено" молча, проверено живым тестом.
+async function finalizeInitialAttempt(paymentRowId, payment) {
+  return db.transaction(async (client) => {
+    const attemptRows = await db.query(
+      `SELECT p.*, a.provider_idempotency_key, a.state AS initial_state,
+         o.status AS order_status
+       FROM payments p JOIN payment_initial_attempts a ON a.payment_id = p.id
+       JOIN orders o ON o.id = p.order_id
+       WHERE p.id = $1`,
+      [paymentRowId],
+      client
+    );
+    const attempt = attemptRows[0];
+    if (!attempt) throw initialPaymentInvariant('зарезервированный первоначальный платёж не найден');
+    if (attempt.order_status !== 'awaiting_payment') {
+      throw initialPaymentInvariant('статус заказа изменился во время создания платежа; требуется сверка');
+    }
+    if (attempt.initial_state === 'ready') {
+      if (attempt.provider_payment_id !== payment.providerPaymentId) {
+        throw initialPaymentInvariant('провайдер вернул другой первоначальный платёж для того же ключа');
+      }
+      const existing = await paymentResultFromRow(attempt, client);
+      if (!existing) throw initialPaymentInvariant('готовый первоначальный платёж не содержит presentation');
+      return existing;
+    }
+    if (attempt.initial_state !== 'creating' || attempt.status !== 'creating') {
+      throw initialPaymentInvariant('первоначальный платёж находится в несовместимом состоянии');
+    }
+
+    const finalized = await db.execute(
+      `UPDATE payments SET provider_payment_id = $1, status = 'pending', updated_at = NOW()
+       WHERE id = $2 AND status = 'creating'`,
+      [payment.providerPaymentId, paymentRowId],
+      client
+    );
+    if (finalized.rowCount !== 1) {
+      throw initialPaymentInvariant('не удалось финализировать первоначальный платёж');
+    }
+    await db.execute(
+      `INSERT INTO payment_presentations (payment_id, payment_url, qr_payload)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (payment_id) DO UPDATE SET
+         payment_url = excluded.payment_url,
+         qr_payload = excluded.qr_payload`,
+      [paymentRowId, payment.paymentUrl || null, payment.qrPayload || null],
+      client
+    );
+    const ready = await db.execute(
+      `UPDATE payment_initial_attempts SET state = 'ready', updated_at = NOW()
+       WHERE payment_id = $1 AND state = 'creating'`,
+      [paymentRowId],
+      client
+    );
+    if (ready.rowCount !== 1) {
+      throw initialPaymentInvariant('ledger первоначального платежа не перешёл в ready');
+    }
+
+    const finalPaymentRows = await db.query('SELECT * FROM payments WHERE id = $1', [paymentRowId], client);
+    return paymentResultFromRow(finalPaymentRows[0], client);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// finalizeRetryAttempt(paymentRowId, payment) — Wave 4
+// ---------------------------------------------------------------------------
+//
+// Сохранены все ветки SQLite-контракта (намеренно АСИММЕТРИЧНЫЕ относительно
+// finalizeInitialAttempt — это свойство оригинала, не унифицировано здесь):
+//   1. попытка не найдена -> throw paymentInvariant('зарезервированная
+//      попытка оплаты не найдена').
+//   2. payments.status === 'pending' (idempotent-повтор, определяется по
+//      payments.status, НЕ по payment_retry_attempts.state — в отличие от
+//      finalizeInitialAttempt):
+//      - provider_payment_id не совпадает -> throw paymentInvariant('провайдер
+//        вернул другой платёж для того же ключа идемпотентности');
+//      - иначе вернуть готовый результат (без записи, БЕЗ проверки статуса
+//        заказа — эта проверка здесь не выполняется на idempotent-ветке,
+//        в отличие от finalizeInitialAttempt).
+//   3. payments.status !== 'creating' (и не 'pending') -> throw new
+//      PaymentRetryConflictError() (дефолтное сообщение, НЕ paymentInvariant).
+//   4. штатный путь: проверить order.status==='payment_failed', затем
+//      payments creating->pending, upsert presentation, payment_retry_attempts
+//      creating->ready, orders payment_failed->awaiting_payment — одной
+//      транзакцией.
+//
+// Реально достижимая под PostgreSQL гонка (два конкурентных
+// finalizeRetryAttempt на один paymentRowId): один выигрывает финальный
+// conditional UPDATE payments, другой — rowCount=0 -> throw
+// paymentInvariant('не удалось финализировать платёжную попытку') —
+// проверено живым тестом.
+async function finalizeRetryAttempt(paymentRowId, payment) {
+  return db.transaction(async (client) => {
+    const attemptRows = await db.query(
+      `SELECT p.*, r.provider_idempotency_key
+       FROM payments p JOIN payment_retry_attempts r ON r.payment_id = p.id
+       WHERE p.id = $1`,
+      [paymentRowId],
+      client
+    );
+    const attempt = attemptRows[0];
+    if (!attempt) throw paymentInvariant('зарезервированная попытка оплаты не найдена');
+    if (attempt.status === 'pending') {
+      if (attempt.provider_payment_id !== payment.providerPaymentId) {
+        throw paymentInvariant('провайдер вернул другой платёж для того же ключа идемпотентности');
+      }
+      return paymentResultFromRow(attempt, client);
+    }
+    if (attempt.status !== 'creating') throw new PaymentRetryConflictError();
+
+    const orderRows = await db.query('SELECT status FROM orders WHERE id = $1', [attempt.order_id], client);
+    const order = orderRows[0];
+    if (!order || order.status !== 'payment_failed') {
+      throw paymentInvariant('состояние заказа изменилось во время создания платежа; требуется сверка');
+    }
+
+    const finalized = await db.execute(
+      `UPDATE payments SET provider_payment_id = $1, status = 'pending', updated_at = NOW()
+       WHERE id = $2 AND status = 'creating'`,
+      [payment.providerPaymentId, paymentRowId],
+      client
+    );
+    if (finalized.rowCount !== 1) throw paymentInvariant('не удалось финализировать платёжную попытку');
+
+    await db.execute(
+      `INSERT INTO payment_presentations (payment_id, payment_url, qr_payload)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (payment_id) DO UPDATE SET
+         payment_url = excluded.payment_url,
+         qr_payload = excluded.qr_payload`,
+      [paymentRowId, payment.paymentUrl || null, payment.qrPayload || null],
+      client
+    );
+    const retryReady = await db.execute(
+      `UPDATE payment_retry_attempts SET state = 'ready', updated_at = NOW()
+       WHERE payment_id = $1 AND state = 'creating'`,
+      [paymentRowId],
+      client
+    );
+    if (retryReady.rowCount !== 1) throw paymentInvariant('ledger повторной оплаты не перешёл в ready');
+
+    const updatedOrder = await db.execute(
+      `UPDATE orders SET status = 'awaiting_payment', status_updated_at = NOW()
+       WHERE id = $1 AND status = 'payment_failed'`,
+      [attempt.order_id],
+      client
+    );
+    if (updatedOrder.rowCount !== 1) throw paymentInvariant('не удалось активировать повторную оплату');
+
+    const finalPaymentRows = await db.query('SELECT * FROM payments WHERE id = $1', [paymentRowId], client);
+    return paymentResultFromRow(finalPaymentRows[0], client);
+  });
+}
+
 module.exports = {
   getOrder,
   reserveRefundRow,
@@ -700,6 +1140,9 @@ module.exports = {
   finalizeRefundSucceeded,
   finalizeRefundFailed,
   sweepTimeouts,
+  reserveRetryAttempt,
+  finalizeInitialAttempt,
+  finalizeRetryAttempt,
   ADVANCE_MAP,
   RESTAURANT_RESPONSE_WINDOW_SEC,
 };
