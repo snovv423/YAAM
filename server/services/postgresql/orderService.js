@@ -16,6 +16,7 @@
 //   Wave 4: reserveRetryAttempt, finalizeInitialAttempt, finalizeRetryAttempt
 //   Wave 5: createOrder
 //   Wave 6: rateOrder
+//   Wave 7: claimRefundForProcessing (claim-половина ensureRefundReady)
 //
 // Wave 2 переносит ровно ту "связанную группу", для которой Wave 1 нашёл
 // скрытую зависимость (все три вызывающие функции создают refund-строку через
@@ -69,9 +70,17 @@
 // проектировании Concurrency Strategy) — Wave 6 тестирует саму функцию
 // rateOrder(), не переоткрывает общий механизм.
 //
-// Ещё не перенесено (сознательно, вне scope Wave 6): ensureRefundReady
-// claim-шаг (известный баг WHERE-guard — не эта волна), реальные сетевые
-// вызовы YooKassa. После Wave 6 это единственная оставшаяся строка матрицы.
+// Wave 7 переносит claimRefundForProcessing — исправленную (lease-guarded,
+// Вариант D) claim-половину ensureRefundReady. Это ЗАКРЫВАЕТ последнюю
+// строку 15-пунктовой concurrency-матрицы: вся SQL-side бизнес-логика
+// orderService.js, не требующая реального сетевого вызова провайдера,
+// теперь перенесена и живо протестирована.
+//
+// Ещё НЕ перенесено (сознательно, вне scope PostgreSQL-миграции вообще, не
+// только этой волны): сам сетевой оркестратор ensureRefundReady() (вызов
+// paymentService.refundPayment()/провайдера), sweepStuckRefunds() (поиск
+// кандидатов для повтора — SQL несложен, но вызывает оркестратор, который не
+// переносится), реальное производственное переключение на PostgreSQL.
 //
 // Архитектурная граница: намеренно НЕТ никакого `if (process.env.DB ===
 // 'postgres')` переключателя ни здесь, ни в SQLite-версии. Два модуля с
@@ -1543,11 +1552,150 @@ async function rateOrder(orderId, rating) {
   return getOrder(orderId);
 }
 
+// ---------------------------------------------------------------------------
+// claimRefundForProcessing(refundId) — Wave 7 (финальная волна SQL-side
+// переноса orderService.js)
+// ---------------------------------------------------------------------------
+//
+// Переносит ТОЛЬКО claim-шаг ensureRefundReady() из SQLite-версии — атомарный
+// переход requested/processing -> processing непосредственно ПЕРЕД сетевым
+// вызовом провайдера. Сам сетевой вызов (paymentService.refundPayment()) и
+// решение succeeded/failed по его результату НЕ переносятся — это работа
+// оркестратора ensureRefundReady(), который остаётся исключительно в SQLite-
+// версии (см. server/docs/postgresql-migration-status.md, раздел "что
+// осталось вне PostgreSQL-миграции", и YAAM-ensure-refund-ready-
+// architecture-review.pdf, раздел 12: "provider integration" уже сделана
+// независимо от этой миграции и явно запрещена к правке в этой волне).
+// finalizeRefundSucceeded/finalizeRefundFailed уже перенесены (Wave 3) и не
+// меняются — эта функция закрывает недостающую claim-половину того же
+// жизненного цикла.
+//
+// ВЫБРАННЫЙ ВАРИАНТ (согласовано отдельно, см. YAAM-ensure-refund-ready-
+// architecture-review.pdf, раздел 11): Вариант D — "lease-guarded conditional
+// UPDATE". next_attempt_at трактуется как lease-поле и проверяется АТОМАРНО
+// внутри WHERE самого claim-UPDATE, а не только в отдельном предварительном
+// SELECT (как делает sweepStuckRefunds() в SQLite-версии сегодня).
+//
+// Почему НЕ буквальный "WHERE status IN ('requested','processing')": строго
+// опровергнуто в architecture review — 'processing' самопетлевое (retryable)
+// состояние по дизайну (см. refund-architecture-review.md), поэтому WHERE,
+// разрешающее его как исходное БЕЗ временного условия, разрешает СКОЛЬКО
+// УГОДНО последовательных re-claim'ов той же строки, каждый из которых
+// запускает СВОЙ сетевой вызов — доказано двумя полностью корректными,
+// строго сериализованными PostgreSQL-транзакциями (T1 claims 'requested'
+// -> 'processing'; T2, придя следом, снова матчит 'processing' as-is и тоже
+// "выигрывает" claim). Это не гонка на уровне отдельной SQL-инструкции
+// (каждый UPDATE атомарен) — это недостаточно ограничительное WHERE-условие.
+//
+// Почему это безопасно и достаточно (без FOR UPDATE/SERIALIZABLE/retry):
+// next_attempt_at IS NULL (никогда не claimался) ИЛИ next_attempt_at <= NOW()
+// (предыдущая lease истекла) — оба случая законно позволяют повторный claim;
+// живая (ещё не истёкшая) lease — НЕТ. PostgreSQL стандартно сериализует
+// конкурентные UPDATE одной строки через row-level lock + EvalPlanQual
+// (переоценка WHERE после снятия блокировки под READ COMMITTED) — второй
+// конкурент, чья lease-проверка после переоценки не проходит, детерминированно
+// получает rowCount=0, независимо от порядка исполнения. Retry не нужен: это
+// не serialization failure (40001/40P01), а штатный, ожидаемый "не выиграл
+// claim" исход conditional UPDATE — тот же принцип, что у ВСЕХ остальных
+// claim-функций матрицы (Wave 1-6).
+//
+// rowCount=0 доменно классифицируется (НЕ пробрасывается как сырая ошибка):
+// перечитываем строку и различаем terminal (succeeded/failed — идемпотентный
+// no-op) / leased (processing с ещё живой lease — chужой claim ещё идёт) /
+// not_found (строка исчезла — структурно недостижимо через FK ON DELETE
+// CASCADE в штатном потоке, но обрабатывается явно, fail-safe) — тот же
+// fail-loud принцип, что refundInvariant() у finalizeRefundSucceeded/Failed.
+//
+// refundAttemptInFlight — дословная копия одноимённой Map из SQLite-версии,
+// но переиспользуется здесь ТОЛЬКО как fast-path оптимизация в рамках
+// процесса (избегает лишнего DB round-trip, если тот же refundId уже
+// claim'ится в этом процессе прямо сейчас) — НЕ основная защита. Основная
+// защита — SQL WHERE-guard выше, единственный механизм, работающий и
+// межпроцессно/межинстансно, и при чисто внутрипроцессном async-интерливинге
+// (см. architecture review, раздел 5, находка R5: сам факт перехода на
+// асинхронный pg-driver делает гонку возможной ДАЖЕ в одном процессе).
+//
+// Не переносится и не меняется: sweepStuckRefunds() (SQL для поиска
+// кандидатов на повтор) — вне scope этой волны; тестирование claim-функции
+// не требует полного sweep-обвязки, только прямых вызовов claim.
+const REFUND_BACKOFF_BASE_SEC = 10;
+const REFUND_BACKOFF_CAP_SEC = 300;
+const refundAttemptInFlight = new Map();
+
+async function claimRefundForProcessing(refundId) {
+  if (refundAttemptInFlight.has(refundId)) return refundAttemptInFlight.get(refundId);
+
+  const operation = db.transaction(async (client) => {
+    const currentRows = await db.query('SELECT * FROM refunds WHERE id = $1', [refundId], client);
+    const current = currentRows[0];
+    if (!current) return { claimed: false, reason: 'not_found', refund: null };
+    if (current.status === 'succeeded' || current.status === 'failed') {
+      return { claimed: false, reason: 'terminal', refund: current };
+    }
+    if (current.status !== 'requested' && current.status !== 'processing') {
+      throw refundInvariant('строка возврата в неизвестном состоянии');
+    }
+
+    const nextAttemptCount = current.attempt_count + 1;
+    const delaySec = Math.min(REFUND_BACKOFF_BASE_SEC * (2 ** nextAttemptCount), REFUND_BACKOFF_CAP_SEC);
+    const updated = await db.execute(
+      `UPDATE refunds SET
+         status = 'processing',
+         attempt_count = $1,
+         last_attempt_at = NOW(),
+         next_attempt_at = NOW() + ($2 || ' seconds')::interval,
+         updated_at = NOW()
+       WHERE id = $3
+         AND (
+           status = 'requested'
+           OR (
+             status = 'processing'
+             AND (next_attempt_at IS NULL OR next_attempt_at <= NOW())
+           )
+         )`,
+      [nextAttemptCount, delaySec, refundId],
+      client
+    );
+    if (updated.rowCount === 1) {
+      const claimedRows = await db.query('SELECT * FROM refunds WHERE id = $1', [refundId], client);
+      return { claimed: true, refund: claimedRows[0] };
+    }
+
+    // rowCount===0 — не выиграли claim. Перечитываем актуальное состояние в
+    // ЭТОЙ ЖЕ транзакции, чтобы доменно объяснить причину, а не вернуть
+    // безликий null.
+    const freshRows = await db.query('SELECT * FROM refunds WHERE id = $1', [refundId], client);
+    const fresh = freshRows[0];
+    if (!fresh) return { claimed: false, reason: 'not_found', refund: null };
+    if (fresh.status === 'succeeded' || fresh.status === 'failed') {
+      return { claimed: false, reason: 'terminal', refund: fresh };
+    }
+    if (fresh.status === 'processing') {
+      return { claimed: false, reason: 'leased', refund: fresh };
+    }
+    // fresh.status === 'requested' здесь означало бы, что наш собственный
+    // UPDATE не матчнул строку, которая по прочтении СЕЙЧАС всё ещё
+    // 'requested' — WHERE безусловно разрешает 'requested', это не должно
+    // быть достижимо. Fail-loud, а не молчаливое несоответствие.
+    throw refundInvariant('claim-конфликт без объяснимой причины (rowCount=0 для requested-строки)');
+  });
+
+  refundAttemptInFlight.set(refundId, operation);
+  try {
+    return await operation;
+  } finally {
+    if (refundAttemptInFlight.get(refundId) === operation) refundAttemptInFlight.delete(refundId);
+  }
+}
+
 module.exports = {
   getOrder,
   createOrder,
   rateOrder,
   RATING_ELIGIBLE_STATUS,
+  claimRefundForProcessing,
+  REFUND_BACKOFF_BASE_SEC,
+  REFUND_BACKOFF_CAP_SEC,
   reserveRefundRow,
   markPaymentFailed,
   markPaid,
