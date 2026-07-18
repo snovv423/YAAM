@@ -116,13 +116,115 @@
 // строку — только вызывается его существующий, непроверенный публичный
 // контракт (createPayment), в точности как это делает SQLite-оригинал.
 //
-// orderEvents по-прежнему НЕ эмитится — Stage 1 явно не включает bot (см.
-// Production Switch Design Review, Stage 3), эмиссия в никуда была бы мёртвым
-// кодом. finalizeRetryAttempt (Wave 4) в оригинале эмитит 'order:status' при
-// payment_failed -> awaiting_payment переходе — здесь этот вызов НЕ
-// добавлялся (сама функция finalizeRetryAttempt не менялась в этой задаче).
+// orderEvents в Stage 1 ещё не эмитился (см. Stage 2 ниже — теперь эмитится).
+
+// ---------------------------------------------------------------------------
+// Production Switch — Stage 2 (orderEvents): PostgreSQL event layer
+// ---------------------------------------------------------------------------
+//
+// Полный аудит SQLite-оригинала (server/services/orderService.js) перед этой
+// задачей показал: событийная модель — ровно ОДИН module-level EventEmitter
+// (`orderEvents`), ровно ДВА имени события ('order:status', 'order:new'),
+// ровно 8 точек эмиссии (markPaid, markPaymentFailed, finalizeRetryAttempt,
+// cancelByCustomer, restaurantAccept, restaurantDecline, restaurantAdvance,
+// sweepTimeouts), ровно ОДИН внешний подписчик (bot/index.js, ТОЛЬКО на
+// 'order:new', из markPaid — "сюда подписан бот, уйдёт уведомление
+// ресторану"). 'order:status' эмитится 7 раз, но не имеет ни одного
+// подписчика в текущей кодовой базе — это существующий, задокументированный
+// факт SQLite-оригинала (вероятно задел на будущий SSE/websocket push), а
+// НЕ то, что нужно "исправлять" здесь: задача Stage 2 — воспроизвести
+// публикующее поведение SQLite один в один, а не добавлять новых
+// подписчиков.
+//
+// Ни createOrder, ни rateOrder, ни finalizeRefundSucceeded/
+// finalizeRefundFailed, ни pauseRestaurant/resumeRestaurant/
+// sweepPauseExpiry НЕ эмитят ничего в оригинале — подтверждено построчным
+// grep по orderService.js — соответствующие функции этого модуля тоже НЕ
+// получают emit-вызовов.
+//
+// Момент эмиссии (до или после commit) — SQLite-оригинал синхронен:
+// db.immediateTransaction(fn)() — это немедленно вызываемая функция, и к
+// моменту, когда она возвращает управление, транзакция УЖЕ закоммичена (или
+// брошено исключение и откачена). Все 8 точек эмиссии в оригинале лежат
+// СТРОГО ПОСЛЕ этого возврата — постоянный, безысключений паттерн "emit
+// после commit". Асинхронный аналог здесь: `db.transaction(fn)`
+// (server/db/postgresql/index.js) резолвит свой Promise только после
+// `await commitTransaction(client)` (COMMIT + release клиента) — см. код
+// transaction() там же. Поэтому `await db.transaction(...)`, ЗАТЕМ emit —
+// структурно та же гарантия, что и у SQLite: к моменту emit изменения уже
+// физически зафиксированы в БД. Никакой новой гонки это не вводит: между
+// commit и emit нет ничего, что могло бы наблюдать "недописанное" состояние
+// (единственный слушатель на сегодня, bot, и сам ещё не подключён к этому
+// модулю — Stage 3).
+//
+// Durability / Outbox Pattern: СОЗНАТЕЛЬНО НЕ внедрён. SQLite-оригинал сам
+// не даёт никакой durability-гарантии — `orderEvents` там тоже голый
+// in-process EventEmitter без персистентности: событие безвозвратно теряется,
+// если процесс упадёт между commit и синхронным emit, или если в момент
+// эмиссии не было подписчика (уже наблюдаемый факт для 'order:status' — 7 из
+// 7 эмиссий сегодня улетают в никуда). Задача явно требует "воспроизвести
+// поведение SQLite" и явно запрещает внедрять outbox "без доказанной
+// необходимости" — здесь такой необходимости нет: мы не меняем контракт,
+// только переносим его на новый драйвер. Outbox стал бы оправдан только в
+// сценарии, которого сегодня нет ни в SQLite, ни здесь — множественные
+// процессы/инстансы приложения, которым нужна ГАРАНТИРОВАННАЯ доставка
+// каждого события (например, будущий переход на несколько реплик API за
+// балансировщиком). Это явно вне рамок Stage 2 — задокументировано как
+// открытый вопрос для будущего масштабирования, не для Stage 3 (bot),
+// которому, как и текущему боту на SQLite, достаточно того же
+// best-effort in-process контракта.
+//
+// Гвард-паттерн эмиссии повторяет SQLite функция-в-функцию там, где это
+// БЕЗОПАСНО под реальной PostgreSQL-конкуренцией (не унифицирован в один
+// общий механизм — это было бы отступлением от установленного в этой задаче
+// принципа "не устранять асимметрии оригинала"):
+//   1. Явный boolean, возвращаемый/устанавливаемый внутри транзакции —
+//      markPaid (`changed`), markPaymentFailed (`changed`),
+//      restaurantAccept (`changed`), И (см. п.4 ниже) restaurantDecline,
+//      sweepTimeouts.
+//   2. Closure-переменная, мутируемая внутри транзакции, проверяемая после —
+//      finalizeRetryAttempt (`orderTransitioned`).
+//   3. Throw-based неявный гвард — все no-op ветки бросают, а не возвращают
+//      falsy, поэтому сам факт "транзакция не бросила" уже сигнал успеха —
+//      cancelByCustomer, restaurantAdvance.
+//   4. НАМЕРЕННОЕ ОТКЛОНЕНИЕ от буквального SQLite-паттерна: SQLite-оригинал
+//      использует post-hoc проверку итогового status на уже полученном
+//      объекте заказа для restaurantDecline/sweepTimeouts (no-op ветка
+//      возвращает getOrder() без явного boolean). Под SQLite это безопасно
+//      (однопоточный синхронный движок — "конкурентных" вызовов физически
+//      не существует), НО под настоящей PostgreSQL MVCC-конкуренцией это
+//      небезопасно: проигравшая гонку транзакция получает rowCount=0, но её
+//      СОБСТВЕННЫЙ последующий getOrder() (та же транзакция, READ COMMITTED
+//      — свежий снимок на каждый оператор) уже видит ЧУЖОЙ закоммиченный
+//      целевой статус — post-hoc проверка проходит и у проигравшего тоже,
+//      что эмитировало бы событие ДВАЖДЫ на один реальный переход, прямо
+//      нарушая требование задания "никогда не публиковать событие дважды".
+//      Обнаружено и живо доказано concurrency-тестами при написании Stage 2
+//      (см. server/test/postgresql/eventLayerStage2.test.js) — НЕ
+//      гипотетический край, а реально воспроизводимый race при двух
+//      конкурентных restaurantDecline/sweepTimeouts на один заказ. Поэтому
+//      restaurantDecline и sweepTimeouts здесь используют явный
+//      rowCount-based boolean (тот же механизм, что и п.1) — единственный
+//      способ узнать "я РЕАЛЬНО применил переход", не зависящий от того, что
+//      видно постфактум. Наблюдаемый результат ДЛЯ ОТДЕЛЬНОГО вызова не
+//      меняется (result.status по-прежнему корректен на обеих ветках) —
+//      меняется только внутренний триггер эмиссии.
+//
+// Payload — тот же объект, что возвращает getOrder() этого модуля (полная
+// внутренняя форма заказа с items[], НЕ toPublicOrderDTO) — идентичная форма
+// SQLite-оригинала, это то, что реально использует bot/index.js
+// ('order:new' handler читает order.restaurant_id/public_code/items/
+// fulfillment_type/address/items_total/customer_phone/comment/id — все эти
+// поля есть в форме getOrder() без изменений).
+//
+// Новый EventEmitter (НЕ импорт SQLite orderEvents — модуль не может
+// require('../orderService'), та же граница изоляции, что уже применена ко
+// всем прочим SQLite-зависимостям этого файла) — структурно независимый
+// инстанс, совместимый по именам событий и форме payload, экспортируется
+// для будущего Stage 3 (bot), который на этом этапе НЕ подключается.
 
 const crypto = require('node:crypto');
+const { EventEmitter } = require('node:events');
 const db = require('../../db/postgresql');
 // Provider layer — НЕ содержит SQLite-зависимости (paymentService.js не
 // делает require('../db')), поэтому её импорт сюда НЕ нарушает границу
@@ -132,6 +234,10 @@ const db = require('../../db/postgresql');
 // эти функции вызывают, но НЕ изменяют provider layer, тем же принципом,
 // что SQLite-оригинал.
 const payments = require('../paymentService');
+
+// PostgreSQL-эквивалент SQLite orderEvents (см. "Production Switch — Stage 2"
+// выше) — структурно независимый инстанс, те же имена событий/форма payload.
+const orderEvents = new EventEmitter();
 
 // Дословная копия ADVANCE_MAP из server/services/orderService.js — та же
 // таблица переходов, тот же исходный комментарий про самовывоз без courier.
@@ -732,6 +838,7 @@ async function reserveRefundRow(payment, reason, client) {
 async function markPaymentFailed(orderId, paymentId) {
   if (!Number.isInteger(paymentId)) throw new Error('paymentId обязателен для ошибки оплаты');
 
+  let changed = false;
   await db.transaction(async (client) => {
     const paymentResult = await db.execute(
       `UPDATE payments SET status = 'failed', updated_at = NOW()
@@ -757,11 +864,16 @@ async function markPaymentFailed(orderId, paymentId) {
     if (orderResult.rowCount !== 1) {
       throw new Error('не удалось атомарно зафиксировать ошибку оплаты');
     }
+    changed = true;
   });
 
   // Вне транзакции — дословно как в SQLite-оригинале (getOrder() тоже
-  // вызывается после db.immediateTransaction(), не внутри неё).
-  return getOrder(orderId);
+  // вызывается после db.immediateTransaction(), не внутри неё; emit —
+  // после await db.transaction(), т.е. строго после commit, см. "Production
+  // Switch — Stage 2" в начале файла).
+  const updated = await getOrder(orderId);
+  if (changed) orderEvents.emit('order:status', updated);
+  return updated;
 }
 
 // ---------------------------------------------------------------------------
@@ -796,6 +908,7 @@ async function markPaymentFailed(orderId, paymentId) {
 async function markPaid(orderId, paymentId) {
   if (!Number.isInteger(paymentId)) throw new Error('paymentId обязателен для подтверждения оплаты');
 
+  let changed = false;
   await db.transaction(async (client) => {
     const paymentRows = await db.query(
       `SELECT * FROM payments WHERE id = $1 AND order_id = $2 AND status = 'pending'`,
@@ -842,13 +955,22 @@ async function markPaid(orderId, paymentId) {
       client
     );
     if (advanced.rowCount !== 1) throw new Error('не удалось атомарно подтвердить оплату заказа');
+    changed = true;
   });
 
   // Вне транзакции — дословно как в SQLite-оригинале. В оригинале здесь —
   // scheduleRefundProcessing(lateRefundRow.id) (сетевой вызов, вне scope этой
   // волны) — сама claim-резервация уже закоммичена внутри транзакции выше,
-  // это единственное, что требуется на этом этапе.
-  return getOrder(orderId);
+  // это единственное, что требуется на этом этапе. `changed` — ТОЛЬКО на
+  // штатном awaiting_payment -> awaiting_restaurant пути (как и в оригинале:
+  // поздняя оплата уже отменённого заказа НЕ меняет order.status и НЕ
+  // эмитит событие — заказ остаётся cancelled).
+  const updated = await getOrder(orderId);
+  if (changed) {
+    orderEvents.emit('order:status', updated);
+    orderEvents.emit('order:new', updated); // сюда подпишется бот в Stage 3
+  }
+  return updated;
 }
 
 // ---------------------------------------------------------------------------
@@ -873,15 +995,19 @@ async function markPaid(orderId, paymentId) {
 // (current.status !== 'awaiting_restaurant'), не отдельный аварийный случай.
 // Это осознанное упрощение, а не пропущенный кейс — см. parity-тесты.
 async function restaurantAccept(orderId) {
+  let changed = false;
   await db.transaction(async (client) => {
-    await db.execute(
+    const applied = await db.execute(
       `UPDATE orders SET status = 'accepted', status_updated_at = NOW()
        WHERE id = $1 AND status = 'awaiting_restaurant'`,
       [orderId],
       client
     );
+    changed = applied.rowCount === 1;
   });
-  return getOrder(orderId);
+  const updated = await getOrder(orderId);
+  if (changed) orderEvents.emit('order:status', updated);
+  return updated;
 }
 
 // ---------------------------------------------------------------------------
@@ -912,14 +1038,47 @@ async function restaurantAccept(orderId) {
 // доходит до поиска платежа/резервации) — не полагается только на partial
 // UNIQUE index как backstop, а структурно исключает лишний вызов.
 async function restaurantDecline(orderId) {
-  return db.transaction(async (client) => {
+  // ВНИМАНИЕ — намеренное отличие от буквального SQLite-гварда (см.
+  // "Production Switch — Stage 2", п.4 в начале файла): SQLite-оригинал
+  // использует post-hoc сравнение итогового order.status с 'declined' —
+  // это безопасно ТОЛЬКО потому, что SQLite синхронен и однопоточен: две
+  // "последовательные" (не говоря уже о "конкурентных") JS-вызова
+  // restaurantDecline() никогда не перекрываются, поэтому проигравший вызов
+  // видит current.status !== 'awaiting_restaurant' ЕЩЁ ДО попытки UPDATE и
+  // корректно не эмитит... кроме одного случая: ПОВТОРНЫЙ вызов на уже
+  // declined-заказе (current.status УЖЕ 'declined' на входе) тоже проходит
+  // post-hoc проверку и эмитит СНОВА — сам SQLite-оригинал содержит эту
+  // особенность (не задокументирована как намеренная, не покрыта его
+  // собственными тестами на счётчик событий).
+  //
+  // Под PostgreSQL с РЕАЛЬНОЙ конкуренцией (не последовательные вызовы, а
+  // два транзакции, пересекающиеся во времени) буквальный перенос этого
+  // гварда был бы СТРОГО хуже: проигравшая транзакция блокируется на
+  // UPDATE, дожидается COMMIT победителя, затем её собственный rowCount=0,
+  // но её ПОСЛЕДУЮЩИЙ getOrder() (та же транзакция, READ COMMITTED — свежий
+  // снимок на каждый оператор) УЖЕ видит чужой закоммиченный status='declined'
+  // — post-hoc проверка проходит и у проигравшего тоже, эмитируя ДВАЖДЫ на
+  // один реальный переход. Это прямо нарушает требование задания "никогда не
+  // публиковать событие дважды", и это НЕ гипотетический край: два конкурентных
+  // администратора/повторный webhook restaurantDecline на один заказ — штатный
+  // сценарий, не экзотика.
+  //
+  // Поэтому здесь используется explicit rowCount-based boolean (тот же
+  // принцип, что markPaid/markPaymentFailed/restaurantAccept) — единственный
+  // способ узнать "я РЕАЛЬНО применил переход", независимый от того, что
+  // видно постфактум. Наблюдаемый результат для КАЖДОГО ОТДЕЛЬНОГО вызова не
+  // меняется (result.status по-прежнему 'declined' и в проигранной, и в
+  // выигранной ветке) — меняется только внутренний триггер эмиссии.
+  let changed = false;
+  const order = await db.transaction(async (client) => {
     const updated = await db.execute(
       `UPDATE orders SET status = 'declined', status_updated_at = NOW()
        WHERE id = $1 AND status = 'awaiting_restaurant'`,
       [orderId],
       client
     );
-    if (updated.rowCount === 1) {
+    changed = updated.rowCount === 1;
+    if (changed) {
       const paymentRows = await db.query(
         `SELECT * FROM payments WHERE order_id = $1 AND status = 'succeeded' ORDER BY id DESC LIMIT 1`,
         [orderId],
@@ -929,6 +1088,10 @@ async function restaurantDecline(orderId) {
     }
     return getOrder(orderId, client);
   });
+  if (changed) {
+    orderEvents.emit('order:status', order);
+  }
+  return order;
 }
 
 // ---------------------------------------------------------------------------
@@ -950,7 +1113,7 @@ async function restaurantDecline(orderId) {
 // ПРОВЕРЕН живым concurrency-тестом (в отличие от SQLite, где этот путь
 // доказуемо не выполняется никогда).
 async function restaurantAdvance(orderId, nextStatus, { estimatedMinutes } = {}) {
-  return db.transaction(async (client) => {
+  const order = await db.transaction(async (client) => {
     const currentRows = await db.query(
       'SELECT fulfillment_type, status FROM orders WHERE id = $1',
       [orderId],
@@ -983,6 +1146,11 @@ async function restaurantAdvance(orderId, nextStatus, { estimatedMinutes } = {})
 
     return getOrder(orderId, client);
   });
+  // Throw-based гвард (как cancelByCustomer ниже) — каждая no-op/ошибочная
+  // ветка выше бросает, а не тихо возвращает; сам факт, что мы дошли сюда без
+  // исключения, уже сигнал успешного перехода — отдельный boolean не нужен.
+  orderEvents.emit('order:status', order);
+  return order;
 }
 
 // ---------------------------------------------------------------------------
@@ -1012,7 +1180,7 @@ async function restaurantAdvance(orderId, nextStatus, { estimatedMinutes } = {})
 // финальным conditional UPDATE РЕАЛЬНО существует и достижимо под
 // PostgreSQL — проверено живым concurrency-тестом.
 async function cancelByCustomer(orderId) {
-  return db.transaction(async (client) => {
+  const order = await db.transaction(async (client) => {
     const current = await getOrder(orderId, client);
     if (!current) throw new Error('заказ не найден');
     if (!['awaiting_payment', 'awaiting_restaurant'].includes(current.status)) {
@@ -1037,6 +1205,9 @@ async function cancelByCustomer(orderId) {
 
     return getOrder(orderId, client);
   });
+  // Throw-based гвард — см. restaurantAdvance выше, тот же принцип.
+  orderEvents.emit('order:status', order);
+  return order;
 }
 
 // ---------------------------------------------------------------------------
@@ -1162,15 +1333,27 @@ async function sweepTimeouts() {
   );
 
   for (const { id } of stale) {
+    // Тот же race-safe rowCount-boolean гвард, что и restaurantDecline выше
+    // (см. подробное обоснование там) — post-hoc сравнение итогового status
+    // здесь ТОЖЕ было бы небезопасно: два конкурентных sweepTimeouts() на
+    // ОДИН и тот же просроченный заказ (штатный сценарий — интервальный
+    // свип может пересечься сам с собой при долгой предыдущей итерации, либо
+    // ручной вызов sweepTimeouts из ops-инструмента пересечётся с фоновым
+    // таймером) дают проигравшему rowCount=0, но его собственный
+    // ПОСЛЕДУЮЩИЙ getOrder() в той же транзакции уже увидел бы чужой
+    // закоммиченный 'timed_out' — post-hoc проверка эмитила бы у обоих.
+    let order;
+    let changed = false;
     try {
-      await db.transaction(async (client) => {
+      order = await db.transaction(async (client) => {
         const updated = await db.execute(
           `UPDATE orders SET status = 'timed_out', status_updated_at = NOW()
            WHERE id = $1 AND status = 'awaiting_restaurant'`,
           [id],
           client
         );
-        if (updated.rowCount !== 1) return; // уже обработан другим событием — тихий skip
+        changed = updated.rowCount === 1;
+        if (!changed) return getOrder(id, client); // тихий skip — уже обработан другим событием
 
         const paymentRows = await db.query(
           `SELECT * FROM payments WHERE order_id = $1 AND status = 'succeeded' ORDER BY id DESC LIMIT 1`,
@@ -1178,11 +1361,16 @@ async function sweepTimeouts() {
           client
         );
         await reserveRefundRow(paymentRows[0] || null, 'timeout', client);
+        return getOrder(id, client);
       });
     } catch (err) {
       // Тот же принцип, что в оригинале: ошибка на одном заказе не должна
       // останавливать обработку остальных заказов этого же свипа.
       console.error(`[services/postgresql/orderService] sweepTimeouts failed for order ${id}:`, err.message);
+      continue;
+    }
+    if (changed) {
+      orderEvents.emit('order:status', order);
     }
   }
 }
@@ -1452,7 +1640,16 @@ async function finalizeInitialAttempt(paymentRowId, payment) {
 // paymentInvariant('не удалось финализировать платёжную попытку') —
 // проверено живым тестом.
 async function finalizeRetryAttempt(paymentRowId, payment) {
-  return db.transaction(async (client) => {
+  // Closure-переменные, мутируемые внутри транзакции, проверяемые после её
+  // резолва — тот же гвард-паттерн, что SQLite orderTransitioned (см.
+  // "Production Switch — Stage 2" в начале файла, п.2). attempt.order_id —
+  // FK, неизменяем после вставки строки payment, поэтому захват его здесь
+  // эквивалентен повторному SELECT payments.order_id, который делает
+  // SQLite-оригинал ПОСЛЕ commit — то же наблюдаемое значение, без лишнего
+  // запроса.
+  let orderTransitioned = false;
+  let transitionedOrderId = null;
+  const result = await db.transaction(async (client) => {
     const attemptRows = await db.query(
       `SELECT p.*, r.provider_idempotency_key
        FROM payments p JOIN payment_retry_attempts r ON r.payment_id = p.id
@@ -1508,10 +1705,16 @@ async function finalizeRetryAttempt(paymentRowId, payment) {
       client
     );
     if (updatedOrder.rowCount !== 1) throw paymentInvariant('не удалось активировать повторную оплату');
+    orderTransitioned = true;
+    transitionedOrderId = attempt.order_id;
 
     const finalPaymentRows = await db.query('SELECT * FROM payments WHERE id = $1', [paymentRowId], client);
     return paymentResultFromRow(finalPaymentRows[0], client);
   });
+  if (orderTransitioned) {
+    orderEvents.emit('order:status', await getOrder(transitionedOrderId));
+  }
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -2081,6 +2284,7 @@ async function claimRefundForProcessing(refundId) {
 }
 
 module.exports = {
+  orderEvents,
   getOrder,
   createOrder,
   rateOrder,
