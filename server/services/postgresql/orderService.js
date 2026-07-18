@@ -14,6 +14,7 @@
 //   Wave 2: reserveRefundRow, markPaid, restaurantDecline, cancelByCustomer
 //   Wave 3: sweepTimeouts, finalizeRefundSucceeded, finalizeRefundFailed
 //   Wave 4: reserveRetryAttempt, finalizeInitialAttempt, finalizeRetryAttempt
+//   Wave 5: createOrder
 //
 // Wave 2 переносит ровно ту "связанную группу", для которой Wave 1 нашёл
 // скрытую зависимость (все три вызывающие функции создают refund-строку через
@@ -42,9 +43,24 @@
 //     finalize-шагов (creating -> pending), тот же низкорисковый CU-класс,
 //     что и вся Wave 1/3, вызываются ПОСЛЕ ответа провайдера, сами сеть не
 //     трогают.
-// Ещё не перенесено (сознательно, вне scope Wave 4): ensureRefundReady
-// claim-шаг (известный баг WHERE-guard — не эта волна), createOrder
-// (SERIALIZABLE), rateOrder (FOR UPDATE), реальные сетевые вызовы YooKassa.
+//
+// Wave 5 переносит createOrder — единственную функцию во всей матрице,
+// требующую serializableTransaction() (SERIALIZABLE + retry на 40001/40P01):
+// инвариант "не более одного awaiting_payment заказа на телефон+ресторан в
+// TTL-окне" — классический write-skew, не выразимый через partial UNIQUE
+// index. Точный replay/secretsAlreadyUsed по-прежнему защищены обычными
+// UNIQUE-индексами на order_access_credentials + SAVEPOINT/catch 23505, тем
+// же принципом, что reserveRefundRow (Wave 2) / reserveRetryAttempt (Wave 4).
+// Как и во всех предыдущих волнах, createOrder() здесь — ТОЛЬКО claim-шаг
+// (создание order/order_items/payments/payment_initial_attempts строк);
+// сетевой вызов провайдера (оригинальный resolveCreationOrder ->
+// ensureInitialAttemptReady) не переносится — уже перенесённый в Wave 4
+// finalizeInitialAttempt покрывает finalize-половину того же жизненного
+// цикла, оставляя непортированным только сам сетевой хоп к YooKassa.
+//
+// Ещё не перенесено (сознательно, вне scope Wave 5): ensureRefundReady
+// claim-шаг (известный баг WHERE-guard — не эта волна), rateOrder
+// (FOR UPDATE), реальные сетевые вызовы YooKassa.
 //
 // Архитектурная граница: намеренно НЕТ никакого `if (process.env.DB ===
 // 'postgres')` переключателя ни здесь, ни в SQLite-версии. Два модуля с
@@ -198,6 +214,302 @@ function hashSecret(value) {
 }
 
 const PROVIDER_NAME = process.env.PAYMENT_PROVIDER || 'mock';
+
+// ---------------------------------------------------------------------------
+// Wave 5 (createOrder) — та же граница изоляции, что описана выше для Wave 4:
+// orderAccessService.js/paymentService.js нельзя импортировать (SQLite/
+// провайдер как побочный эффект require()), поэтому дублируются только
+// реально нужные createOrder чистые части: валидация/хэширование секретов
+// создания заказа (isValidOrderToken/isValidCreateKey/hashCreationRequest),
+// класс ActiveOrderConflictError, нормализация телефона, форматирование
+// public_code и TTL-константа дедупа — дословные копии соответствующих
+// функций/констант из orderAccessService.js и orderService.js (SQLite).
+// ---------------------------------------------------------------------------
+
+class OrderCreationInputError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'OrderCreationInputError';
+    this.statusCode = 400;
+  }
+}
+
+class ActiveOrderConflictError extends Error {
+  constructor() {
+    super('Для этого ресторана уже есть незавершённый заказ');
+    this.name = 'ActiveOrderConflictError';
+    this.statusCode = 409;
+  }
+}
+
+const ORDER_TOKEN_RE = /^yaam_ord_v1_[A-Za-z0-9_-]{43}$/;
+const CREATE_KEY_RE = /^yaam_create_v1_[A-Za-z0-9_-]{43}$/;
+
+function isValidOrderToken(token) {
+  return typeof token === 'string' && ORDER_TOKEN_RE.test(token);
+}
+
+function isValidCreateKey(key) {
+  return typeof key === 'string' && CREATE_KEY_RE.test(key);
+}
+
+function hashCreationRequest(canonicalRequest) {
+  return hashSecret(JSON.stringify(canonicalRequest));
+}
+
+// Дословная копия normalizeRuPhone() из orderService.js (SQLite) — сервер не
+// доверяет фронту, нормализует номер заново, а не просто принимает то, что
+// прислал клиент.
+function normalizeRuPhone(raw) {
+  let d = String(raw || '').replace(/\D/g, '');
+  if (d.length === 11 && d[0] === '8') d = `7${d.slice(1)}`;
+  else if (d.length === 10) d = `7${d}`;
+  if (d.length !== 11 || d[0] !== '7') return null;
+  return `+${d}`;
+}
+
+// Дословная копия formatPublicCode() — публичный номер строится из
+// внутреннего id (IDENTITY, уникален и монотонно растёт), не случайного числа.
+function formatPublicCode(id) {
+  return `YAAM-${String(id).padStart(5, '0')}`;
+}
+
+// Дословная копия AWAITING_PAYMENT_DEDUP_TTL_SEC (см. комментарий в
+// orderService.js) — временная demo-логика дедупа брошенных неоплаченных
+// заказов, продуктовое решение, не часть этой волны.
+const AWAITING_PAYMENT_DEDUP_TTL_SEC = 15 * 60;
+
+// Асинхронный аналог initialAttemptRowByCredentials() из SQLite-версии —
+// точный replay по паре секретов создания заказа (BOTH token_hash И
+// create_key_hash должны совпасть — в отличие от secretsAlreadyUsed ниже,
+// которая проверяет OR). LEFT JOIN на payment_initial_attempts сохранён
+// дословно, хотя для строк, созданных самим createOrder(), ledger всегда
+// существует — защитный случай сохранён для побитового соответствия оригиналу.
+async function initialAttemptRowByCredentials(tokenHash, createKeyHash, client = null) {
+  const rows = await db.query(
+    `SELECT p.*, p.order_id AS initial_order_id,
+       a.provider_idempotency_key, a.state AS initial_state,
+       c.request_hash
+     FROM order_access_credentials c
+     JOIN payments p ON p.order_id = c.order_id
+     LEFT JOIN payment_initial_attempts a ON a.payment_id = p.id
+     WHERE c.token_hash = $1 AND c.create_key_hash = $2
+     ORDER BY CASE WHEN a.payment_id IS NOT NULL THEN 0 ELSE 1 END, p.id ASC
+     LIMIT 1`,
+    [tokenHash, createKeyHash],
+    client
+  );
+  return rows[0] || null;
+}
+
+// createOrder — единственное место во всей матрице, где обязателен
+// serializableTransaction() (см. server/docs/postgresql-concurrency-
+// migration-matrix.md, строка #2). Причина: инвариант "не более одного
+// awaiting_payment заказа на телефон+ресторан в TTL-окне" — это классический
+// write-skew (два конкурентных SELECT видят "конфликтов нет", оба вставляют
+// новый заказ) и НЕ выражается через partial UNIQUE index (условие зависит от
+// времени и множества строк, а не от одного уникального ключа). Обычная
+// SERIALIZABLE-изоляция (SSI, predicate locks) обнаруживает эту аномалию и
+// абортирует одну из транзакций с 40001 — retry-обёртка автоматически
+// перезапускает её с нуля, и на повторной попытке conflictingOrder-SELECT
+// уже видит зафиксированную строку победителя, поэтому корректно бросает
+// ActiveOrderConflictError вместо "утечки" сырой 40001 наружу.
+//
+// Точный replay (та же пара секретов) и secretsAlreadyUsed, напротив, УЖЕ
+// защищены partial/обычными UNIQUE-индексами на order_access_credentials
+// (token_hash, create_key_hash) — это последняя линия защиты для этой ветки,
+// тот же принцип SAVEPOINT + catch 23505 + повторное чтение
+// строки-победителя, что и в reserveRefundRow (Wave 2) / reserveRetryAttempt
+// (Wave 4). 23505 здесь НЕ ретраится (не транзиентна) — только сам факт
+// serialization failure (40001/40P01) ретраится обёрткой serializableTransaction().
+//
+// Реально достижимый ТОЛЬКО под PostgreSQL edge-case (структурно невозможен
+// под однопоточным SQLite): два конкурентных запроса с ЧАСТИЧНО совпадающими
+// секретами (совпадает только token ИЛИ только createKey, не оба сразу — это
+// не легитимный клиентский сценарий, а либо баг клиента, либо злонамеренный
+// повтор одного секрета из другой сессии) могут пройти pre-insert
+// secretsAlreadyUsed-проверку одновременно (оба видят "не занято"), и тогда
+// один из двух получит 23505 от отдельного UNIQUE-индекса (token_hash ИЛИ
+// create_key_hash), для которого точный AND-replay (initialAttemptRowByCredentials)
+// не находит строку-победителя (у неё другая вторая половина пары). В этом
+// случае бросается тот же ActiveOrderConflictError, что бросил бы
+// синхронный pre-insert secretsAlreadyUsed-путь, если бы успел увидеть
+// конфликт первым — семантически идентичный исход, не новая ветка ошибки.
+async function createOrder({
+  restaurantId, city, customerName, customerPhone, address, comment, items,
+  fulfillmentType, orderAccessToken, createIdempotencyKey,
+}) {
+  if (!isValidOrderToken(orderAccessToken)) {
+    throw new OrderAccessInputError('Некорректный токен доступа к заказу', 401);
+  }
+  if (!isValidCreateKey(createIdempotencyKey)) {
+    throw new OrderAccessInputError('Некорректный ключ создания заказа');
+  }
+  const tokenHash = hashSecret(orderAccessToken);
+  const createKeyHash = hashSecret(createIdempotencyKey);
+
+  if (!customerName || !customerName.trim()) throw new OrderCreationInputError('customerName обязателен');
+  const normalizedPhone = normalizeRuPhone(customerPhone);
+  if (!normalizedPhone) throw new OrderCreationInputError('укажите корректный номер телефона');
+  if (!items || !items.length) throw new OrderCreationInputError('корзина пуста');
+
+  const normalizedFulfillment = fulfillmentType === 'pickup' ? 'pickup' : 'delivery';
+  const normalizedCustomerName = customerName.trim();
+  const normalizedAddress = address || '';
+  const normalizedComment = comment || '';
+  const requestedItems = items.map((item) => {
+    const menuItemId = Number(item.menuItemId);
+    if (!Number.isInteger(menuItemId) || menuItemId <= 0) {
+      throw new OrderCreationInputError('в заказе есть позиция без корректного блюда из меню');
+    }
+    const qty = Number(item.qty);
+    if (!Number.isInteger(qty) || qty <= 0) {
+      throw new OrderCreationInputError(`некорректное количество для «${item.name || menuItemId}»`);
+    }
+    return { menuItemId, qty, clientName: item.name };
+  });
+  const canonicalItems = requestedItems
+    .map(({ menuItemId, qty }) => ({ menuItemId, qty }))
+    .sort((a, b) => a.menuItemId - b.menuItemId || a.qty - b.qty);
+  const requestHash = hashCreationRequest({
+    restaurantId: Number(restaurantId),
+    city: city || '',
+    customerName: normalizedCustomerName,
+    customerPhone: normalizedPhone,
+    address: normalizedAddress,
+    comment: normalizedComment,
+    fulfillmentType: normalizedFulfillment,
+    items: canonicalItems,
+  });
+
+  // Тот же fast-path, что в SQLite: идемпотентный replay не должен зависеть
+  // от изменчивого меню/режима ресторана — снимок уже зафиксирован COMMIT'ом
+  // первой попытки.
+  const existingAttempt = await initialAttemptRowByCredentials(tokenHash, createKeyHash);
+  if (existingAttempt) {
+    if (!Buffer.from(existingAttempt.request_hash).equals(requestHash)) {
+      throw new ActiveOrderConflictError();
+    }
+    return { orderId: existingAttempt.initial_order_id, replay: true };
+  }
+
+  const restaurantRows = await db.query('SELECT * FROM restaurants WHERE id = $1', [restaurantId]);
+  const restaurant = restaurantRows[0];
+  if (!restaurant) throw new OrderCreationInputError('ресторан не найден');
+  if (!restaurant.is_open) throw new OrderCreationInputError('ресторан сейчас закрыт — заказ невозможен');
+
+  // Клиентские name/price — не источник истины, только menuItemId проверяется
+  // и цена/название берутся из БД. Прямой вызов API в обход браузера не может
+  // занизить сумму.
+  const trustedItems = [];
+  for (const { menuItemId, qty, clientName } of requestedItems) {
+    const rows = await db.query(
+      'SELECT * FROM menu_items WHERE id = $1 AND restaurant_id = $2',
+      [menuItemId, restaurantId]
+    );
+    const real = rows[0];
+    if (!real) throw new OrderCreationInputError(`блюдо не найдено: ${clientName || menuItemId}`);
+    if (!real.is_available) throw new OrderCreationInputError(`блюдо «${real.name}» сейчас в стоп-листе`);
+    trustedItems.push({ menuItemId, name: real.name, price: real.price, qty });
+  }
+
+  const itemsTotal = trustedItems.reduce((sum, i) => sum + i.price * i.qty, 0);
+  if (itemsTotal < restaurant.min_order) {
+    throw new OrderCreationInputError(`сумма заказа ${itemsTotal} меньше минимальной ${restaurant.min_order}`);
+  }
+  const commission = Math.round(itemsTotal * 0.07); // YAAM_COMMISSION_RATE, дословно из paymentService.calcCommission
+
+  return db.serializableTransaction(async (client) => {
+    const exactReplay = await initialAttemptRowByCredentials(tokenHash, createKeyHash, client);
+    if (exactReplay) {
+      if (!Buffer.from(exactReplay.request_hash).equals(requestHash)) {
+        throw new ActiveOrderConflictError();
+      }
+      return { orderId: exactReplay.initial_order_id, replay: true };
+    }
+
+    const conflictRows = await db.query(
+      `SELECT id FROM orders
+       WHERE restaurant_id = $1 AND customer_phone = $2 AND status = 'awaiting_payment'
+         AND (
+           NOW() - created_at <= ($3 || ' seconds')::interval
+           OR EXISTS (
+             SELECT 1 FROM payments p WHERE p.order_id = orders.id AND p.status = 'creating'
+           )
+         )
+       ORDER BY id DESC LIMIT 1`,
+      [restaurantId, normalizedPhone, AWAITING_PAYMENT_DEDUP_TTL_SEC],
+      client
+    );
+    const usedRows = await db.query(
+      'SELECT 1 FROM order_access_credentials WHERE token_hash = $1 OR create_key_hash = $2 LIMIT 1',
+      [tokenHash, createKeyHash],
+      client
+    );
+    if (conflictRows[0] || usedRows[0]) {
+      throw new ActiveOrderConflictError();
+    }
+
+    await client.query('SAVEPOINT create_order_claim');
+    try {
+      const orderRows = await db.execute(
+        `INSERT INTO orders (
+           public_code, restaurant_id, city, customer_name, customer_phone, address,
+           fulfillment_type, comment, items_total, commission_amount, status
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'awaiting_payment') RETURNING id`,
+        [
+          `TMP-${process.hrtime.bigint()}`, restaurantId, city, normalizedCustomerName, normalizedPhone,
+          normalizedAddress, normalizedFulfillment, normalizedComment, itemsTotal, commission,
+        ],
+        client
+      );
+      const newId = orderRows.rows[0].id;
+      await db.execute('UPDATE orders SET public_code = $1 WHERE id = $2', [formatPublicCode(newId), newId], client);
+      await db.execute(
+        'INSERT INTO order_access_credentials (order_id, token_hash, create_key_hash, request_hash) VALUES ($1,$2,$3,$4)',
+        [newId, tokenHash, createKeyHash, requestHash],
+        client
+      );
+      for (const it of trustedItems) {
+        await db.execute(
+          'INSERT INTO order_items (order_id, menu_item_id, name, price, qty) VALUES ($1,$2,$3,$4,$5)',
+          [newId, it.menuItemId, it.name, it.price, it.qty],
+          client
+        );
+      }
+      const payRows = await db.execute(
+        `INSERT INTO payments (order_id, provider, provider_payment_id, amount, status)
+         VALUES ($1, $2, NULL, $3, 'creating') RETURNING id`,
+        [newId, PROVIDER_NAME, itemsTotal],
+        client
+      );
+      const paymentId = payRows.rows[0].id;
+      await db.execute(
+        `INSERT INTO payment_initial_attempts (payment_id, provider_idempotency_key, state)
+         VALUES ($1, $2, 'creating')`,
+        [paymentId, newProviderIdempotencyKey()],
+        client
+      );
+      await client.query('RELEASE SAVEPOINT create_order_claim');
+      return { orderId: newId, replay: false };
+    } catch (err) {
+      await client.query('ROLLBACK TO SAVEPOINT create_order_claim');
+      if (err.code !== '23505') throw err;
+
+      const winner = await initialAttemptRowByCredentials(tokenHash, createKeyHash, client);
+      if (!winner) {
+        // Реально достижимо только частичным совпадением секретов — см.
+        // комментарий над функцией. Тот же публичный исход, что и у
+        // синхронного pre-insert secretsAlreadyUsed-пути.
+        throw new ActiveOrderConflictError();
+      }
+      if (!Buffer.from(winner.request_hash).equals(requestHash)) {
+        throw new ActiveOrderConflictError();
+      }
+      return { orderId: winner.initial_order_id, replay: true };
+    }
+  });
+}
 
 // Асинхронный аналог paymentResultFromRow() из SQLite-версии — читает
 // payment_presentations (существующая строка, не создание) для сборки
@@ -1130,6 +1442,7 @@ async function finalizeRetryAttempt(paymentRowId, payment) {
 
 module.exports = {
   getOrder,
+  createOrder,
   reserveRefundRow,
   markPaymentFailed,
   markPaid,
@@ -1145,4 +1458,7 @@ module.exports = {
   finalizeRetryAttempt,
   ADVANCE_MAP,
   RESTAURANT_RESPONSE_WINDOW_SEC,
+  AWAITING_PAYMENT_DEDUP_TTL_SEC,
+  ActiveOrderConflictError,
+  OrderCreationInputError,
 };
