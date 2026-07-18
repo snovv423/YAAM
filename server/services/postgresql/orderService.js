@@ -15,6 +15,7 @@
 //   Wave 3: sweepTimeouts, finalizeRefundSucceeded, finalizeRefundFailed
 //   Wave 4: reserveRetryAttempt, finalizeInitialAttempt, finalizeRetryAttempt
 //   Wave 5: createOrder
+//   Wave 6: rateOrder
 //
 // Wave 2 переносит ровно ту "связанную группу", для которой Wave 1 нашёл
 // скрытую зависимость (все три вызывающие функции создают refund-строку через
@@ -58,9 +59,19 @@
 // finalizeInitialAttempt покрывает finalize-половину того же жизненного
 // цикла, оставляя непортированным только сам сетевой хоп к YooKassa.
 //
-// Ещё не перенесено (сознательно, вне scope Wave 5): ensureRefundReady
-// claim-шаг (известный баг WHERE-guard — не эта волна), rateOrder
-// (FOR UPDATE), реальные сетевые вызовы YooKassa.
+// Wave 6 переносит rateOrder — единственную функцию во всей матрице,
+// требующую SELECT ... FOR UPDATE: restaurants.rating/rating_count — classic
+// read-modify-write агрегат без conditional-UPDATE-эквивалента. Порядок
+// блокировок (orders-строка первой, restaurants-строка второй) сохранён
+// дословно из оригинала и исключает deadlock конструктивно (см. комментарий
+// над функцией). Живой механизм FOR UPDATE уже был доказан заранее в
+// concurrency.test.js #5/6/7 (написаны именно на этой паре колонок при
+// проектировании Concurrency Strategy) — Wave 6 тестирует саму функцию
+// rateOrder(), не переоткрывает общий механизм.
+//
+// Ещё не перенесено (сознательно, вне scope Wave 6): ensureRefundReady
+// claim-шаг (известный баг WHERE-guard — не эта волна), реальные сетевые
+// вызовы YooKassa. После Wave 6 это единственная оставшаяся строка матрицы.
 //
 // Архитектурная граница: намеренно НЕТ никакого `if (process.env.DB ===
 // 'postgres')` переключателя ни здесь, ни в SQLite-версии. Два модуля с
@@ -1440,9 +1451,103 @@ async function finalizeRetryAttempt(paymentRowId, payment) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// rateOrder(orderId, rating) — Wave 6
+// ---------------------------------------------------------------------------
+//
+// Дословная копия RATING_ELIGIBLE_STATUS из orderService.js (SQLite) — нужна
+// только rateOrder.
+const RATING_ELIGIBLE_STATUS = 'delivered';
+
+// rateOrder — единственная функция всей concurrency-матрицы, требующая
+// SELECT ... FOR UPDATE (см. postgresql-concurrency-migration-matrix.md,
+// строка #14, и Finding #2 там же). Причина: restaurants.rating/rating_count
+// — классический read-modify-write агрегат БЕЗ conditional-UPDATE-
+// эквивалента (новое значение вычисляется из старого в JS, затем
+// записывается безусловно) — под READ COMMITTED это lost update (два
+// конкурентных клиента читают один и тот же rating_count, оба вычисляют
+// "+1" от одного и того же числа, второй UPDATE молча затирает первый).
+// SQLite безопасен здесь только благодаря однопоточности (см. оригинальный
+// комментарий у rateOrder — "быстрый, но не единственный барьер").
+//
+// Порядок блокировок (сохранён дословно из SQLite-версии, где он же
+// исключает deadlock конструктивно, не только "случайно"):
+//   1. conditional UPDATE orders (WHERE rating IS NULL) — ПЕРВЫМ.
+//   2. SELECT ... FOR UPDATE restaurants — ВТОРЫМ, только если (1) победил.
+// Каждый вызов rateOrder всегда блокирует РОВНО одну orders-строку (свою
+// собственную — разные заказы никогда не делят одну строку orders) и РОВНО
+// одну restaurants-строку, и всегда в этом порядке. Двух транзакций,
+// которые блокировали бы одни и те же ДВЕ строки в обратном порядке, здесь
+// быть не может (каждый вызов трогает свой уникальный orders.id, общий
+// ресурс только restaurants.id, и он всегда берётся вторым) — deadlock
+// исключён конструктивно, не требует ни retry на 40P01, ни
+// детерминированного упорядочивания вручную (в отличие от классического
+// double-row-lock сценария из concurrency.test.js #8a/8b).
+//
+// FOR UPDATE блокирует (заставляет конкурента физически ждать), а не
+// конфликтует (не бросает ошибку и не требует retry) — поэтому здесь
+// НЕТ retry-опций у transaction(), в отличие от createOrder (Wave 5).
+// Живое доказательство самого механизма (два конкурента, FOR UPDATE,
+// rollback/commit-видимость) уже покрыто concurrency.test.js #5/6/7,
+// написанными именно на restaurants.rating/rating_count заранее, при
+// проектировании Concurrency Strategy — Wave 6 добавляет тесты САМОЙ
+// функции rateOrder(), не переоткрывает общий механизм.
+//
+// Асимметрия, сохранённая дословно из оригинала (НЕ исправляется в этой
+// волне): rateOrder бросает только голые `Error(...)` без `.statusCode` —
+// единственная функция orderService.js с такой формой ошибок (все прочие
+// используют кастомные классы с `.statusCode`). Сохранено бит-в-бит,
+// включая тексты сообщений.
+async function rateOrder(orderId, rating) {
+  const order = await getOrder(orderId);
+  if (!order) throw new Error('заказ не найден');
+  if (order.status !== RATING_ELIGIBLE_STATUS) throw new Error('оценить можно только доставленный заказ');
+
+  // Явная перепроверка оплаты по таблице payments — defense-in-depth поверх
+  // state machine, дословно из оригинала (см. комментарий там же).
+  const paidRows = await db.query(
+    "SELECT id FROM payments WHERE order_id = $1 AND status = 'succeeded' ORDER BY id DESC LIMIT 1",
+    [orderId]
+  );
+  if (!paidRows[0]) throw new Error('заказ не оплачен');
+  if (!Number.isInteger(rating) || rating < 1 || rating > 5) throw new Error('оценка должна быть 1..5');
+
+  // Быстрый, но не единственный барьер (см. оригинальный комментарий) —
+  // настоящая защита ниже, conditional UPDATE внутри транзакции.
+  if (order.rating != null) throw new Error('вы уже оценили этот заказ');
+
+  const rated = await db.transaction(async (client) => {
+    const updated = await db.execute(
+      'UPDATE orders SET rating = $1 WHERE id = $2 AND rating IS NULL',
+      [rating, orderId],
+      client
+    );
+    if (updated.rowCount === 0) return false; // проиграли гонку — кто-то уже оценил этот заказ
+
+    const restaurantRows = await db.query(
+      'SELECT rating, rating_count FROM restaurants WHERE id = $1 FOR UPDATE',
+      [order.restaurant_id],
+      client
+    );
+    const r = restaurantRows[0];
+    const newCount = r.rating_count + 1;
+    const newRating = (Number(r.rating) * r.rating_count + rating) / newCount;
+    await db.execute(
+      'UPDATE restaurants SET rating = $1, rating_count = $2 WHERE id = $3',
+      [Math.round(newRating * 10) / 10, newCount, order.restaurant_id],
+      client
+    );
+    return true;
+  });
+  if (!rated) throw new Error('вы уже оценили этот заказ');
+  return getOrder(orderId);
+}
+
 module.exports = {
   getOrder,
   createOrder,
+  rateOrder,
+  RATING_ELIGIBLE_STATUS,
   reserveRefundRow,
   markPaymentFailed,
   markPaid,
