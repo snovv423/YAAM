@@ -76,17 +76,15 @@
 // orderService.js, не требующая реального сетевого вызова провайдера,
 // теперь перенесена и живо протестирована.
 //
-// Ещё НЕ перенесено (сознательно, вне scope PostgreSQL-миграции вообще, не
-// только этой волны): сам сетевой оркестратор ensureRefundReady() (вызов
-// paymentService.refundPayment()/провайдера), sweepStuckRefunds() (поиск
-// кандидатов для повтора — SQL несложен, но вызывает оркестратор, который не
-// переносится), реальное производственное переключение на PostgreSQL.
+// Ещё НЕ перенесено на конец Wave 7 (SQL-side миграция): сам сетевой
+// оркестратор ensureRefundReady() (вызов paymentService.refundPayment()/
+// провайдера), sweepStuckRefunds() (поиск кандидатов для повтора — SQL
+// несложен, но вызывает оркестратор, который не переносится), реальное
+// производственное переключение на PostgreSQL.
 //
 // Архитектурная граница: намеренно НЕТ никакого `if (process.env.DB ===
 // 'postgres')` переключателя ни здесь, ни в SQLite-версии. Два модуля с
 // одинаковыми именами функций, разными реализациями, разными файлами.
-// Переключение вызывающего кода (routes/bot) на этот модуль — отдельная
-// будущая задача, не часть этой волны.
 //
 // Единственное намеренное отличие интерфейса от SQLite-версии: все функции
 // здесь ASYNC (возвращают Promise) — это неизбежное следствие асинхронного
@@ -95,16 +93,45 @@
 // статусные переходы) воспроизведены дословно — расхождения, где они
 // существуют, явно перечислены в комментариях ниже и в PDF-отчётах каждой волны.
 //
-// Ни одна функция этого модуля не эмитит orderEvents и не вызывает
-// scheduleRefundProcessing/ensureRefundReady (в отличие от SQLite-версии) —
-// этот модуль ни с чем не соединён (нет бота-подписчика, нет сетевого
-// провайдер-конвейера в scope) — эмиссия/сетевой вызов в никуда были бы
-// мёртвым кодом либо прямым нарушением запрета этой волны. Это
-// инфраструктурный, не бизнес-логический вопрос: подключение уведомлений и
-// провайдер-конвейера — часть будущих задач интеграции.
+// ---------------------------------------------------------------------------
+// Production Switch — Stage 1 (routes/api.js): создание/восстановление заказа
+// ---------------------------------------------------------------------------
+//
+// Wave 1-7 (SQL-side миграция) сознательно НЕ вызывали paymentService и НЕ
+// эмитили события — весь модуль был "ни с чем не соединён", claim/finalize
+// без сети. Stage 1 Production Switch (см. YAAM-production-switch-design-
+// review.pdf) — первая задача, которой ДЕЙСТВИТЕЛЬНО нужен реальный сетевой
+// вызов провайдера: server/routes/postgresql/api.js (новый, изолированный,
+// НЕ подключённый к server.js — та же граница, что у этого файла) не может
+// вернуть клиенту QR/paymentUrl для НОВОГО заказа, не создав платёж у
+// провайдера. Поэтому здесь добавлены ensureInitialAttemptReady/
+// ensureRetryAttemptReady/resolveCreationOrder/createOrderAndResolve/
+// recoverOrder/retryPayment — дословные асинхронные аналоги одноимённых
+// функций SQLite-orderService.js, которые ВЫЗЫВАЮТ (а не изменяют)
+// paymentService.createPayment() между уже перенесёнными claim (Wave 4/5) и
+// finalize (Wave 4) шагами — тот же принцип claim → network → finalize, что
+// уже установлен ВСЕМИ волнами, просто впервые здесь СОБРАННЫЙ в одну
+// вызываемую цепочку, а не оставленный "на будущее". Сам provider layer
+// (paymentService.js, mockProvider.js, yookassaProvider.js) НЕ менялся ни на
+// строку — только вызывается его существующий, непроверенный публичный
+// контракт (createPayment), в точности как это делает SQLite-оригинал.
+//
+// orderEvents по-прежнему НЕ эмитится — Stage 1 явно не включает bot (см.
+// Production Switch Design Review, Stage 3), эмиссия в никуда была бы мёртвым
+// кодом. finalizeRetryAttempt (Wave 4) в оригинале эмитит 'order:status' при
+// payment_failed -> awaiting_payment переходе — здесь этот вызов НЕ
+// добавлялся (сама функция finalizeRetryAttempt не менялась в этой задаче).
 
 const crypto = require('node:crypto');
 const db = require('../../db/postgresql');
+// Provider layer — НЕ содержит SQLite-зависимости (paymentService.js не
+// делает require('../db')), поэтому её импорт сюда НЕ нарушает границу
+// изоляции "не смешивать SQLite и PostgreSQL", установленную Wave 4/5 для
+// orderAccessService.js. Нужна начиная со Stage 1 (Production Switch) —
+// см. комментарий у ensureInitialAttemptReady/ensureRetryAttemptReady ниже:
+// эти функции вызывают, но НЕ изменяют provider layer, тем же принципом,
+// что SQLite-оригинал.
+const payments = require('../paymentService');
 
 // Дословная копия ADVANCE_MAP из server/services/orderService.js — та же
 // таблица переходов, тот же исходный комментарий про самовывоз без courier.
@@ -320,6 +347,33 @@ async function initialAttemptRowByCredentials(tokenHash, createKeyHash, client =
     client
   );
   return rows[0] || null;
+}
+
+// ---------------------------------------------------------------------------
+// Stage 1 (routes/api.js): дословные асинхронные копии parseBearerAuthorization/
+// findAuthorizedOrderId из orderAccessService.js (SQLite) — та же граница
+// изоляции, что и isValidRetryKey/hashSecret выше: orderAccessService.js
+// нельзя импортировать (require('../db') на верхнем уровне), обе функции —
+// чистые/read-only, дублируются тем же приёмом.
+// ---------------------------------------------------------------------------
+
+function parseBearerAuthorization(headerValue) {
+  if (typeof headerValue !== 'string') return null;
+  const match = /^Bearer ([^\s]+)$/.exec(headerValue);
+  return match && isValidOrderToken(match[1]) ? match[1] : null;
+}
+
+async function findAuthorizedOrderId(publicCode, rawToken, client = null) {
+  if (!isValidOrderToken(rawToken)) return null;
+  const rows = await db.query(
+    `SELECT o.id
+     FROM orders o
+     JOIN order_access_credentials a ON a.order_id = o.id
+     WHERE o.public_code = $1 AND a.token_hash = $2`,
+    [publicCode, hashSecret(rawToken)],
+    client
+  );
+  return rows[0] ? rows[0].id : null;
 }
 
 // createOrder — единственное место во всей матрице, где обязателен
@@ -1461,6 +1515,344 @@ async function finalizeRetryAttempt(paymentRowId, payment) {
 }
 
 // ---------------------------------------------------------------------------
+// Stage 1 (routes/api.js) — DTO, ошибки, orchestration (claim -> network ->
+// finalize, собранные в одну цепочку впервые в этой задаче)
+// ---------------------------------------------------------------------------
+
+// Дословные копии соответствующих классов из orderService.js (SQLite) —
+// тот же паттерн, что и все предыдущие волны (фиксированный публичный
+// message/statusCode).
+class PaymentInitialUnavailableError extends Error {
+  constructor() {
+    super('Платёжный сервис временно недоступен — повторите оформление заказа');
+    this.name = 'PaymentInitialUnavailableError';
+    this.statusCode = 503;
+  }
+}
+
+class OrderCreationRecoveryNotFoundError extends Error {
+  constructor() {
+    super('заказ не найден');
+    this.name = 'OrderCreationRecoveryNotFoundError';
+    this.statusCode = 404;
+  }
+}
+
+class PaymentRetryUnavailableError extends Error {
+  constructor() {
+    super('Платёжный сервис временно недоступен — повторите попытку');
+    this.name = 'PaymentRetryUnavailableError';
+    this.statusCode = 503;
+  }
+}
+
+// Дословные копии toPublicRefundStatus/toPublicOrderDTO/toPublicPaymentDTO —
+// чистые функции формы результата, ноль SQL, идентичны для обеих версий БД
+// (поля берутся из уже загруженного объекта, не из новых запросов).
+function toPublicRefundStatus(latestRefundStatus) {
+  if (!latestRefundStatus) return 'none';
+  if (latestRefundStatus === 'succeeded') return 'done';
+  if (latestRefundStatus === 'failed') return 'failed';
+  return 'processing'; // requested | processing
+}
+
+function toPublicOrderDTO(order) {
+  if (!order) return null;
+  const {
+    public_code, status, status_updated_at, items_total,
+    estimated_ready_minutes, restaurant_phone, fulfillment_type, rating,
+    latest_refund_status,
+  } = order;
+  return {
+    public_code, status, status_updated_at, items_total,
+    estimated_ready_minutes, restaurant_phone, fulfillment_type, rating,
+    refund_status: toPublicRefundStatus(latest_refund_status),
+  };
+}
+
+function toPublicPaymentDTO(payment) {
+  if (!payment) return null;
+  return {
+    paymentUrl: payment.paymentUrl || null,
+    qrPayload: payment.qrPayload || null,
+  };
+}
+
+// orderCreationContext() в SQLite-оригинале возвращает {restaurantId,
+// createdAt, items} отдельным SQL-запросом и наполняет ТОЛЬКО
+// creationResult().context — поле, которое НИ ОДИН обработчик
+// routes/api.js фактически не читает из ответа (публичный контракт —
+// {order, payment}; context передавался в теле ответа, но клиент его не
+// использует, см. отсутствие ".context"/"context:" во всём client/js/*.js).
+// Реализовывать здесь вхолостую повторяющий оригинал SQL-запрос без единого
+// потребителя было бы добавлением того, что объективно не нужно (задание
+// прямо просит переносить только действительно необходимое для работы
+// routes/api.js) — context всегда null, задокументировано явно, не тихая
+// потеря поведения.
+function creationResult(order, payment) {
+  return { order, payment, context: null };
+}
+
+// Дословная асинхронная копия activePaymentRowByOrder() — читает самый
+// свежий payment заказа в статусе creating/pending вместе с ledger обеих
+// разновидностей попытки (initial/retry), чтобы resolveCreationOrder() ниже
+// мог определить, какую именно ветку ensureXAttemptReady вызывать.
+async function activePaymentRowByOrder(orderId, client = null) {
+  const rows = await db.query(
+    `SELECT p.*,
+       i.provider_idempotency_key AS initial_provider_idempotency_key,
+       i.state AS initial_state,
+       r.provider_idempotency_key AS retry_provider_idempotency_key,
+       r.state AS retry_state
+     FROM payments p
+     LEFT JOIN payment_initial_attempts i ON i.payment_id = p.id
+     LEFT JOIN payment_retry_attempts r ON r.payment_id = p.id
+     WHERE p.order_id = $1 AND p.status IN ('creating', 'pending')
+     ORDER BY p.id DESC LIMIT 1`,
+    [orderId],
+    client
+  );
+  return rows[0] || null;
+}
+
+// In-flight Map — дословная копия принципа refundAttemptInFlight (Wave 7):
+// fast-path оптимизация в рамках процесса, НЕ основная защита. Основная
+// защита от двойного платежа — уже перенесённые (Wave 4) conditional UPDATE
+// в finalizeInitialAttempt/finalizeRetryAttempt (WHERE status='creating').
+const initialAttemptInFlight = new Map();
+const retryAttemptInFlight = new Map();
+
+function providerCreateTimeoutMs() {
+  const configured = Number(process.env.PAYMENT_CREATE_TIMEOUT_MS || 10000);
+  return Number.isFinite(configured) && configured >= 10 && configured <= 120000
+    ? configured
+    : 10000;
+}
+
+// Дословная копия createPaymentWithTimeout() — Promise.race вокруг
+// paymentService.createPayment(), тот же таймаут-механизм, что и
+// refundPaymentWithTimeout в SQLite-оригинале (не переносился — refund
+// оркестрация вне scope).
+async function createPaymentWithTimeout(params) {
+  let timer;
+  try {
+    return await Promise.race([
+      payments.createPayment(params),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('payment provider timeout')), providerCreateTimeoutMs());
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Дословный асинхронный аналог ensureInitialAttemptReady() — claim (Wave 5,
+// createOrder) уже закоммичен ДО вызова этой функции; сеть вызывается здесь,
+// ВНЕ какой-либо открытой транзакции; finalize (Wave 4, finalizeInitialAttempt)
+// уже перенесён и не меняется. Сохранены все ветки контракта: order не
+// awaiting_payment -> null (exact replay терминального заказа не трогает
+// провайдера повторно); legacy без ledger -> попытка вернуть уже сохранённый
+// provider id без сети; state==='ready' -> idempotent-возврат уже готового
+// результата; иначе — claim -> network -> finalize с in-flight дедупликацией.
+async function ensureInitialAttemptReady(attempt) {
+  if (!attempt) throw initialPaymentInvariant('первоначальная платёжная попытка не найдена');
+
+  const currentOrder = await getOrder(attempt.order_id);
+  if (!currentOrder) throw initialPaymentInvariant('заказ первоначальной попытки не найден');
+  if (currentOrder.status !== 'awaiting_payment') return null;
+
+  if (!attempt.initial_state) {
+    const legacy = await paymentResultFromRow(attempt);
+    if (legacy) return legacy;
+    throw initialPaymentInvariant('legacy-платёж без provider id требует ручной сверки');
+  }
+  if (attempt.initial_state === 'ready') {
+    const existing = await paymentResultFromRow(attempt);
+    if (!existing) throw initialPaymentInvariant('готовый первоначальный платёж не содержит данных продолжения');
+    return existing;
+  }
+  if (attempt.initial_state !== 'creating' || attempt.status !== 'creating' || !attempt.provider_idempotency_key) {
+    throw initialPaymentInvariant('первоначальная платёжная попытка повреждена');
+  }
+  if (initialAttemptInFlight.has(attempt.id)) return initialAttemptInFlight.get(attempt.id);
+
+  const operation = (async () => {
+    const order = await getOrder(attempt.order_id);
+    if (!order) throw initialPaymentInvariant('заказ первоначальной попытки не найден');
+    if (order.status !== 'awaiting_payment') return null;
+    let payment;
+    try {
+      payment = await createPaymentWithTimeout({
+        orderId: attempt.order_id,
+        amount: attempt.amount,
+        description: `Заказ ${order.public_code}`,
+        idempotencyKey: attempt.provider_idempotency_key,
+      });
+    } catch (err) {
+      console.error(`[services/postgresql/orderService] initial provider unavailable payment=${attempt.id} type=${err?.name || 'Error'}`);
+      throw new PaymentInitialUnavailableError();
+    }
+    if (!payment || !payment.providerPaymentId) {
+      throw initialPaymentInvariant('провайдер не вернул id первоначального платежа');
+    }
+    return finalizeInitialAttempt(attempt.id, payment);
+  })();
+  initialAttemptInFlight.set(attempt.id, operation);
+  try {
+    return await operation;
+  } finally {
+    if (initialAttemptInFlight.get(attempt.id) === operation) initialAttemptInFlight.delete(attempt.id);
+  }
+}
+
+// Дословный асинхронный аналог resolveCreationOrder() — единая точка входа
+// и для createOrderAndResolve() (POST /orders), и для recoverOrder()
+// (POST /orders/recover): важен ТЕКУЩИЙ active-платёж заказа, а не
+// исторически первая попытка (после payment_failed + retry старый QR
+// возвращать нельзя). Не-awaiting заказ вообще не трогает provider.
+async function resolveCreationOrder(orderId) {
+  let order = await getOrder(orderId);
+  if (!order) throw new OrderCreationRecoveryNotFoundError();
+  if (order.status !== 'awaiting_payment') return creationResult(order, null);
+
+  const active = await activePaymentRowByOrder(orderId);
+  if (!active) {
+    // Webhook/cancel могли поменять статус между двумя SELECT.
+    order = await getOrder(orderId);
+    if (order && order.status !== 'awaiting_payment') return creationResult(order, null);
+    throw initialPaymentInvariant('awaiting_payment заказ не содержит active-платежа');
+  }
+
+  let payment;
+  if (active.initial_state) {
+    payment = await ensureInitialAttemptReady({
+      ...active,
+      provider_idempotency_key: active.initial_provider_idempotency_key,
+    });
+  } else if (active.retry_state) {
+    payment = await ensureRetryAttemptReady({
+      ...active,
+      provider_idempotency_key: active.retry_provider_idempotency_key,
+    });
+  } else if (active.status === 'pending') {
+    payment = await paymentResultFromRow(active);
+    if (!payment) throw initialPaymentInvariant('legacy active-платёж не содержит presentation');
+  } else {
+    throw initialPaymentInvariant('creating active-платёж не имеет durable ledger');
+  }
+
+  order = await getOrder(orderId);
+  if (!order) throw new OrderCreationRecoveryNotFoundError();
+  return creationResult(order, order.status === 'awaiting_payment' ? payment : null);
+}
+
+// НОВАЯ (не из SQLite-оригинала как отдельная функция) тонкая обёртка:
+// createOrder() (Wave 5) сознательно остаётся claim-only и возвращает
+// {orderId, replay} — контракт, уже протестированный 30 живыми тестами
+// Wave 5, здесь НЕ меняется. routes/postgresql/api.js нужен полный
+// {order, payment, context}, поэтому композиция вынесена в отдельную
+// функцию, а не встроена в createOrder() — тот же принцип, что и в
+// SQLite-оригинале, где createOrder() сама заканчивается вызовом
+// resolveCreationOrder(orderId), просто здесь это явная отдельная функция,
+// а не хвост существующей.
+async function createOrderAndResolve(params) {
+  const { orderId } = await createOrder(params);
+  return resolveCreationOrder(orderId);
+}
+
+// Дословный асинхронный аналог recoverOrder() — body-less восстановление по
+// паре секретов (тот же AND-точный replay, что и exact-replay ветка
+// createOrder()).
+async function recoverOrder({ orderAccessToken, createIdempotencyKey }) {
+  if (!isValidOrderToken(orderAccessToken)) {
+    throw new OrderAccessInputError('Некорректный токен доступа к заказу', 401);
+  }
+  if (!isValidCreateKey(createIdempotencyKey)) {
+    throw new OrderAccessInputError('Некорректный ключ создания заказа');
+  }
+  const tokenHash = hashSecret(orderAccessToken);
+  const createKeyHash = hashSecret(createIdempotencyKey);
+
+  const attempt = await initialAttemptRowByCredentials(tokenHash, createKeyHash);
+  if (!attempt) throw new OrderCreationRecoveryNotFoundError();
+  return resolveCreationOrder(attempt.initial_order_id);
+}
+
+// Дословный асинхронный аналог ensureRetryAttemptReady() — тот же принцип,
+// что ensureInitialAttemptReady() выше, для payment_failed -> retry ветки.
+// claim (Wave 4, reserveRetryAttempt) и finalize (Wave 4, finalizeRetryAttempt)
+// уже перенесены и не меняются; здесь — только сетевой вызов между ними.
+async function ensureRetryAttemptReady(attempt) {
+  if (!attempt) throw new Error('платёжная попытка не найдена');
+  if (attempt.status === 'pending') {
+    const existing = await paymentResultFromRow(attempt);
+    if (!existing) throw paymentInvariant('активный платёж не содержит данных продолжения');
+    return existing;
+  }
+  if (attempt.status !== 'creating' || !attempt.provider_idempotency_key) {
+    throw new PaymentRetryConflictError();
+  }
+  if (retryAttemptInFlight.has(attempt.id)) return retryAttemptInFlight.get(attempt.id);
+
+  const operation = (async () => {
+    const order = await getOrder(attempt.order_id);
+    if (!order) throw paymentInvariant('заказ зарезервированной попытки не найден');
+    let payment;
+    try {
+      payment = await createPaymentWithTimeout({
+        orderId: attempt.order_id,
+        amount: attempt.amount,
+        description: `Заказ ${order.public_code} (повторная попытка)`,
+        idempotencyKey: attempt.provider_idempotency_key,
+      });
+    } catch (err) {
+      console.error(`[services/postgresql/orderService] retry provider unavailable payment=${attempt.id} type=${err?.name || 'Error'}`);
+      throw new PaymentRetryUnavailableError();
+    }
+    if (!payment || !payment.providerPaymentId) {
+      throw paymentInvariant('провайдер не вернул id платежа');
+    }
+    return finalizeRetryAttempt(attempt.id, payment);
+  })();
+  retryAttemptInFlight.set(attempt.id, operation);
+  try {
+    return await operation;
+  } finally {
+    if (retryAttemptInFlight.get(attempt.id) === operation) retryAttemptInFlight.delete(attempt.id);
+  }
+}
+
+// Дословный асинхронный аналог retryPayment() — claim + ensure тем же
+// принципом, что и SQLite-оригинал.
+async function retryPayment(orderId, retryKey) {
+  const attempt = await reserveRetryAttempt(orderId, retryKey);
+  return ensureRetryAttemptReady(attempt);
+}
+
+// Точечные read-only функции для routes/postgresql/api.js — платёжный
+// webhook и dev-confirm-payment читают payments по разным критериям.
+// Дословные асинхронные аналоги соответствующих inline db.prepare() в
+// routes/api.js (SQLite) — сами запросы идентичны по смыслу оригиналу.
+async function getPaymentByProviderPaymentId(providerPaymentId, client = null) {
+  const rows = await db.query(
+    'SELECT * FROM payments WHERE provider_payment_id = $1',
+    [providerPaymentId],
+    client
+  );
+  return rows[0] || null;
+}
+
+async function getPendingPaymentForOrder(orderId, client = null) {
+  const rows = await db.query(
+    `SELECT * FROM payments WHERE order_id = $1 AND status = 'pending' ORDER BY id DESC LIMIT 1`,
+    [orderId],
+    client
+  );
+  return rows[0] || null;
+}
+
+// ---------------------------------------------------------------------------
 // rateOrder(orderId, rating) — Wave 6
 // ---------------------------------------------------------------------------
 //
@@ -1714,4 +2106,22 @@ module.exports = {
   AWAITING_PAYMENT_DEDUP_TTL_SEC,
   ActiveOrderConflictError,
   OrderCreationInputError,
+  // Stage 1 (routes/postgresql/api.js)
+  parseBearerAuthorization,
+  findAuthorizedOrderId,
+  toPublicOrderDTO,
+  toPublicPaymentDTO,
+  createOrderAndResolve,
+  recoverOrder,
+  retryPayment,
+  getPaymentByProviderPaymentId,
+  getPendingPaymentForOrder,
+  OrderAccessInputError,
+  OrderCreationRecoveryNotFoundError,
+  PaymentInitialUnavailableError,
+  PaymentRetryUnavailableError,
+  PaymentRetryConflictError,
+  isValidOrderToken,
+  isValidCreateKey,
+  isValidRetryKey,
 };
