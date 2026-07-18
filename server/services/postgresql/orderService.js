@@ -253,6 +253,11 @@ const ADVANCE_MAP = {
 // просрочивает заказ. Нужен только sweepTimeouts() (Wave 3).
 const RESTAURANT_RESPONSE_WINDOW_SEC = 180;
 
+// Дословная копия PAUSE_PRESETS_MIN из orderService.js — три пресета
+// перерыва в минутах, показываются ботом как кнопки "33 мин"/"3 часа"/
+// "11 часов". Нужен только pauseRestaurant() (Stage 3, см. ниже).
+const PAUSE_PRESETS_MIN = { short: 33, medium: 3 * 60, long: 11 * 60 };
+
 // Дословная копия семантики orderTransitionInvariant() из orderService.js:
 // подробное сообщение логируется, но НАРУЖУ всегда уходит один и тот же
 // фиксированный текст — это часть контракта (см. parity-тесты), не
@@ -2283,6 +2288,38 @@ async function claimRefundForProcessing(refundId) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Production Switch — Stage 3 (bot/postgresql/index.js): restaurant pause
+// ---------------------------------------------------------------------------
+//
+// pauseRestaurant/resumeRestaurant НЕ входили ни в одну SQL-side волну и не в
+// Stage 1/2 (не требовались для routes/api.js или orderEvents) — миграция
+// изначально называла их отдельным будущим "Stage 5" (см. postgresql-
+// migration-status.md). Но server/bot/postgresql/index.js (этот Stage 3)
+// объективно не может воспроизвести команды /pause и /open без них — это
+// ровно тот случай "минимального нового PostgreSQL helper'а, объективно
+// нужного боту", который задание Stage 3 прямо разрешает, без общего
+// рефакторинга и без переноса лишнего (sweepPauseExpiry — периодический
+// свип, вызываемый из server.js setInterval, а не из бота — НЕ переносится
+// здесь, вне scope изолированного bot-модуля).
+//
+// Дословные асинхронные аналоги SQLite-оригинала — обе функции однострочные
+// conditional/безусловные UPDATE, не требуют db.transaction() (нет
+// многошаговой атомарности, которую нужно защищать — тот же вывод, что и для
+// остальных "класса 1" операций в concurrency-матрице).
+async function pauseRestaurant(restaurantId, presetKey) {
+  const minutes = PAUSE_PRESETS_MIN[presetKey];
+  if (!minutes) throw new Error(`неизвестный пресет перерыва: ${presetKey}`);
+  const rows = await db.query(`SELECT NOW() + ($1 || ' minutes')::interval AS until`, [minutes]);
+  const until = rows[0].until;
+  await db.execute('UPDATE restaurants SET is_open = 0, paused_until = $1 WHERE id = $2', [until, restaurantId]);
+  return until;
+}
+
+async function resumeRestaurant(restaurantId) {
+  await db.execute('UPDATE restaurants SET is_open = 1, paused_until = NULL WHERE id = $1', [restaurantId]);
+}
+
 module.exports = {
   orderEvents,
   getOrder,
@@ -2328,4 +2365,8 @@ module.exports = {
   isValidOrderToken,
   isValidCreateKey,
   isValidRetryKey,
+  // Stage 3 (bot/postgresql/index.js)
+  pauseRestaurant,
+  resumeRestaurant,
+  PAUSE_PRESETS_MIN,
 };
