@@ -2320,6 +2320,38 @@ async function resumeRestaurant(restaurantId) {
   await db.execute('UPDATE restaurants SET is_open = 1, paused_until = NULL WHERE id = $1', [restaurantId]);
 }
 
+// ---------------------------------------------------------------------------
+// Production Switch — Stage 5 (server/services/postgresql/scheduler.js):
+// automatic pause expiry
+// ---------------------------------------------------------------------------
+//
+// Дословный асинхронный аналог SQLite-оригинала — один безусловный UPDATE,
+// без db.transaction() (нет многошаговой атомарности, которую нужно
+// защищать — тот же класс операции, что и pauseRestaurant/resumeRestaurant
+// выше). Не эмитит ничего в orderEvents — подтверждено построчным чтением
+// SQLite-оригинала (см. "Production Switch — Stage 2" в начале файла,
+// список функций, НЕ эмитящих события) и сохранено здесь без изменений.
+//
+// SQLite-версия сравнивает TEXT-строки лексикографически (`paused_until <=
+// datetime('now')`), поэтому pauseRestaurant() там ОБЯЗАН вычислять
+// paused_until средствами самого SQLite (не new Date()), чтобы формат совпал
+// — иначе сравнение молча давало бы неверный результат. Под PostgreSQL
+// paused_until — TIMESTAMPTZ (уже настоящий хронологический тип, не текст),
+// поэтому `paused_until <= NOW()` — обычное типизированное сравнение
+// моментов времени, а не строк; проблема формата структурно не существует.
+// Сравнение выполняется ЦЕЛИКОМ на стороне PostgreSQL (`NOW()` — часы
+// сервера БД) — вызывающий Node-процесс не участвует в решении "истекла ли
+// пауза" вычислением собственного `Date.now()`, поэтому расхождение часов
+// между несколькими экземплярами приложения (clock drift) структурно не
+// может исказить это решение — все экземпляры сверяются с ОДними и теми же
+// часами БД, а не каждый со своими.
+async function sweepPauseExpiry() {
+  await db.execute(`
+    UPDATE restaurants SET is_open = 1, paused_until = NULL
+    WHERE is_open = 0 AND paused_until IS NOT NULL AND paused_until <= NOW()
+  `);
+}
+
 module.exports = {
   orderEvents,
   getOrder,
@@ -2369,4 +2401,6 @@ module.exports = {
   pauseRestaurant,
   resumeRestaurant,
   PAUSE_PRESETS_MIN,
+  // Stage 5 (services/postgresql/scheduler.js)
+  sweepPauseExpiry,
 };
