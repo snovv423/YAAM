@@ -555,29 +555,31 @@ test('F1: raw body сохраняется нетронутым для webhook-м
   }
 ));
 
-test('F2: verifyWebhook "not implemented" (реальный YookassaProvider-стаб) не роняет процесс — 500 generic, задокументированный блокер', withEnvReload(
+// Production Switch — Stage 8: YookassaProvider.verifyWebhook() больше НЕ
+// "not implemented" — реализована (канонический lookup у ЮKassa, см.
+// server/docs/postgresql-payment-safety.md). Настоящая бизнес-логика
+// верификации (структура/каноническая сверка/суммы) теперь тестируется
+// исчерпывающе в paymentSafetyStage8.test.js, с реальным fake-транспортом
+// вместо настоящей сети ЮKassa. Эта сборочная (assembly-level) проверка
+// сужена под свою исходную задачу — маршрут не должен крашиться/течь
+// стектрейсом ни при каком входе, включая пустое тело — сетевого доступа к
+// api.yookassa.ru здесь намеренно нет (вне мандата Stage 7), поэтому
+// canonical lookup внутри verifyWebhook() естественно не пройдёт (сетевая
+// ошибка) и корректно вернёт null -> 400, не 500 и не падение процесса.
+test('F2: webhook-маршрут переживает пустое/невалидное тело без падения процесса (400, без утечки деталей)', withEnvReload(
   { PAYMENT_PROVIDER: 'yookassa' },
-  async ({ appModule: reloadedApp, paymentService: reloadedPaymentService }) => {
+  async ({ appModule: reloadedApp }) => {
     const instance = reloadedApp.createPostgresqlApp({ port: 0, schedulerIntervalMs: 1_000_000 });
     await instance.start();
     try {
       const { port } = instance.address();
-      // НЕ патчим verifyWebhook — используем реальный, свежий (не закешированный
-      // от before()) YookassaProvider.verifyWebhook(), который сегодня throw's
-      // 'not implemented' (известный, задокументированный блокер, см.
-      // postgresql-application-assembly.md). Проверяем, что маршрут это
-      // переживает как обычную ошибку (500, generic, без утечки деталей), а не
-      // крашится и не течёт стектрейсом. Сверяем, что provider реально
-      // YookassaProvider (не унаследованный от кеша MockProvider) — иначе тест
-      // молча проверял бы не то, что заявлено.
-      assert.equal(reloadedPaymentService.providerName, 'yookassa');
       const res = await fetchJson(`http://127.0.0.1:${port}/api/webhooks/payment`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: '{}',
       });
-      assert.equal(res.status, 500);
-      assert.equal(res.body.error, 'Внутренняя ошибка сервера');
+      assert.equal(res.status, 400);
+      assert.doesNotMatch(JSON.stringify(res.body), /at Object\.<anonymous>|node_modules|Error:/);
     } finally {
       await instance.stop();
     }
@@ -595,9 +597,17 @@ test('F3: дублирующая доставка webhook не вызывает 
       const pendingPayment = await orderService.getPendingPaymentForOrder(order.id);
       assert.ok(pendingPayment && pendingPayment.provider_payment_id, 'fixture должен создать ожидающий платёж');
 
+      // Production Switch — Stage 8: маршрут теперь дополнительно сверяет
+      // amount/currency события с сохранённым платежом ДО применения
+      // (routes/postgresql/api.js) — подделанное событие обязано включать
+      // реальные amount/currency этого платежа, иначе будет корректно
+      // отклонено как несовпадение сумм (это отдельно и исчерпывающе
+      // протестировано в paymentSafetyStage8.test.js, здесь не дублируется).
       reloadedPaymentService.verifyWebhook = () => ({
         providerPaymentId: pendingPayment.provider_payment_id,
         status: 'succeeded',
+        amount: pendingPayment.amount,
+        currency: 'RUB',
       });
 
       const { port } = instance.address();

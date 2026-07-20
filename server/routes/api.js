@@ -261,7 +261,15 @@ router.post('/orders/:code/rate', orderMutationLimiter, requireOrderAccess, (req
 // оплаты произвольного заказа без всякой аутентификации.
 if (process.env.PAYMENT_PROVIDER === 'yookassa') {
   router.post('/webhooks/payment', express.raw({ type: '*/*' }), async (req, res) => {
-    const event = paymentService.verifyWebhook(req.body.toString('utf8'), req.headers);
+    // Production Switch — Stage 8: verifyWebhook() провайдера теперь реальна
+    // и асинхронна (канонический lookup у ЮKassa — сетевой вызов, см.
+    // server/services/paymentProviders/yookassaProvider.js) — await
+    // обязателен. Это единственная правка в этом файле для Stage 8:
+    // paymentService.js — общий (не PostgreSQL-специфичный) модуль, без
+    // этого await здесь остался бы тихий баг (Promise трактовался бы как
+    // truthy событие), если PAYMENT_PROVIDER=yookassa когда-либо будет
+    // включён на SQLite-стороне. Остальная логика этого маршрута не менялась.
+    const event = await paymentService.verifyWebhook(req.body.toString('utf8'), req.headers);
     if (!event) return res.status(400).json({ error: 'invalid webhook signature' });
 
     const payment = db.prepare('SELECT * FROM payments WHERE provider_payment_id = ?').get(event.providerPaymentId);

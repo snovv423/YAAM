@@ -34,15 +34,25 @@
  *   второй реальный возврат денег.
  *
  * verifyWebhook(rawBody, headers)
- *   -> { providerPaymentId, status } | null
- *   Проверяет подпись/подлинность вебхука и возвращает нормализованное событие.
- *   Возвращает null, если подпись невалидна — вызывающий код обязан ответить 400.
+ *   -> Promise<{ providerPaymentId, status, amount?, currency? } | null>
+ *   Устанавливает подлинность вебхука и возвращает нормализованное событие.
+ *   Возвращает null, если подлинность/структуру подтвердить не удалось —
+ *   вызывающий код обязан ответить 400 (fail closed, не обрабатывать).
+ *   Production Switch — Stage 8: у ЮKassa нет HMAC/подписи вебхука (см.
+ *   официальную документацию, YookassaProvider.verifyWebhook()) — реальная
+ *   проверка подлинности требует сетевого запроса (канонический lookup
+ *   объекта по его id через тот же авторизованный API), поэтому метод
+ *   асинхронный. amount/currency в возвращаемом событии — то, что заявляет
+ *   САМО тело уведомления (уже прошедшее структурную/каноническую проверку
+ *   status'а внутри provider'а) — вызывающий код (webhook route) обязан
+ *   дополнительно сверить их с суммой сохранённого платежа ПЕРЕД тем, как
+ *   доверять событию (provider не знает про нашу БД).
  */
 class PaymentProviderInterface {
   async createPayment(_params) { throw new Error('not implemented'); }
   async getStatus(_providerPaymentId) { throw new Error('not implemented'); }
   async refund(_providerPaymentId, _amount, _idempotencyKey) { throw new Error('not implemented'); }
-  verifyWebhook(_rawBody, _headers) { throw new Error('not implemented'); }
+  async verifyWebhook(_rawBody, _headers) { throw new Error('not implemented'); }
 }
 
 module.exports = PaymentProviderInterface;

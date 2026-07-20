@@ -914,6 +914,7 @@ async function markPaid(orderId, paymentId) {
   if (!Number.isInteger(paymentId)) throw new Error('paymentId обязателен для подтверждения оплаты');
 
   let changed = false;
+  let lateRefundRow = null;
   await db.transaction(async (client) => {
     const paymentRows = await db.query(
       `SELECT * FROM payments WHERE id = $1 AND order_id = $2 AND status = 'pending'`,
@@ -937,7 +938,7 @@ async function markPaid(orderId, paymentId) {
       if (succeededLate.rowCount !== 1) {
         throw refundInvariant('не удалось зафиксировать позднюю оплату уже отменённого заказа');
       }
-      await reserveRefundRow(payment, 'customer_cancel', client);
+      lateRefundRow = await reserveRefundRow(payment, 'customer_cancel', client);
       return; // статус заказа не меняется — остаётся cancelled
     }
 
@@ -963,18 +964,20 @@ async function markPaid(orderId, paymentId) {
     changed = true;
   });
 
-  // Вне транзакции — дословно как в SQLite-оригинале. В оригинале здесь —
-  // scheduleRefundProcessing(lateRefundRow.id) (сетевой вызов, вне scope этой
-  // волны) — сама claim-резервация уже закоммичена внутри транзакции выше,
-  // это единственное, что требуется на этом этапе. `changed` — ТОЛЬКО на
-  // штатном awaiting_payment -> awaiting_restaurant пути (как и в оригинале:
-  // поздняя оплата уже отменённого заказа НЕ меняет order.status и НЕ
-  // эмитит событие — заказ остаётся cancelled).
+  // Вне транзакции — дословно как в SQLite-оригинале. `changed` — ТОЛЬКО на
+  // штатном awaiting_payment -> awaiting_restaurant пути (поздняя оплата уже
+  // отменённого заказа НЕ меняет order.status и НЕ эмитит событие — заказ
+  // остаётся cancelled).
   const updated = await getOrder(orderId);
   if (changed) {
     orderEvents.emit('order:status', updated);
     orderEvents.emit('order:new', updated); // сюда подпишется бот в Stage 3
   }
+  // Production Switch — Stage 8: "поздняя оплата уже отменённого заказа" —
+  // деньги провайдер объективно получил, но заказ не воскрешается, поэтому
+  // их нужно реально вернуть, не только зарезервировать обязательство (тот
+  // же fire-and-forget post-commit принцип, что и в остальных трёх местах).
+  if (lateRefundRow) scheduleRefundProcessing(lateRefundRow.id);
   return updated;
 }
 
@@ -1075,6 +1078,7 @@ async function restaurantDecline(orderId) {
   // меняется (result.status по-прежнему 'declined' и в проигранной, и в
   // выигранной ветке) — меняется только внутренний триггер эмиссии.
   let changed = false;
+  let refundRow = null;
   const order = await db.transaction(async (client) => {
     const updated = await db.execute(
       `UPDATE orders SET status = 'declined', status_updated_at = NOW()
@@ -1089,13 +1093,17 @@ async function restaurantDecline(orderId) {
         [orderId],
         client
       );
-      await reserveRefundRow(paymentRows[0] || null, 'restaurant_decline', client);
+      refundRow = await reserveRefundRow(paymentRows[0] || null, 'restaurant_decline', client);
     }
     return getOrder(orderId, client);
   });
   if (changed) {
     orderEvents.emit('order:status', order);
   }
+  // Production Switch — Stage 8: см. cancelByCustomer выше — тот же принцип
+  // (fire-and-forget строго после commit, только если этот вызов реально
+  // выиграл переход и зарезервировал возврат).
+  if (changed && refundRow) scheduleRefundProcessing(refundRow.id);
   return order;
 }
 
@@ -1185,6 +1193,7 @@ async function restaurantAdvance(orderId, nextStatus, { estimatedMinutes } = {})
 // финальным conditional UPDATE РЕАЛЬНО существует и достижимо под
 // PostgreSQL — проверено живым concurrency-тестом.
 async function cancelByCustomer(orderId) {
+  let refundRow = null;
   const order = await db.transaction(async (client) => {
     const current = await getOrder(orderId, client);
     if (!current) throw new Error('заказ не найден');
@@ -1198,7 +1207,7 @@ async function cancelByCustomer(orderId) {
         [orderId],
         client
       );
-      await reserveRefundRow(paymentRows[0] || null, 'customer_cancel', client);
+      refundRow = await reserveRefundRow(paymentRows[0] || null, 'customer_cancel', client);
     }
 
     const updated = await db.execute(
@@ -1212,6 +1221,12 @@ async function cancelByCustomer(orderId) {
   });
   // Throw-based гвард — см. restaurantAdvance выше, тот же принцип.
   orderEvents.emit('order:status', order);
+  // Production Switch — Stage 8: сетевой возврат запускается СТРОГО после
+  // commit (fire-and-forget, не await'ится) — см. scheduleRefundProcessing.
+  // reserveRefundRow сама идемпотентна (partial UNIQUE index), поэтому
+  // повторный вызов cancelByCustomer на уже отменённом заказе безопасен —
+  // сюда просто не дойдёт (current.status уже не в допустимом списке).
+  if (refundRow) scheduleRefundProcessing(refundRow.id);
   return order;
 }
 
@@ -1349,6 +1364,7 @@ async function sweepTimeouts() {
     // закоммиченный 'timed_out' — post-hoc проверка эмитила бы у обоих.
     let order;
     let changed = false;
+    let refundRow = null;
     try {
       order = await db.transaction(async (client) => {
         const updated = await db.execute(
@@ -1365,7 +1381,7 @@ async function sweepTimeouts() {
           [id],
           client
         );
-        await reserveRefundRow(paymentRows[0] || null, 'timeout', client);
+        refundRow = await reserveRefundRow(paymentRows[0] || null, 'timeout', client);
         return getOrder(id, client);
       });
     } catch (err) {
@@ -1377,6 +1393,9 @@ async function sweepTimeouts() {
     if (changed) {
       orderEvents.emit('order:status', order);
     }
+    // Production Switch — Stage 8: см. cancelByCustomer выше — тот же
+    // fire-and-forget post-commit принцип, per-order внутри этого свипа.
+    if (changed && refundRow) scheduleRefundProcessing(refundRow.id);
   }
 }
 
@@ -2221,6 +2240,9 @@ async function rateOrder(orderId, rating) {
 const REFUND_BACKOFF_BASE_SEC = 10;
 const REFUND_BACKOFF_CAP_SEC = 300;
 const refundAttemptInFlight = new Map();
+// Бounded batch size для sweepStuckRefunds() (см. ниже) — задание Stage 8
+// прямо требует "no uncontrolled full-table scan; process bounded batches".
+const REFUND_SWEEP_BATCH_LIMIT = 50;
 
 async function claimRefundForProcessing(refundId) {
   if (refundAttemptInFlight.has(refundId)) return refundAttemptInFlight.get(refundId);
@@ -2286,6 +2308,177 @@ async function claimRefundForProcessing(refundId) {
   } finally {
     if (refundAttemptInFlight.get(refundId) === operation) refundAttemptInFlight.delete(refundId);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Production Switch — Stage 8: refund network orchestration
+// ---------------------------------------------------------------------------
+//
+// Закрывает пробел, оставленный Wave 7 (claimRefundForProcessing — только
+// claim-половина): до этой задачи резервированная (reserveRefundRow) строка
+// возврата НИКОГДА фактически не отправлялась провайдеру на PostgreSQL-
+// стороне — claim переводил её в 'requested', и на этом всё заканчивалось
+// навсегда. Деньги клиенту не возвращались бы. Ниже — дословный по духу (не
+// по формулировкам, т.к. Wave 7 уже дал доменно-классифицированный
+// claimRefundForProcessing взамен буквального SQLite-style raw-row-возврата)
+// перенос ensureRefundReady()/scheduleRefundProcessing()/sweepStuckRefunds()
+// из SQLite-оригинала, построенный НА ТОП уже существующего Wave 7 claim.
+//
+// providerRefundTimeoutMs()/refundPaymentWithTimeout() — дословная копия
+// SQLite-оригинала (Promise.race вокруг payments.refundPayment()) — чистая
+// функция, не трогает БД, порт без изменений логики.
+function providerRefundTimeoutMs() {
+  const configured = Number(process.env.PAYMENT_REFUND_TIMEOUT_MS || 10000);
+  return Number.isFinite(configured) && configured >= 10 && configured <= 120000
+    ? configured
+    : 10000;
+}
+
+async function refundPaymentWithTimeout(params) {
+  let timer;
+  try {
+    return await Promise.race([
+      payments.refundPayment(params.providerPaymentId, params.amount, params.idempotencyKey),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('payment refund provider timeout')), providerRefundTimeoutMs());
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Общая "пост-claim" половина для ensureRefundReady() (единичный refund,
+// вызывается из scheduleRefundProcessing после commit бизнес-транзакции) и
+// sweepStuckRefunds() (bounded batch, см. ниже) — сетевой вызов провайдера +
+// финализация СТРОГО вне какой-либо открытой транзакции, тот же принцип,
+// что и everywhere else в этом модуле (ensureInitialAttemptReady и т.д.).
+// claimedRefund — уже атомарно переведённая в 'processing' строка (лизинг
+// next_attempt_at уже выставлен ДО этого вызова, как того требует
+// architecture review: падение процесса прямо во время await ниже всё равно
+// будет безопасно подхвачено следующим sweepStuckRefunds() по истечении
+// лизинга — отдельного "зависшего" состояния не нужно).
+async function processClaimedRefund(claimedRefund) {
+  const paymentRows = await db.query('SELECT * FROM payments WHERE id = $1', [claimedRefund.payment_id]);
+  const payment = paymentRows[0];
+  if (!payment || !payment.provider_payment_id) {
+    throw refundInvariant('платёж для возврата не найден или не содержит provider id');
+  }
+
+  let result;
+  try {
+    result = await refundPaymentWithTimeout({
+      providerPaymentId: payment.provider_payment_id,
+      amount: claimedRefund.amount,
+      idempotencyKey: claimedRefund.provider_idempotency_key,
+    });
+  } catch (err) {
+    // Неизвестно, успел ли провайдер выполнить возврат. Строка остаётся
+    // 'processing' с уже выставленным next_attempt_at — следующий sweep
+    // безопасно повторит тот же idempotency key (тот же принцип, что и
+    // ensureInitialAttemptReady/SQLite-оригинал). Ничего не бросаем наружу —
+    // у этой функции нет синхронного HTTP-вызывающего, ожидающего статус-код.
+    console.error(`[services/postgresql/orderService] refund provider unavailable refund=${claimedRefund.id} type=${err?.name || 'Error'}`);
+    const rows = await db.query('SELECT * FROM refunds WHERE id = $1', [claimedRefund.id]);
+    return rows[0];
+  }
+  if (!result || (result.status !== 'succeeded' && result.status !== 'failed')) {
+    throw refundInvariant(`провайдер вернул неизвестный статус возврата: ${result && result.status}`);
+  }
+  if (result.status === 'succeeded') return finalizeRefundSucceeded(claimedRefund.id, result.refundId || null);
+  return finalizeRefundFailed(claimedRefund.id, 'provider_failed');
+}
+
+// Отдельная in-flight Map — НЕ переиспользует refundAttemptInFlight
+// claimRefundForProcessing() (Wave 7) намеренно: та охватывает только claim-
+// шаг (уже протестирована в этой узкой роли отдельными Wave 7 тестами), эта
+// охватывает ВЕСЬ оркестратор (claim + сеть + finalize), тот же периметр,
+// что refundAttemptInFlight в SQLite-оригинале. Обе Map — чисто
+// внутрипроцессные fast-path оптимизации; основная защита в обоих случаях —
+// SQL WHERE-guard внутри claimRefundForProcessing.
+const refundOrchestrationInFlight = new Map();
+
+async function ensureRefundReady(refundId) {
+  if (refundOrchestrationInFlight.has(refundId)) return refundOrchestrationInFlight.get(refundId);
+
+  const operation = (async () => {
+    const claim = await claimRefundForProcessing(refundId);
+    if (!claim.claimed) return claim.refund; // terminal (succeeded/failed) | leased (чужой claim ещё идёт) | not_found (null)
+    return processClaimedRefund(claim.refund);
+  })();
+
+  refundOrchestrationInFlight.set(refundId, operation);
+  try {
+    return await operation;
+  } finally {
+    if (refundOrchestrationInFlight.get(refundId) === operation) refundOrchestrationInFlight.delete(refundId);
+  }
+}
+
+// Запуск строго ПОСЛЕ COMMIT транзакции, создавшей/нашедшей строку возврата
+// (cancelByCustomer/restaurantDecline/sweepTimeouts/markPaid — см. их
+// вызовы ниже) — сетевой вызов провайдера никогда не выполняется внутри
+// db.transaction(). Возвращает Promise (удобно для тестов); вызывающая
+// бизнес-функция сознательно НЕ ждёт его — клиент узнаёт результат через
+// order.refund_status при следующем poll. Ошибка уже залогирована и
+// проглочена здесь же — fire-and-forget безопасен, не создаёт unhandled
+// rejection.
+function scheduleRefundProcessing(refundId) {
+  return ensureRefundReady(refundId).catch((err) => {
+    console.error(`[services/postgresql/orderService] refund processing failed refund=${refundId}:`, err.message);
+  });
+}
+
+// Периодическая сверка (см. services/postgresql/scheduler.js,
+// createRefundReconciliationScheduler) — переживает рестарт процесса,
+// подхватывает: (1) 'requested'-строки, чей провайдер-вызов вообще не успел
+// стартовать (процесс упал между COMMIT бизнес-транзакции и вызовом
+// scheduleRefundProcessing); (2) 'processing'-строки с истёкшим
+// next_attempt_at (предыдущая попытка закончилась неоднозначно, либо
+// процесс упал во время сетевого вызова).
+//
+// Bounded batch + FOR UPDATE SKIP LOCKED (задание Stage 8, раздел
+// "Reconciliation" — "no uncontrolled full-table scan", "bounded batches",
+// "indexed queries", "avoid multiple workers processing the same row
+// concurrently"): один атомарный round-trip — CTE выбирает до `limit`
+// кандидатов (см. ix_refunds_pending_sweep в schema.sql), ПРОПУСКАЯ строки,
+// уже залоченные другой конкурентной транзакцией (SKIP LOCKED — не блокирует
+// и не ждёт, попробует их на следующем тике), затем СРАЗУ ЖЕ claim'ит их
+// (тот же backoff-формула, что и claimRefundForProcessing, выраженная в SQL)
+// одним UPDATE. Это НЕ основной механизм безопасности (им остаётся
+// WHERE-guard внутри самого claim — тот же принцип, что и у единичного
+// ensureRefundReady/claimRefundForProcessing выше) — SKIP LOCKED здесь
+// снижает бесполезную конкуренцию между несколькими одновременно тикающими
+// sweep'ами (в этом же процессе или в другом инстансе приложения), а не
+// является единственной линией защиты от двойной обработки.
+async function sweepStuckRefunds({ limit = REFUND_SWEEP_BATCH_LIMIT } = {}) {
+  const claimedRows = await db.transaction((client) => db.query(
+    `WITH candidates AS (
+       SELECT id FROM refunds
+       WHERE status IN ('requested', 'processing')
+         AND (next_attempt_at IS NULL OR next_attempt_at <= NOW())
+       ORDER BY next_attempt_at NULLS FIRST, id
+       LIMIT $1
+       FOR UPDATE SKIP LOCKED
+     )
+     UPDATE refunds r SET
+       status = 'processing',
+       attempt_count = r.attempt_count + 1,
+       last_attempt_at = NOW(),
+       next_attempt_at = NOW() + (LEAST($2 * POWER(2, r.attempt_count + 1), $3) || ' seconds')::interval,
+       updated_at = NOW()
+     FROM candidates c
+     WHERE r.id = c.id
+     RETURNING r.*`,
+    [limit, REFUND_BACKOFF_BASE_SEC, REFUND_BACKOFF_CAP_SEC],
+    client
+  ));
+
+  await Promise.all(claimedRows.map((row) => processClaimedRefund(row).catch((err) => {
+    console.error(`[services/postgresql/orderService] sweep refund retry failed refund=${row.id}:`, err.message);
+  })));
+
+  return claimedRows.length;
 }
 
 // ---------------------------------------------------------------------------
@@ -2403,4 +2596,9 @@ module.exports = {
   PAUSE_PRESETS_MIN,
   // Stage 5 (services/postgresql/scheduler.js)
   sweepPauseExpiry,
+  // Stage 8 (refund network orchestration + reconciliation)
+  ensureRefundReady,
+  scheduleRefundProcessing,
+  sweepStuckRefunds,
+  REFUND_SWEEP_BATCH_LIMIT,
 };

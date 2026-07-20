@@ -25,7 +25,7 @@ const crypto = require('node:crypto');
 const apiRoutes = require('../../routes/postgresql/api');
 const adminRoutes = require('../../routes/postgresql/admin');
 const { buildCorsOptions } = require('../../config/cors');
-const { createPauseExpiryScheduler } = require('./scheduler');
+const { createPauseExpiryScheduler, createOrderTimeoutScheduler, createRefundReconciliationScheduler } = require('./scheduler');
 const { createHealthCheck } = require('./health');
 const { createLifecycle } = require('./lifecycle');
 const { startBot } = require('../../bot/postgresql');
@@ -194,6 +194,9 @@ function createPostgresqlApp({
   port,
   host,
   schedulerIntervalMs,
+  orderTimeoutIntervalMs,
+  refundReconciliationIntervalMs,
+  refundReconciliationLimit,
   bootstrapOptions,
   corsOptions,
   adminUser,
@@ -212,6 +215,16 @@ function createPostgresqlApp({
   const resolvedHost = host !== undefined ? host : (env.PG_HEALTH_HOST || '127.0.0.1');
 
   const scheduler = createPauseExpiryScheduler({ intervalMs: schedulerIntervalMs });
+  // Production Switch — Stage 8: без этих двух заказы никогда не истекали бы
+  // по SLA-таймауту, а зарезервированные (reserveRefundRow) возвраты,
+  // которые почему-то не были отправлены провайдеру сразу (падение процесса
+  // между commit и scheduleRefundProcessing, неоднозначный сетевой исход),
+  // никогда не были бы повторены — см. services/postgresql/orderService.js.
+  const orderTimeoutScheduler = createOrderTimeoutScheduler({ intervalMs: orderTimeoutIntervalMs });
+  const refundReconciliationScheduler = createRefundReconciliationScheduler({
+    intervalMs: refundReconciliationIntervalMs,
+    limit: refundReconciliationLimit,
+  });
 
   const botEnabled = Boolean(resolvedBotToken || botClient);
   const botAdapter = botEnabled ? createBotLifecycleAdapter({ token: resolvedBotToken, botClient }) : null;
@@ -220,10 +233,10 @@ function createPostgresqlApp({
   }
 
   // Bot НЕ входит в getSchedulers() (то самостоятельное понятие — только
-  // pause-expiry scheduler, как и в Stage 6) — состояние бота отдельное,
+  // периодические sweep'ы, как и в Stage 6) — состояние бота отдельное,
   // наблюдаемое поле readiness(), не участвующее в `ok` (см. health.js).
   const health = createHealthCheck({
-    getSchedulers: () => [scheduler],
+    getSchedulers: () => [scheduler, orderTimeoutScheduler, refundReconciliationScheduler],
     getBotState: () => (botAdapter ? botAdapter.getState() : { state: 'disabled' }),
   });
 
@@ -329,8 +342,9 @@ function createPostgresqlApp({
       httpServer.once('error', reject);
     });
 
+    const baseSchedulers = [scheduler, orderTimeoutScheduler, refundReconciliationScheduler];
     lifecycle = createLifecycle({
-      schedulers: botAdapter ? [scheduler, botAdapter] : [scheduler],
+      schedulers: botAdapter ? [...baseSchedulers, botAdapter] : baseSchedulers,
       httpServer,
       onShutdown: () => {
         ready = false;
@@ -365,7 +379,10 @@ function createPostgresqlApp({
     return httpServer ? httpServer.address() : null;
   }
 
-  return { app, start, stop, isRunning, isReady, address, health, scheduler, botAdapter };
+  return {
+    app, start, stop, isRunning, isReady, address, health, scheduler, botAdapter,
+    orderTimeoutScheduler, refundReconciliationScheduler,
+  };
 }
 
 module.exports = { createPostgresqlApp, validateAppEnv, createBotLifecycleAdapter, WEBHOOK_PATH };

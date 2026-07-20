@@ -60,11 +60,20 @@ test('конструктор успешно создаёт экземпляр с
   assert.doesNotThrow(() => new YookassaProvider());
 });
 
-test('verifyWebhook по-прежнему бросает not implemented (вне scope этой задачи; getStatus/refund реализованы — см. yookassaProviderGetStatus.test.js/yookassaProviderCreateRefund.test.js)', async () => {
+// Production Switch — Stage 8: verifyWebhook() реализована (канонический
+// lookup у ЮKassa через уже существующий getStatus(), см. server/docs/
+// postgresql-payment-safety.md) — больше не "not implemented" и больше не
+// синхронна (реальная проверка требует сетевого вызова). `{}` — валидный
+// JSON, но без обязательных полей уведомления (`type`/`event`/`object.id`)
+// — корректно fail-closed возвращает null, не бросает. Исчерпывающие тесты
+// самой верификации (структура/каноническая сверка/суммы) — в
+// server/test/postgresql/paymentSafetyStage8.test.js.
+test('verifyWebhook() реализована (Stage 8) — на пустом объекте без обязательных полей fail-closed возвращает null, не бросает', async () => {
   setFakeTestCredentials();
   const YookassaProvider = freshProviderClass();
   const provider = new YookassaProvider();
-  assert.throws(() => provider.verifyWebhook('{}', {}), /not implemented/);
+  const result = await provider.verifyWebhook('{}', {});
+  assert.equal(result, null);
 });
 
 test('createPayment() без YOOKASSA_RETURN_URL — fail-closed, не отправляет запрос', async () => {

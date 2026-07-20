@@ -285,6 +285,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_refunds_one_succeeded_per_payment
 CREATE UNIQUE INDEX IF NOT EXISTS ux_refunds_provider_reference
   ON refunds (provider, provider_refund_id) WHERE provider_refund_id IS NOT NULL;
 
+-- Production Switch — Stage 8: поддерживает bounded-batch запрос
+-- sweepStuckRefunds() (services/postgresql/orderService.js) — "найти
+-- requested/processing строки с истёкшим/отсутствующим next_attempt_at" без
+-- полного скана таблицы. Партиальный (только незавершённые статусы) —
+-- индекс не растёт с накоплением succeeded/failed строк. Чисто аддитивная,
+-- идемпотентная правка (CREATE INDEX IF NOT EXISTS) — безопасна и на свежей,
+-- и на уже существующей Stage 7 базе (реальной production PostgreSQL БД
+-- ещё не существует, отдельная система миграций не требуется).
+CREATE INDEX IF NOT EXISTS ix_refunds_pending_sweep
+  ON refunds (next_attempt_at) WHERE status IN ('requested', 'processing');
+
 -- =========================================================================
 -- refunds — финансовые триггеры (PL/pgSQL)
 -- =========================================================================

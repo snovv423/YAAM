@@ -265,10 +265,26 @@ test('markPaid: несуществующий payment — тихий no-op (getOr
   assert.equal(result.status, 'awaiting_payment');
 });
 
-test('markPaid: поздняя оплата уже отменённого заказа — payment succeeded, order остаётся cancelled, refund зарезервирован', async () => {
+// Production Switch — Stage 8: markPaid() сама по себе (внутри своей
+// транзакции) по-прежнему только РЕЗЕРВИРУЕТ возврат (reserveRefundRow) —
+// эта часть не изменилась. Изменилось то, что происходит СРАЗУ ПОСЛЕ commit:
+// раньше (Wave 2/до Stage 8) на PostgreSQL-стороне резервация была ФИНАЛЬНЫМ
+// шагом — деньги реально никогда не отправлялись провайдеру дальше строки
+// 'requested'. Stage 8 добавила недостающую сетевую оркестрацию
+// (scheduleRefundProcessing — fire-and-forget сразу после commit, см.
+// services/postgresql/orderService.js) — теперь возврат реально доходит до
+// провайдера и завершается. Тест обновлён под это намеренное, честное
+// изменение поведения (не удалён — развитие покрытия вслед за тем, что
+// раньше было документированным пробелом, а теперь реализовано).
+test('markPaid: поздняя оплата уже отменённого заказа — payment succeeded, order остаётся cancelled, деньги реально возвращены (Stage 8)', async () => {
   const restaurantId = await pgCreateRestaurant();
   const order = await pgCreateOrder(restaurantId, { status: 'cancelled' });
   const payment = await pgCreatePayment(order.id, { status: 'pending' });
+  // provider_payment_id обязателен для сетевого возврата (processClaimedRefund
+  // читает его перед вызовом провайдера) — без него реальный сетевой шаг
+  // Stage 8 не смог бы дойти до провайдера, тест проверял бы не то, что
+  // заявлено.
+  await db.execute(`UPDATE payments SET provider_payment_id = $1 WHERE id = $2`, [`mock_${payment.id}_wave2fixture`, payment.id]);
 
   const result = await pgOrderService.markPaid(order.id, payment.id);
 
@@ -276,9 +292,19 @@ test('markPaid: поздняя оплата уже отменённого зак
   const paymentRows = await db.query('SELECT status FROM payments WHERE id = $1', [payment.id]);
   assert.equal(paymentRows[0].status, 'succeeded', 'провайдер объективно получил деньги — это фиксируется честно');
 
+  // scheduleRefundProcessing — fire-and-forget, не await'ится вызывающим
+  // кодом (markPaid уже вернула управление) — ждём его завершения так же,
+  // как и в новых Stage 8 тестах (paymentSafetyStage8.test.js). Этот
+  // фикстурный provider_payment_id никогда не проходил через реальный
+  // MockProvider.createPayment() (низкоуровневая fixture этого файла вставляет
+  // payments напрямую SQL'ем), поэтому mock-провайдер не узнаёт его и честно
+  // отвечает 'failed' — важно здесь не succeeded/failed конкретно, а то, что
+  // строка возврата реально ДОХОДИТ до провайдера и завершается терминальным
+  // статусом, а не застревает в 'requested' навсегда, как было до Stage 8.
+  await sleep(150);
   const refunds = await pgRefundsForPayment(payment.id);
   assert.equal(refunds.length, 1);
-  assert.equal(refunds[0].status, 'requested');
+  assert.equal(refunds[0].status, 'failed', 'Stage 8: возврат больше не застревает в requested — реально доходит до провайдера');
   assert.equal(refunds[0].reason, 'customer_cancel');
 });
 

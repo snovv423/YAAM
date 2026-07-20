@@ -7,15 +7,15 @@ const {
   assertMatchingProviderObject,
 } = require('./providerErrorTaxonomy');
 
-// ЮKassa, MVP-scope: только createPayment(), только СБП, только capture=true
-// (см. YAAM-payment-capture-model-ADR.pdf — official-подтверждённый факт:
-// СБП не поддерживает двухстадийную оплату, поэтому capture=false здесь
-// сознательно не рассматривается — не "пока не сделали", а архитектурно не
-// нужно для этого способа оплаты). getStatus/refund/verifyWebhook — всё ещё
-// НЕ реализованы (отдельные задачи), каждый бросает свой explicit
-// 'not implemented' — тем самым провайдер остаётся безопасно нерабочим как
-// ЦЕЛОЕ (webhook/refund-путь сломается сразу и явно), даже когда createPayment
-// уже реально работает с настоящими ключами.
+// ЮKassa, MVP-scope: только СБП, только capture=true (см. YAAM-payment-
+// capture-model-ADR.pdf — official-подтверждённый факт: СБП не поддерживает
+// двухстадийную оплату, поэтому capture=false здесь сознательно не
+// рассматривается — не "пока не сделали", а архитектурно не нужно для этого
+// способа оплаты). Historical note: изначально (более ранняя задача) только
+// createPayment() был реализован, getStatus/refund/verifyWebhook каждый
+// бросал явный 'not implemented'. К Production Switch Stage 8 все методы
+// провайдера реализованы (createPayment, getStatus, refund, getRefund,
+// verifyWebhook) — провайдер больше не является намеренно нерабочим целым.
 //
 // Reuse first (см. YAAM-Comparative-Architecture-Research.pdf):
 // - HTTP-клиент — встроенный fetch (Node >= 22.5.0, см. server/package.json
@@ -118,6 +118,20 @@ const SBP_MAX_AMOUNT_RUB = 700000;
 // как требование ЮKassa, а как defense-in-depth против HTTP header injection
 // через сырое значение, которое напрямую становится значением заголовка.
 const IDEMPOTENCE_KEY_MAX_LENGTH = 64;
+
+// Production Switch — Stage 8: MVP-scope события вебхука (только СБП,
+// capture=true — см. YAAM-payment-capture-model-ADR.pdf) — значение это
+// ожидаемый нормализованный статус, который канонический getStatus() ОБЯЗАН
+// вернуть, чтобы уведомление считалось подтверждённым (см. verifyWebhook()).
+const SUPPORTED_WEBHOOK_EVENTS = Object.freeze({
+  'payment.succeeded': 'succeeded',
+  'payment.canceled': 'failed',
+});
+
+// Реальные уведомления ЮKassa компактны (id/event/object с суммой/статусом)
+// — 64KB даёт большой запас, не ограничивая ничего документированного, но
+// не позволяя тратить ресурсы на разбор заведомо аномального тела.
+const WEBHOOK_BODY_MAX_BYTES = 65536;
 
 // Тот же env var и та же защитная логика диапазона, что уже использует
 // providerCreateTimeoutMs() в orderService.js (10 baseline, [10, 120000] мс) —
@@ -966,7 +980,141 @@ class YookassaProvider extends PaymentProviderInterface {
     return normalized;
   }
 
-  verifyWebhook(_rawBody, _headers) { throw new Error('not implemented'); }
+  // Production Switch — Stage 8. Официальная документация ЮKassa
+  // (yookassa.ru/developers/using-api/webhooks, сверено перед реализацией)
+  // НЕ описывает ни HMAC, ни какой-либо другой механизм подписи тела
+  // уведомления — единственные официально рекомендованные способы убедиться
+  // в подлинности: (а) IP-адрес отправителя из документированного списка
+  // (см. isTrustedYookassaIp() ниже — используется маршрутом ДО вызова этого
+  // метода, т.к. подключение/remote address не входит в контракт
+  // verifyWebhook(rawBody, headers), см. providerInterface.js), (б)
+  // переспросить канонический объект напрямую у ЮKassa по его id, СВОИМИ
+  // собственными credentials, вместо того чтобы доверять полям тела
+  // уведомления как таковым. Ниже реализован именно способ (б) — сильный,
+  // самодостаточный механизм: подделать его может только тот, кто уже знает
+  // секретный ключ магазина (тогда он и так мог бы напрямую вызвать
+  // createPayment/refund) — тело САМОГО уведомления перестаёт быть
+  // источником истины, оно только триггер "пойди проверь объект с этим id".
+  // НЕ изобретается никакая подпись/HMAC, которых ЮKassa не предоставляет.
+  async verifyWebhook(rawBody, _headers) {
+    // Размер — defense-in-depth. Основной лимит — на уровне Express
+    // (express.raw({limit}) в routes/postgresql/api.js) — эта проверка не
+    // дублирует его бессмысленно: provider не должен неявно полагаться на
+    // то, что вызывающий код всегда настроил лимит корректно.
+    const bodyLength = typeof rawBody === 'string'
+      ? Buffer.byteLength(rawBody, 'utf8')
+      : (rawBody && typeof rawBody.length === 'number' ? rawBody.length : 0);
+    if (bodyLength === 0 || bodyLength > WEBHOOK_BODY_MAX_BYTES) return null;
+
+    let payload;
+    try {
+      payload = JSON.parse(rawBody);
+    } catch {
+      return null; // не JSON — не обрабатываем
+    }
+    if (!payload || typeof payload !== 'object') return null;
+    if (payload.type !== 'notification') return null;
+
+    // MVP-scope (см. YAAM-payment-capture-model-ADR.pdf: только СБП,
+    // capture=true) — единственные два события, на которые реально
+    // подписан магазин и которые реально обрабатываются
+    // (routes/postgresql/api.js): payment.succeeded, payment.canceled.
+    // Любой другой event (включая корректные, но не подписанные в этом MVP,
+    // например refund.succeeded) — не наш случай, fail closed, НЕ угадываем.
+    const expectedCanonicalStatus = SUPPORTED_WEBHOOK_EVENTS[payload.event];
+    if (!expectedCanonicalStatus) return null;
+
+    const object = payload.object;
+    if (!object || typeof object.id !== 'string' || !object.id) return null;
+
+    let canonicalStatus;
+    try {
+      // Переиспользует уже реализованный, отдельно протестированный
+      // getStatus() — тот же HTTP-клиент/таймаут/классификация ошибок, что
+      // и everywhere else в этом провайдере (reuse first).
+      canonicalStatus = await this.getStatus(object.id);
+    } catch (err) {
+      console.error(`[yookassa] webhook canonical lookup failed for ${object.id}:`, err?.message || err);
+      return null; // не удалось подтвердить — fail closed
+    }
+
+    if (canonicalStatus !== expectedCanonicalStatus) {
+      // Уведомление утверждает одно, актуальное состояние на стороне
+      // ЮKassa — другое (устаревшее/out-of-order сообщение либо подделка).
+      // Безопасно отклонить именно ЭТО уведомление — если реальный статус
+      // действительно succeeded/failed, следующее подлинное уведомление
+      // (или сверочный sweep, см. orderService) даст верный результат.
+      console.error(
+        `[yookassa] webhook status mismatch for ${object.id}: notification claims ${payload.event}, canonical=${canonicalStatus}`
+      );
+      return null;
+    }
+
+    // amount/currency — то, что заявляет ТЕЛО уведомления (уже прошедшее
+    // каноническую проверку id/статуса выше) — вызывающий код (webhook
+    // route) обязан ДОПОЛНИТЕЛЬНО сверить их с суммой сохранённого платежа
+    // из своей БД: getStatus() возвращает только нормализованную строку
+    // статуса, не сумму, поэтому сверка суммы структурно не может произойти
+    // здесь, в provider-слое, который ничего не знает о нашей БД.
+    const amount = object.amount && typeof object.amount === 'object' ? object.amount.value : undefined;
+    const currency = object.amount && typeof object.amount === 'object' ? object.amount.currency : undefined;
+
+    return { providerPaymentId: object.id, status: canonicalStatus, amount, currency };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// isTrustedYookassaIp(ip) — Production Switch Stage 8
+// ---------------------------------------------------------------------------
+//
+// Официальный список диапазонов, из которых ЮKassa отправляет вебхуки (см.
+// yookassa.ru/developers/using-api/webhooks, сверено перед реализацией).
+// Используется ОПЦИОНАЛЬНО маршрутом (routes/postgresql/api.js) ДО вызова
+// verifyWebhook() — не встроено внутрь самого verifyWebhook(), поскольку
+// remote address запроса не входит в контракт providerInterface.js
+// (rawBody, headers) и является HTTP-транспортным, а не платёжным понятием.
+//
+// ВАЖНОЕ ОГРАНИЧЕНИЕ (задокументировано, не скрыто): корректность этой
+// проверки зависит от того, что req.ip реально отражает адрес клиента, а не
+// адрес локального reverse-прокси — то есть от правильно настроенного
+// доверия к прокси (тот же принцип, что TRUST_PROXY в SQLite server.js).
+// Ни один реальный VPS/NGINX ещё не развёрнут (это Stage 9) — поэтому
+// маршрут применяет эту проверку только если явно включена через ENV,
+// оставляя канонический lookup выше ЕДИНСТВЕННЫМ обязательным механизмом
+// подлинности до тех пор, пока Stage 9 не подтвердит корректность
+// прокси-цепочки. Не является общей IPv6 CIDR-реализацией — только точечная
+// проверка префикса для единственного официального IPv6-диапазона.
+const YOOKASSA_IPV4_CIDR_RANGES = ['185.71.76.0/27', '185.71.77.0/27', '77.75.153.0/25', '77.75.154.128/25'];
+const YOOKASSA_IPV4_EXACT = new Set(['77.75.156.11', '77.75.156.35']);
+const YOOKASSA_IPV6_PREFIX = '2a02:5180:';
+
+function ipv4ToInt(ip) {
+  const parts = String(ip).split('.');
+  if (parts.length !== 4) return null;
+  const nums = parts.map(Number);
+  if (nums.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return null;
+  return ((nums[0] << 24) | (nums[1] << 16) | (nums[2] << 8) | nums[3]) >>> 0;
+}
+
+function ipv4InCidr(ip, cidr) {
+  const [rangeIp, prefixStr] = cidr.split('/');
+  const prefix = Number(prefixStr);
+  const ipInt = ipv4ToInt(ip);
+  const rangeInt = ipv4ToInt(rangeIp);
+  if (ipInt === null || rangeInt === null || !Number.isInteger(prefix) || prefix < 0 || prefix > 32) return false;
+  const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
+  return (ipInt & mask) === (rangeInt & mask);
+}
+
+function isTrustedYookassaIp(rawIp) {
+  if (!rawIp || typeof rawIp !== 'string') return false;
+  // Некоторые прокси отдают IPv4 в IPv4-mapped IPv6 форме (::ffff:x.x.x.x).
+  const ip = rawIp.replace(/^::ffff:/i, '');
+  if (YOOKASSA_IPV4_EXACT.has(ip)) return true;
+  if (YOOKASSA_IPV4_CIDR_RANGES.some((cidr) => ipv4InCidr(ip, cidr))) return true;
+  if (ip.toLowerCase().startsWith(YOOKASSA_IPV6_PREFIX)) return true;
+  return false;
 }
 
 module.exports = YookassaProvider;
+module.exports.isTrustedYookassaIp = isTrustedYookassaIp;

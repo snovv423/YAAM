@@ -37,7 +37,12 @@ async function refundPayment(providerPaymentId, amount, idempotencyKey) {
   return provider.refund(providerPaymentId, amount, idempotencyKey);
 }
 
-function verifyWebhook(rawBody, headers) {
+// Production Switch — Stage 8: провайдер верифицирует вебхук асинхронно
+// (канонический lookup у ЮKassa — сетевой вызов, см.
+// paymentProviders/yookassaProvider.js) — эта обёртка теперь тоже
+// асинхронна, вызывающий код (routes/api.js, routes/postgresql/api.js)
+// обязан await её.
+async function verifyWebhook(rawBody, headers) {
   return provider.verifyWebhook(rawBody, headers);
 }
 

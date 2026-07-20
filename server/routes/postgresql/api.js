@@ -301,24 +301,72 @@ router.post('/orders/:code/rate', orderMutationLimiter, requireOrderAccess, asyn
   }
 });
 
-// Дословный порт: тот же ENV-гейт (PAYMENT_PROVIDER=yookassa), что и в
-// SQLite-оригинале — маршрут не регистрируется при mock-провайдере, чтобы
-// не открывать неаутентифицированный вход в markPaid/markPaymentFailed.
+// Тот же ENV-гейт (PAYMENT_PROVIDER=yookassa), что и в SQLite-оригинале —
+// маршрут не регистрируется при mock-провайдере, чтобы не открывать
+// неаутентифицированный вход в markPaid/markPaymentFailed.
+//
+// Production Switch — Stage 8: verifyWebhook() теперь реальна (канонический
+// lookup у ЮKassa, см. yookassaProvider.js) и асинхронна — await обязателен
+// (раньше был синхронный вызов, всегда truthy Promise, что было бы тихим
+// багом, если бы этот путь когда-либо исполнился с реальным провайдером).
+// Добавлены: опциональная IP-allowlist проверка (см. комментарий ниже),
+// сверка amount/currency с суммой СОХРАНЁННОГО платежа (provider не знает
+// нашу БД — эта сверка структурно может произойти только здесь), безопасное
+// (без секретов/сырого тела) структурное логирование каждого исхода.
 if (process.env.PAYMENT_PROVIDER === 'yookassa') {
-  router.post('/webhooks/payment', express.raw({ type: '*/*' }), async (req, res) => {
+  const { isTrustedYookassaIp } = require('../../services/paymentProviders/yookassaProvider');
+  // Выключено по умолчанию — корректность req.ip зависит от правильно
+  // настроенного доверия к reverse-прокси (TRUST_PROXY), которого ещё нет
+  // (Stage 9, реальный VPS/NGINX не развёрнуты). Включать явным флагом
+  // ТОЛЬКО после того, как Stage 9 подтвердит корректную проксицепочку —
+  // до этого канонический lookup в verifyWebhook() остаётся единственным
+  // обязательным механизмом подлинности.
+  const enforceIpAllowlist = process.env.YOOKASSA_WEBHOOK_ENFORCE_IP_ALLOWLIST === 'true';
+
+  router.post('/webhooks/payment', express.raw({ type: '*/*', limit: '64kb' }), async (req, res) => {
+    const logId = req.id || 'n/a';
     try {
-      const event = paymentService.verifyWebhook(req.body.toString('utf8'), req.headers);
-      if (!event) return res.status(400).json({ error: 'invalid webhook signature' });
+      if (enforceIpAllowlist && !isTrustedYookassaIp(req.ip)) {
+        console.error(`[api-postgresql] webhook rejected: untrusted source IP id=${logId}`);
+        return res.status(403).json({ error: 'forbidden' });
+      }
+
+      const event = await paymentService.verifyWebhook(req.body.toString('utf8'), req.headers);
+      if (!event) {
+        console.error(`[api-postgresql] webhook rejected: unverifiable notification id=${logId}`);
+        return res.status(400).json({ error: 'invalid webhook notification' });
+      }
 
       const payment = await orderService.getPaymentByProviderPaymentId(event.providerPaymentId);
-      if (!payment) return res.status(404).json({ error: 'payment not found' });
+      if (!payment) {
+        console.error(`[api-postgresql] webhook rejected: unknown provider_payment_id id=${logId}`);
+        return res.status(404).json({ error: 'payment not found' });
+      }
+
+      // amount/currency пришли из ТЕЛА уведомления (уже прошедшего
+      // каноническую проверку статуса в verifyWebhook, но не проверку
+      // суммы — provider ничего не знает про нашу БД) — сверяем с тем, на
+      // что реально был создан этот платёж. Несовпадение — красный флаг
+      // (рассинхронизация/повреждение данных/подделка тела при пройденной
+      // канонической проверке id+статуса) — не применяем событие.
+      const expectedAmount = payment.amount;
+      const notifiedAmount = event.amount !== undefined ? Number(event.amount) : NaN;
+      const amountOk = Number.isFinite(notifiedAmount) && notifiedAmount === expectedAmount;
+      const currencyOk = event.currency === undefined || event.currency === 'RUB';
+      if (!amountOk || !currencyOk) {
+        console.error(
+          `[api-postgresql] webhook rejected: amount/currency mismatch id=${logId} payment=${payment.id}`
+        );
+        return res.status(400).json({ error: 'amount or currency mismatch' });
+      }
 
       if (event.status === 'succeeded') await orderService.markPaid(payment.order_id, payment.id);
       else if (event.status === 'failed') await orderService.markPaymentFailed(payment.order_id, payment.id);
 
+      console.log(`[api-postgresql] webhook applied: payment=${payment.id} status=${event.status} id=${logId}`);
       res.json({ ok: true });
     } catch (err) {
-      console.error('[api-postgresql] webhook processing failed:', err.message);
+      console.error(`[api-postgresql] webhook processing failed id=${logId}:`, err.message);
       res.status(500).json({ error: 'Внутренняя ошибка сервера' });
     }
   });

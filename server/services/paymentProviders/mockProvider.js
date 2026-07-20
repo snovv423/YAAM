@@ -69,10 +69,14 @@ class MockProvider extends PaymentProviderInterface {
   }
 
   // Мок не получает настоящие webhook'и по HTTP — вызывается напрямую из dev-роута.
-  verifyWebhook(rawBody) {
+  // Webhook-маршрут вообще не монтируется при PAYMENT_PROVIDER=mock (см.
+  // routes/postgresql/api.js) — этот метод существует только для полноты
+  // интерфейса/тестов. async — тот же контракт, что и у YookassaProvider
+  // (Stage 8), хотя здесь нет реального сетевого вызова.
+  async verifyWebhook(rawBody) {
     try {
       const event = JSON.parse(rawBody);
-      return { providerPaymentId: event.providerPaymentId, status: event.status };
+      return { providerPaymentId: event.providerPaymentId, status: event.status, amount: event.amount, currency: event.currency };
     } catch {
       return null;
     }
