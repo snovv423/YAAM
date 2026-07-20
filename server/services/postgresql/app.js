@@ -60,6 +60,28 @@ function validateAppEnv(env) {
     errors.push('ADMIN_USER и ADMIN_PASS должны быть заданы вместе (сейчас задан только один из двух).');
   }
 
+  // Production Switch — Stage 9: дословно тот же принцип, что уже
+  // применяется в SQLite server.js (TRUST_PROXY поддерживает ТОЛЬКО
+  // "loopback") — до Stage 9 этой проверки на PostgreSQL-стороне не было
+  // вообще (найдено при подготовке деплоя). Без нативного express `trust
+  // proxy` req.ip отражает адрес сокета (в проде — адрес локального Nginx),
+  // НЕ реальный адрес клиента из X-Forwarded-For — это делает
+  // isTrustedYookassaIp(req.ip) (см. routes/postgresql/api.js, Stage 8)
+  // бессмысленной проверкой за реальным reverse-прокси: она либо всегда
+  // видит адрес самого Nginx, либо (если прокси не настроен доверенно)
+  // доверяет клиентскому заголовку без проверки — оба исхода небезопасны.
+  // Единственное безопасное значение — "loopback" (доверять
+  // X-Forwarded-For только от локального процесса на той же машине, что и
+  // есть единственная поддерживаемая топология — один Nginx на одном VPS
+  // перед одним backend-процессом). Production без корректно настроенного
+  // TRUST_PROXY=loopback — fail-closed, не тихий дефолт.
+  if (env.TRUST_PROXY !== undefined && env.TRUST_PROXY !== '' && env.TRUST_PROXY !== 'loopback') {
+    errors.push('TRUST_PROXY поддерживает только безопасное значение "loopback".');
+  }
+  if (env.APP_ENV === 'production' && env.TRUST_PROXY !== 'loopback') {
+    errors.push('Для production за локальным Nginx требуется TRUST_PROXY=loopback.');
+  }
+
   if (errors.length) {
     throw new Error(`[services/postgresql/app] некорректная конфигурация окружения:\n${errors.join('\n')}`);
   }
@@ -244,6 +266,14 @@ function createPostgresqlApp({
 
   const app = express();
   app.disable('x-powered-by');
+  // Production Switch — Stage 9: см. validateAppEnv() выше — единственное
+  // безопасное значение уже проверено там (fail-closed), здесь только
+  // применяется. Без этого req.ip/req.ips за реальным Nginx отражали бы
+  // адрес самого Nginx (127.0.0.1), не клиента — IP-allowlist вебхука
+  // (Stage 8, routes/postgresql/api.js) была бы бессмысленной проверкой.
+  if (env.TRUST_PROXY === 'loopback') {
+    app.set('trust proxy', 'loopback');
+  }
 
   // 1. request id
   app.use(requestIdMiddleware);

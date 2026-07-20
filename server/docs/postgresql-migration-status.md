@@ -702,6 +702,56 @@ F2/F3, `yookassaProviderCreatePayment.test.js`) — не удалены, а ра
 5 прогонов Stage 8 suite подряд стабильно зелёные; полный
 `npm run test:postgresql` — 512/512, 2 прогона подряд чисто.
 
+## Production Switch — Stage 9 (production infrastructure — PARTIALLY COMPLETED)
+
+Девятая задача Production Switch — подготовка production-инфраструктуры
+(VPS/PostgreSQL-сервер/Nginx/SSL/деплой), НЕ сам Production Switch.
+**Статус: PARTIALLY COMPLETED, честно, не скрыто.** В окружении, где
+готовился этот этап, физически нет доступа ни к какому VPS/хостинг-
+аккаунту (подтверждено: `docs/PROJECT_BACKLOG.md` прямо гласит "VPS ещё не
+выбран", нет записей в `~/.ssh/known_hosts`/`config`, никакого IP/hostname
+нигде в репозитории) и нет реальных YooKassa test credentials (`.env.example`
+содержит только пустые плейсхолдеры). Полная детализация — в отдельном
+[`server/docs/postgresql-deployment-runbook.md`](./postgresql-deployment-runbook.md).
+
+**Реально выполнено и живо протестировано** (не требует реального
+сервера): найден и закрыт реальный, ранее не описанный пробел —
+`services/postgresql/app.js` не имел НИКАКОЙ `trust proxy` конфигурации.
+Без неё, даже за реальным Nginx, `req.ip` не отражал бы
+`X-Forwarded-For` — делая `isTrustedYookassaIp()` (Stage 8) бессмысленной
+проверкой. Добавлен дословный аналог SQLite `server.js`'s
+`TRUST_PROXY=loopback`-паттерна (fail-closed на любое другое значение,
+обязателен при `APP_ENV=production`) — подтверждено 7 живыми тестами
+(`server/test/postgresql/trustProxyStage9.test.js`), включая сквозную
+проверку через реальный webhook-маршрут (подделанный `X-Forwarded-For` не
+обманывает IP-гейт без `TRUST_PROXY=loopback`, корректно распознаётся с
+ним).
+
+**Подготовлено, но НЕ проверено вживую** (артефакты для будущего реального
+деплоя): `server/deploy/yaam-backend-postgresql.service` (systemd),
+`server/deploy/nginx-yaam-postgresql.conf` (reverse proxy + security
+headers + trust proxy контракт), `server/deploy/setup-ssl.sh`
+(Let's Encrypt bootstrap), `server/.env.postgresql.example` (production ENV
+шаблон на основе фактически читаемых приложением переменных).
+
+**Явно НЕ выполнено, честно задокументировано** (задание прямо требует не
+выдумывать): реальный VPS не создан, реальный production PostgreSQL-сервер
+не поднят, реальный Nginx/SSL не настроены, реальный YooKassa test-аккаунт
+не подключён (credentials отсутствуют) — раздел 7 `postgresql-payment-safety.md`'s
+чеклиста (create payment/webhook/refund/duplicate/timeout/cancellation/
+reconciliation против настоящего API ЮKassa) не выполнен.
+
+**IP-allowlist** — решение зафиксировано явно (задание требовало решения,
+не уклонения): остаётся выключенным
+(`YOOKASSA_WEBHOOK_ENFORCE_IP_ALLOWLIST=false`) до тех пор, пока Trust
+Proxy validation (раздел 6 runbook) не будет выполнена вручную на реальном
+сервере — корректность X-Forwarded-For сегодня невозможно гарантировать
+без реального Nginx. Это не блокер безопасности — канонический lookup
+(Stage 8) остаётся единственным обязательным механизмом подлинности webhook.
+
+`server.js` (SQLite) не изменён. Никакой Production Switch не выполнен —
+пользователи не переведены, боевые credentials не подключены.
+
 ## Известные обязательные риски (не устранены, зафиксированы для будущих волн)
 
 Унаследованные от бота (Stage 3) два пункта (отсутствие ownership-проверки,

@@ -1,0 +1,63 @@
+# systemd unit для YAAM PostgreSQL backend (server.postgresql.js).
+#
+# Production Switch — Stage 9. ЭТО ШАБЛОН, НЕ ПРИМЕНЁННЫЙ НИ К ОДНОМУ
+# РЕАЛЬНОМУ VPS — подготовлен без доступа к реальной инфраструктуре (см.
+# server/docs/postgresql-deployment-runbook.md за полным контекстом).
+# server.postgresql.js по-прежнему изолирован и никогда не запускается
+# автоматически ни отсюда, ни откуда-либо ещё, пока этот юнит вручную не
+# установлен на реальном сервере.
+#
+# ВАЖНОЕ ОТЛИЧИЕ от server/deploy/yaam-backend.service (SQLite-версия):
+# PostgreSQL — клиент-серверная СУБД с нормальной многопользовательской
+# конкурентностью (см. server/docs/single-instance.md, server/docs/
+# postgresql-operational-readiness.md) — singleInstanceLock.js НЕ
+# используется на этой стороне и НЕ нужен. Это НЕ значит, что этот юнит
+# безопасно запускать параллельно с yaam-backend.service (SQLite) на одном
+# порту/домене — они обслуживают РАЗНЫЕ, изолированные приложения; во время
+# Stage 9 (эта задача) НИ ОДИН реальный пользовательский трафик не должен
+# идти в этот юнит вообще — см. runbook, раздел "Что НЕ делать на Stage 9".
+#
+# Установка (вручную, на самом VPS, не отсюда — Stage 9 этого не выполняла):
+#   sudo cp server/deploy/yaam-backend-postgresql.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now yaam-backend-postgresql
+#
+# Проверка после reboot (см. runbook, раздел "VPS survives restart"):
+#   sudo systemctl is-enabled yaam-backend-postgresql   # ожидается: enabled
+#   sudo systemctl status yaam-backend-postgresql        # ожидается: active (running)
+#   curl -s http://127.0.0.1:3001/health/ready | jq .   # ожидается: {"ok":true,...}
+
+[Unit]
+Description=YAAM PostgreSQL backend (server.postgresql.js) — isolated, not connected to production traffic during Stage 9
+After=network.target postgresql.service
+# Если PostgreSQL — отдельный systemd-юнит на этом же хосте (типичная
+# установка через apt/apt-get postgresql), даёт гарантию порядка старта.
+# Если PostgreSQL управляется иначе (Docker, managed-сервис) — уберите эту
+# зависимость и полагайтесь на retry внутри db/postgresql/bootstrap.js
+# (waitForDatabase — уже переживает "PostgreSQL ещё не поднялся").
+
+[Service]
+Type=simple
+User=yaam
+WorkingDirectory=/opt/yaam/server
+EnvironmentFile=/opt/yaam/server/.env.postgresql
+ExecStart=/usr/bin/node server.postgresql.js
+Restart=on-failure
+RestartSec=5
+
+# Graceful shutdown: services/postgresql/lifecycle.js (Stage 6) обрабатывает
+# SIGTERM/SIGINT — снимает signal listeners, останавливает schedulers/бота,
+# закрывает HTTP-сервер (ждёт in-flight запросы), закрывает пул PostgreSQL.
+# TimeoutStopSec — запас сверх обычного (почти мгновенного) завершения.
+TimeoutStopSec=15
+
+# Множественные инстансы этого юнита (в отличие от SQLite-версии) физически
+# БЕЗОПАСНЫ на уровне БД (PostgreSQL — клиент-серверная СУБД) — но этот
+# конкретный юнит-файл всё равно НЕ templated и не подразумевает несколько
+# копий: единственный backend-процесс на порту PG_HEALTH_PORT достаточен для
+# Stage 9/10 масштаба; горизонтальное масштабирование — отдельное будущее
+# решение, требующее пересмотра schedulers (не должны дублировать sweep) и
+# bot lifecycle (не должно быть двух long-polling инстансов одного токена).
+
+[Install]
+WantedBy=multi-user.target
