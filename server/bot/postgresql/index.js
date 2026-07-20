@@ -338,8 +338,11 @@ function createBotHandlers(bot) {
 
   return {
     bot,
-    stop() {
+    async stop() {
       pgOrderService.orderEvents.removeListener('order:new', onOrderNew);
+      if (typeof bot.stopPolling === 'function') {
+        await bot.stopPolling({ cancel: true, reason: 'YAAM graceful shutdown' });
+      }
     },
     // Тестовый хук — см. комментарий у объявления inFlight выше.
     async waitForIdle() {

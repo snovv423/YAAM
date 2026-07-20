@@ -90,13 +90,17 @@ sudo systemctl status postgresql   # active (running)
 # (не суперпользователь, не владелец кластера) — от имени системного
 # пользователя postgres:
 sudo -u postgres psql <<'SQL'
-CREATE USER yaam_app WITH PASSWORD 'ЗАМЕНИТЬ_НА_СЛУЧАЙНЫЙ_ПАРОЛЬ';
+CREATE USER yaam_app;
 CREATE DATABASE yaam_production OWNER yaam_app;
 -- Минимальные права: владелец БД уже получает CREATE/CONNECT на неё,
 -- отдельно REVOKE публичного доступа к CREATE на уровне кластера:
+\connect yaam_production
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 GRANT CREATE ON SCHEMA public TO yaam_app;
 SQL
+
+# Задать пароль интерактивно: секрет не попадёт ни в history, ни в argv.
+sudo -u postgres psql -c '\password yaam_app'
 
 # PostgreSQL слушает только loopback (не открыт наружу, см. firewall выше) —
 # проверить postgresql.conf:
@@ -104,10 +108,8 @@ sudo grep "^listen_addresses" /etc/postgresql/*/main/postgresql.conf
 # ожидается: listen_addresses = 'localhost' (дефолт Debian/Ubuntu-пакета,
 # обычно не требует правки)
 
-# Применить схему (та же db/postgresql/schema.sql, что используют embedded-
-# postgres тесты — CREATE TABLE/INDEX IF NOT EXISTS, идемпотентно):
-psql "postgres://yaam_app:ПАРОЛЬ@127.0.0.1:5432/yaam_production" \
-  -f server/db/postgresql/schema.sql
+# Схема применяется после размещения репозитория в разделе 3. На этом шаге
+# файла server/db/postgresql/schema.sql на свежем VPS ещё может не быть.
 ```
 
 **Backup/restore** — механизм для реальной production PostgreSQL БД НЕ
@@ -116,17 +118,30 @@ psql "postgres://yaam_app:ПАРОЛЬ@127.0.0.1:5432/yaam_production" \
 Рекомендация (не изобретается заново — стандартные PostgreSQL-инструменты):
 
 ```bash
-# Логический бэкап (восстанавливается pg_restore, консистентный снепшот
-# благодаря MVCC, не требует остановки процесса):
-pg_dump --format=custom \
-  "postgres://yaam_app:ПАРОЛЬ@127.0.0.1:5432/yaam_production" \
-  -f "/var/backups/yaam/yaam_production_$(date +%Y%m%d_%H%M%S).dump"
+# После создания /opt/yaam/.pgpass в разделе 3 (пароль не попадает в argv,
+# shell history и process list):
+sudo install -d -o yaam -g yaam -m 0700 /var/backups/yaam
+sudo -u yaam env PGPASSFILE=/opt/yaam/.pgpass pg_dump --format=custom \
+  --host=127.0.0.1 --port=5432 --username=yaam_app --dbname=yaam_production \
+  --file="/var/backups/yaam/yaam_production_$(date +%Y%m%d_%H%M%S).dump"
 
-# Restore (в ПУСТУЮ БД):
-pg_restore --clean --if-exists \
-  -d "postgres://yaam_app:ПАРОЛЬ@127.0.0.1:5432/yaam_production" \
+# Проверочный restore-round-trip выполняется в ОТДЕЛЬНУЮ БД, не поверх рабочей:
+sudo -u postgres dropdb --if-exists yaam_restore_test
+sudo -u postgres createdb --owner=yaam_app yaam_restore_test
+sudo -u yaam env PGPASSFILE=/opt/yaam/.pgpass pg_restore --no-owner \
+  --host=127.0.0.1 --port=5432 --username=yaam_app --dbname=yaam_restore_test \
   /var/backups/yaam/yaam_production_ФАЙЛ.dump
+sudo -u yaam env PGPASSFILE=/opt/yaam/.pgpass psql \
+  --host=127.0.0.1 --port=5432 --username=yaam_app --dbname=yaam_restore_test \
+  -c 'SELECT count(*) FROM orders;'
+sudo -u postgres dropdb yaam_restore_test
 ```
+
+Никогда не выполнять `pg_restore --clean` поверх БД, пока backend пишет в неё.
+Аварийное восстановление выполняется с остановленным
+`yaam-backend-postgresql`, в новую БД; после проверки целостности меняется
+`DATABASE_URL` и только затем запускается unit. Старую БД не удалять до
+подтверждения `/health/ready` и бизнес-smoke-test — это rollback-точка.
 
 Расписание (systemd timer, тот же принцип, что и уже реализованный SQLite
 `npm run backup`/`server/scripts/backup-db.js`, см. `backup-restore.md` —
@@ -150,14 +165,24 @@ sudo chown yaam:yaam /opt/yaam
 cd /opt/yaam/server
 sudo -u yaam npm ci --omit=dev
 
+# libpq credentials для psql/pg_dump/pg_restore. Создать через редактор,
+# формат: 127.0.0.1:5432:*:yaam_app:РЕАЛЬНЫЙ_ПАРОЛЬ
+sudo -u yaam nano /opt/yaam/.pgpass
+sudo chmod 600 /opt/yaam/.pgpass
+
+# Применить свежую схему после того, как файл реально размещён на VPS:
+sudo -u yaam env PGPASSFILE=/opt/yaam/.pgpass psql \
+  --host=127.0.0.1 --port=5432 --username=yaam_app --dbname=yaam_production \
+  --set=ON_ERROR_STOP=1 --file=db/postgresql/schema.sql
+
 # Production ENV — на основе server/.env.postgresql.example (Stage 9),
 # заполнить реальными значениями:
-sudo cp server/.env.postgresql.example /opt/yaam/server/.env.postgresql
+sudo cp .env.postgresql.example /opt/yaam/server/.env.postgresql
 sudo chown yaam:yaam /opt/yaam/server/.env.postgresql
 sudo chmod 600 /opt/yaam/server/.env.postgresql
 sudo -u yaam nano /opt/yaam/server/.env.postgresql   # заполнить DATABASE_URL/YOOKASSA_*/ADMIN_*/...
 
-sudo cp server/deploy/yaam-backend-postgresql.service /etc/systemd/system/
+sudo cp deploy/yaam-backend-postgresql.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now yaam-backend-postgresql
 sudo systemctl status yaam-backend-postgresql   # active (running)
@@ -198,7 +223,8 @@ curl -s http://127.0.0.1:3001/health/ready           # 200 без ручного
 
 ```bash
 sudo apt-get install -y nginx
-sudo cp server/deploy/nginx-yaam-postgresql.conf /etc/nginx/sites-available/yaam-postgresql
+sudo mkdir -p /var/www/certbot
+sudo cp /opt/yaam/server/deploy/nginx-yaam-postgresql-bootstrap.conf /etc/nginx/sites-available/yaam-postgresql
 # Заменить ${DOMAIN} на реальный поддомен (например, api-pg.yaam.su)
 sudo sed -i 's/\${DOMAIN}/api-pg.yaam.su/g' /etc/nginx/sites-available/yaam-postgresql
 sudo ln -s /etc/nginx/sites-available/yaam-postgresql /etc/nginx/sites-enabled/
@@ -207,19 +233,28 @@ sudo systemctl reload nginx
 ```
 
 **Проверить**: `curl -I http://api-pg.yaam.su/health/live` (до SSL — см.
-раздел 5) отвечает через Nginx, не напрямую; `gzip` — `curl -H 'Accept-Encoding: gzip' -I ...`
-содержит `Content-Encoding: gzip` для JSON-ответов.
+раздел 5) отвечает через Nginx, не напрямую. Gzip проверяется после включения
+финального TLS-конфига, где он настроен.
 
 ## 5. SSL
 
 ```bash
+cd /opt/yaam
 DOMAIN=api-pg.yaam.su EMAIL=admin@yaam.su bash server/deploy/setup-ssl.sh
+
+# Только ПОСЛЕ успешного certbot заменить временный HTTP-only конфиг на
+# финальный TLS-конфиг. До выпуска сертификата этот файл включать нельзя:
+# nginx -t завершится ошибкой на отсутствующих fullchain.pem/privkey.pem.
+sudo cp server/deploy/nginx-yaam-postgresql.conf /etc/nginx/sites-available/yaam-postgresql
+sudo sed -i 's/\${DOMAIN}/api-pg.yaam.su/g' /etc/nginx/sites-available/yaam-postgresql
+sudo nginx -t
+sudo systemctl reload nginx
 ```
 
 Скрипт (см. полный текст и комментарии в `server/deploy/setup-ssl.sh`)
 устанавливает certbot, запрашивает подтверждение DNS вручную (защита от
 rate-limit Let's Encrypt при преждевременном запуске), выпускает
-сертификат через `certbot --nginx`, проверяет автопродление через
+сертификат через `certbot certonly --webroot`, проверяет автопродление через
 `--dry-run`, подтверждает наличие systemd-таймера автопродления (certbot
 сам его создаёт при установке через apt — не изобретается свой cron).
 
@@ -243,14 +278,17 @@ Nginx, `req.ip` НЕ отражает `X-Forwarded-For` (безопасный д
 без реального сервера — этот шаг закрывает именно её.
 
 ```bash
-# На самом VPS, ПОСЛЕ того, как TRUST_PROXY=loopback уже в .env.postgresql
-# и yaam-backend-postgresql перезапущен:
-curl -s https://api-pg.yaam.su/health/live \
-  -H "X-Forwarded-For: 203.0.113.5" 
-# health/live не отдаёт req.ip напрямую — временно (только для этой
-# проверки, НЕ оставлять в production) добавить debug-заголовок в ответ
-# или временный лог-вывод req.ip на любом маршруте, подтвердить, что
-# видно 203.0.113.5, а не внутренний IP Nginx/loopback.
+# Выполнить с ВНЕШНЕЙ машины с известным публичным IP TEST_CLIENT_IP.
+# Сначала обычный запрос, затем попытку подделать клиентский XFF:
+curl -s https://api-pg.yaam.su/api/restaurants >/dev/null
+curl -s https://api-pg.yaam.su/api/restaurants \
+  -H "X-Forwarded-For: 185.71.76.1" >/dev/null
+# На staging временно добавить ТОЛЬКО логирование req.ip в access log и сразу
+# удалить после проверки. В ОБОИХ запросах req.ip обязан быть TEST_CLIENT_IP.
+# Он НЕ должен стать 185.71.76.1: это означало бы spoofing через входящий XFF.
+# Затем выполнить прямой loopback-запрос, передав тестовый XFF, и подтвердить,
+# что приложение доверяет заголовку только когда peer действительно loopback.
+# После проверки удалить временный лог и перезапустить unit.
 ```
 
 **Решение по IP-allowlist (задание Stage 9, п.6 — явное требование)**:

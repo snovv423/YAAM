@@ -15,6 +15,7 @@ class MockProvider extends PaymentProviderInterface {
     // здесь нет; production-провайдер обязан хранить idempotency у себя.
     this.idempotentPayments = new Map(); // idempotencyKey -> {orderId, amount, result}
     this.idempotentRefunds = new Map(); // idempotencyKey -> {providerPaymentId, amount, result}
+    this.refunds = new Map(); // refundId -> {providerPaymentId, amount, status}
   }
 
   async createPayment({ orderId, amount, idempotencyKey }) {
@@ -64,8 +65,16 @@ class MockProvider extends PaymentProviderInterface {
       ? { refundId: `refund_${providerPaymentId}_${crypto.randomBytes(4).toString('hex')}`, status: 'succeeded' }
       : { refundId: null, status: 'failed' };
     if (p) p.status = 'refunded';
+    if (result.refundId) {
+      this.refunds.set(result.refundId, { providerPaymentId, amount, status: result.status });
+    }
     this.idempotentRefunds.set(idempotencyKey, { providerPaymentId, amount, result });
     return { ...result };
+  }
+
+  async getRefund(providerRefundId) {
+    const refund = this.refunds.get(providerRefundId);
+    return refund ? refund.status : 'failed';
   }
 
   // Мок не получает настоящие webhook'и по HTTP — вызывается напрямую из dev-роута.

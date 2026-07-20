@@ -56,6 +56,26 @@ function validateAppEnv(env) {
     errors.push(`APP_ENV="${env.APP_ENV}" — допустимы только ${KNOWN_APP_ENVS.map((v) => `"${v}"`).join('/')}.`);
   }
 
+  if (
+    env.YOOKASSA_WEBHOOK_ENFORCE_IP_ALLOWLIST !== undefined
+    && env.YOOKASSA_WEBHOOK_ENFORCE_IP_ALLOWLIST !== ''
+    && !['true', 'false'].includes(env.YOOKASSA_WEBHOOK_ENFORCE_IP_ALLOWLIST)
+  ) {
+    errors.push('YOOKASSA_WEBHOOK_ENFORCE_IP_ALLOWLIST допускает только "true" или "false".');
+  }
+
+  if (env.PG_HEALTH_PORT !== undefined && env.PG_HEALTH_PORT !== '') {
+    const port = Number(env.PG_HEALTH_PORT);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      errors.push(`PG_HEALTH_PORT="${env.PG_HEALTH_PORT}" — требуется целое число 1..65535.`);
+    }
+  }
+
+  const healthHost = env.PG_HEALTH_HOST || '127.0.0.1';
+  if (env.APP_ENV === 'production' && !['127.0.0.1', '::1', 'localhost'].includes(healthHost)) {
+    errors.push('PG_HEALTH_HOST в production должен быть loopback (127.0.0.1, ::1 или localhost).');
+  }
+
   if (Boolean(env.ADMIN_USER) !== Boolean(env.ADMIN_PASS)) {
     errors.push('ADMIN_USER и ADMIN_PASS должны быть заданы вместе (сейчас задан только один из двух).');
   }
@@ -188,9 +208,9 @@ function createBotLifecycleAdapter({ token, botClient }) {
       }
     },
 
-    stop() {
+    async stop() {
       if (!handle) return;
-      handle.stop();
+      await handle.stop();
       handle = null;
       state = 'stopped';
     },

@@ -352,7 +352,7 @@ if (process.env.PAYMENT_PROVIDER === 'yookassa') {
       const expectedAmount = payment.amount;
       const notifiedAmount = event.amount !== undefined ? Number(event.amount) : NaN;
       const amountOk = Number.isFinite(notifiedAmount) && notifiedAmount === expectedAmount;
-      const currencyOk = event.currency === undefined || event.currency === 'RUB';
+      const currencyOk = event.currency === 'RUB';
       if (!amountOk || !currencyOk) {
         console.error(
           `[api-postgresql] webhook rejected: amount/currency mismatch id=${logId} payment=${payment.id}`

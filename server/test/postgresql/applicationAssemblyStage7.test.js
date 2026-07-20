@@ -804,6 +804,21 @@ test('H6: ADMIN_USER без ADMIN_PASS (или наоборот) — createPostg
   );
 });
 
+test('H7: security-sensitive ENV не имеют тихих fallback в production', () => {
+  assert.throws(
+    () => appModule.createPostgresqlApp({ env: { APP_ENV: 'production', TRUST_PROXY: 'loopback', YOOKASSA_WEBHOOK_ENFORCE_IP_ALLOWLIST: 'treu' } }),
+    /YOOKASSA_WEBHOOK_ENFORCE_IP_ALLOWLIST/
+  );
+  assert.throws(
+    () => appModule.createPostgresqlApp({ env: { APP_ENV: 'production', TRUST_PROXY: 'loopback', PG_HEALTH_PORT: 'not-a-port' } }),
+    /PG_HEALTH_PORT/
+  );
+  assert.throws(
+    () => appModule.createPostgresqlApp({ env: { APP_ENV: 'production', TRUST_PROXY: 'loopback', PG_HEALTH_HOST: '0.0.0.0' } }),
+    /PG_HEALTH_HOST/
+  );
+});
+
 // ===========================================================================
 // I. Bot lifecycle
 // ===========================================================================
@@ -821,14 +836,16 @@ test('I1: единственный запуск — botAdapter running посл�
   }
 });
 
-test('I2: повторный start() адаптера идемпотентен — не навешивает второй набор слушателей', () => {
+test('I2: повторный start() адаптера идемпотентен — не навешивает второй набор слушателей', async () => {
   const { createBotLifecycleAdapter } = appModule;
   const fakeBot = new FakeTelegramBot();
   const adapter = createBotLifecycleAdapter({ botClient: fakeBot });
   adapter.start();
   adapter.start(); // повторный вызов — должен быть no-op
   assert.equal((fakeBot.eventHandlers['callback_query'] || []).length, 1, 'должен быть ровно один callback_query слушатель');
-  adapter.stop();
+  await adapter.stop();
+  assert.equal(fakeBot.stopPollingCalls.length, 1, 'graceful stop обязан остановить реальный Telegram long polling');
+  assert.equal(fakeBot.stopPollingCalls[0].cancel, true);
 });
 
 test('I3: без TELEGRAM_BOT_TOKEN и без botClient — бот выключен, readiness показывает "disabled", HTTP не страдает', async () => {
@@ -885,6 +902,7 @@ test('J1: полный graceful shutdown — HTTP закрыт, scheduler ост
 
   assert.equal(instance.scheduler.isRunning(), false);
   assert.equal(instance.botAdapter.isRunning(), false);
+  assert.equal(fakeBot.stopPollingCalls.length, 1, 'lifecycle должен дождаться stopPolling()');
   assert.equal(instance.isReady(), false);
   assert.equal(process.listenerCount('SIGTERM') + process.listenerCount('SIGINT'), baselineSignals);
   await assert.rejects(() => fetch(`http://127.0.0.1:${port}/health/live`), () => true);

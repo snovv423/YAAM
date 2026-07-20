@@ -9,7 +9,8 @@ function loadProvider() {
     const YookassaProvider = require('./paymentProviders/yookassaProvider');
     return new YookassaProvider();
   }
-  return new MockProvider();
+  if (name === 'mock') return new MockProvider();
+  throw new Error(`PAYMENT_PROVIDER="${name}" не поддерживается — допустимы только "mock" или "yookassa".`);
 }
 
 const provider = loadProvider();
@@ -37,6 +38,10 @@ async function refundPayment(providerPaymentId, amount, idempotencyKey) {
   return provider.refund(providerPaymentId, amount, idempotencyKey);
 }
 
+async function getRefundStatus(providerRefundId, expected) {
+  return provider.getRefund(providerRefundId, expected);
+}
+
 // Production Switch — Stage 8: провайдер верифицирует вебхук асинхронно
 // (канонический lookup у ЮKassa — сетевой вызов, см.
 // paymentProviders/yookassaProvider.js) — эта обёртка теперь тоже
@@ -59,6 +64,7 @@ module.exports = {
   createPayment,
   getPaymentStatus,
   refundPayment,
+  getRefundStatus,
   verifyWebhook,
   devMarkPaid,
   calcCommission,

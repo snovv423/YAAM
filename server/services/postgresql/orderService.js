@@ -2367,11 +2367,21 @@ async function processClaimedRefund(claimedRefund) {
 
   let result;
   try {
-    result = await refundPaymentWithTimeout({
-      providerPaymentId: payment.provider_payment_id,
-      amount: claimedRefund.amount,
-      idempotencyKey: claimedRefund.provider_idempotency_key,
-    });
+    if (claimedRefund.provider_refund_id) {
+      result = {
+        refundId: claimedRefund.provider_refund_id,
+        status: await payments.getRefundStatus(claimedRefund.provider_refund_id, {
+          providerPaymentId: payment.provider_payment_id,
+          amount: claimedRefund.amount,
+        }),
+      };
+    } else {
+      result = await refundPaymentWithTimeout({
+        providerPaymentId: payment.provider_payment_id,
+        amount: claimedRefund.amount,
+        idempotencyKey: claimedRefund.provider_idempotency_key,
+      });
+    }
   } catch (err) {
     // Неизвестно, успел ли провайдер выполнить возврат. Строка остаётся
     // 'processing' с уже выставленным next_attempt_at — следующий sweep
@@ -2382,8 +2392,22 @@ async function processClaimedRefund(claimedRefund) {
     const rows = await db.query('SELECT * FROM refunds WHERE id = $1', [claimedRefund.id]);
     return rows[0];
   }
-  if (!result || (result.status !== 'succeeded' && result.status !== 'failed')) {
+  if (!result || !['pending', 'succeeded', 'failed'].includes(result.status)) {
     throw refundInvariant(`провайдер вернул неизвестный статус возврата: ${result && result.status}`);
+  }
+  if (result.status === 'pending') {
+    if (!result.refundId) throw refundInvariant('pending-возврат не содержит provider refund id');
+    const pending = await db.execute(
+      `UPDATE refunds SET provider_refund_id = $1, updated_at = NOW()
+       WHERE id = $2 AND status = 'processing'
+         AND (provider_refund_id IS NULL OR provider_refund_id = $1)
+       RETURNING *`,
+      [result.refundId, claimedRefund.id]
+    );
+    if (pending.rowCount !== 1) {
+      throw refundInvariant('не удалось сохранить provider refund id для pending-возврата');
+    }
+    return pending.rows[0];
   }
   if (result.status === 'succeeded') return finalizeRefundSucceeded(claimedRefund.id, result.refundId || null);
   return finalizeRefundFailed(claimedRefund.id, 'provider_failed');

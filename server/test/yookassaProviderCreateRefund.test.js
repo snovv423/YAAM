@@ -128,7 +128,7 @@ test('refund(): status="succeeded" -> {refundId, status:"succeeded"}', async () 
   assert.deepEqual(result, { refundId: 'yk_refund_xyz789', status: 'succeeded' });
 });
 
-test('refund(): status="canceled" -> {refundId, status:"failed"} (маппинг по существующему бинарному контракту)', async () => {
+test('refund(): status="canceled" -> {refundId, status:"failed"} (маппинг терминального статуса)', async () => {
   setFakeTestCredentials();
   global.fetch = mockOk(validRefundBody({ status: 'canceled' }));
   const YookassaProvider = freshProviderClass();
@@ -146,13 +146,15 @@ test('refund(): status="canceled" с cancellation_details.reason="insufficient_f
   assert.equal(result.status, 'failed');
 });
 
-test('refund(): status="pending" -> ProviderResultUnknownError (официально НЕ документирован для Refund, в отличие от Payment)', async () => {
+test('refund(): status="pending" сохраняет refundId для последующей GET-сверки', async () => {
   setFakeTestCredentials();
   global.fetch = mockOk(validRefundBody({ status: 'pending' }));
   const YookassaProvider = freshProviderClass();
-  const { ProviderResultUnknownError } = require('../services/paymentProviders/providerErrorTaxonomy');
   const provider = new YookassaProvider();
-  await assert.rejects(() => provider.refund(PAY_ID, 300, 'k'), (err) => err instanceof ProviderResultUnknownError);
+  assert.deepEqual(
+    await provider.refund(PAY_ID, 300, 'k'),
+    { refundId: 'yk_refund_xyz789', status: 'pending' }
+  );
 });
 
 test('refund(): неизвестный/будущий status ("waiting_for_capture", payment-специфичный) -> ProviderResultUnknownError', async () => {

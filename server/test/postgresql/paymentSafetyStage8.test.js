@@ -452,6 +452,30 @@ test('A9: валюта в уведомлении не RUB — 400, отклон�
   }
 });
 
+test('A9b: отсутствующая валюта в уведомлении — 400, fail closed', async () => {
+  const transport = createFakeYookassaTransport();
+  const restore = installFakeFetch(transport.handler);
+  const app = await startWebhookApp({ PAYMENT_PROVIDER: 'yookassa' });
+  try {
+    const YookassaProvider = require('../../services/paymentProviders/yookassaProvider.js');
+    const provider = new YookassaProvider();
+    const { providerPaymentId } = await createOrderWithYookassaPayment(provider, 500);
+    transport.setPaymentStatus(providerPaymentId, 'succeeded');
+    const res = await fetchJson(`${app.baseUrl}/api/webhooks/payment`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: 'notification', event: 'payment.succeeded',
+        object: { id: providerPaymentId, status: 'succeeded', amount: { value: '500.00' } },
+      }),
+    });
+    assert.equal(res.status, 400);
+  } finally {
+    restore();
+    await app.cleanup();
+  }
+});
+
 test('A10: body-size лимит применяется на HTTP-уровне (413 для тела > 64kb)', async () => {
   const restore = installFakeFetch(createFakeYookassaTransport().handler);
   const app = await startWebhookApp({ PAYMENT_PROVIDER: 'yookassa' });
@@ -573,6 +597,48 @@ test('B5: провайдер-таймаут при возврате — стро
   assert.equal(swept, 1);
   const finalRow = await db.query('SELECT status FROM refunds WHERE id = $1', [refundRow.id]);
   assert.equal(finalRow[0].status, 'succeeded');
+});
+
+test('B5b: provider pending сохраняет refund id и reconciliation использует GET до финализации', async () => {
+  const { paymentId } = await createPaidAcceptedOrder();
+  const paymentRow = (await db.query('SELECT * FROM payments WHERE id = $1', [paymentId]))[0];
+  const refundRow = await db.transaction((client) => orderService.reserveRefundRow(paymentRow, 'timeout', client));
+  const paymentService = paymentServiceForOrderService;
+  const originalRefund = paymentService.refundPayment;
+  const originalGetRefund = paymentService.getRefundStatus;
+  let postCalls = 0;
+  let getCalls = 0;
+
+  paymentService.refundPayment = async () => {
+    postCalls += 1;
+    return { refundId: 'provider_pending_refund_1', status: 'pending' };
+  };
+  paymentService.getRefundStatus = async () => {
+    getCalls += 1;
+    return getCalls === 1 ? 'pending' : 'succeeded';
+  };
+
+  try {
+    await orderService.ensureRefundReady(refundRow.id);
+    let current = (await db.query('SELECT * FROM refunds WHERE id = $1', [refundRow.id]))[0];
+    assert.equal(current.status, 'processing');
+    assert.equal(current.provider_refund_id, 'provider_pending_refund_1');
+
+    await db.execute(`UPDATE refunds SET next_attempt_at = NOW() - INTERVAL '1 second' WHERE id = $1`, [refundRow.id]);
+    await orderService.sweepStuckRefunds();
+    current = (await db.query('SELECT status FROM refunds WHERE id = $1', [refundRow.id]))[0];
+    assert.equal(current.status, 'processing');
+
+    await db.execute(`UPDATE refunds SET next_attempt_at = NOW() - INTERVAL '1 second' WHERE id = $1`, [refundRow.id]);
+    await orderService.sweepStuckRefunds();
+    current = (await db.query('SELECT status FROM refunds WHERE id = $1', [refundRow.id]))[0];
+    assert.equal(current.status, 'succeeded');
+    assert.equal(postCalls, 1, 'POST /refunds нельзя повторять после получения provider refund id');
+    assert.equal(getCalls, 2, 'pending refund должен сверяться каноническим GET');
+  } finally {
+    paymentService.refundPayment = originalRefund;
+    paymentService.getRefundStatus = originalGetRefund;
+  }
 });
 
 test('B6: дублирующий запрос на возврат переиспользует существующую строку (не создаёт вторую)', async () => {

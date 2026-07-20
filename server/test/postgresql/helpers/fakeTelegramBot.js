@@ -28,6 +28,7 @@ class FakeTelegramBot {
     this.editedMessages = [];
     this.answeredCallbacks = [];
     this._messageIdSeq = 1;
+    this.stopPollingCalls = [];
 
     // Точки инъекции сбоя Telegram API — тесты подменяют перед вызовом,
     // не трогая остальную логику фейка.
@@ -70,6 +71,10 @@ class FakeTelegramBot {
     if (this.answerCallbackQueryImpl) return this.answerCallbackQueryImpl(id, opts);
     this.answeredCallbacks.push({ id, opts });
     return true;
+  }
+
+  async stopPolling(options) {
+    this.stopPollingCalls.push(options);
   }
 
   // --- Симуляция входящих Telegram update'ов ---

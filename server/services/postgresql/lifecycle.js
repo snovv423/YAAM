@@ -79,7 +79,7 @@ function createLifecycle({
       }
       signalHandlers.clear();
 
-      for (const scheduler of schedulers) scheduler.stop();
+      await Promise.all(schedulers.map((scheduler) => scheduler.stop()));
 
       if (httpServer) {
         await new Promise((resolve, reject) => {

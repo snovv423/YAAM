@@ -255,6 +255,23 @@ test('getRefund(): amount.value не строка -> ProviderResultUnknownError'
   await assert.rejects(() => provider.getRefund(REFUND_ID), (err) => err instanceof ProviderResultUnknownError);
 });
 
+test('getRefund(): orchestration-сверка отклоняет чужой payment_id или amount', async () => {
+  setFakeTestCredentials();
+  global.fetch = async () => ({ ok: true, status: 200, json: async () => validBody() });
+  const YookassaProvider = freshProviderClass();
+  const { ProviderResultUnknownError } = require('../services/paymentProviders/providerErrorTaxonomy');
+  const provider = new YookassaProvider();
+
+  await assert.rejects(
+    () => provider.getRefund(REFUND_ID, { providerPaymentId: 'another_payment', amount: 300 }),
+    (err) => err instanceof ProviderResultUnknownError
+  );
+  await assert.rejects(
+    () => provider.getRefund(REFUND_ID, { providerPaymentId: 'yk_payment_xyz789', amount: 999 }),
+    (err) => err instanceof ProviderResultUnknownError
+  );
+});
+
 test('getRefund(): response без status -> ProviderResultUnknownError', async () => {
   setFakeTestCredentials();
   global.fetch = async () => ({ ok: true, status: 200, json: async () => validBody({ status: undefined }) });
