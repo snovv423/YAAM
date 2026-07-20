@@ -305,8 +305,24 @@ router.get('/restaurants/:id/edit', async (req, res) => {
   }
 });
 
-router.post('/restaurants/:id/', (req, res) => res.redirect(307, `/admin/restaurants/${req.params.id}`));
-
+// Production Switch — Stage 7: порядок регистрации этих двух маршрутов
+// намеренно ПОМЕНЯН МЕСТАМИ относительно буквального SQLite-порядка (найден
+// и задокументирован как баг в Stage 4, см. postgresql-admin-port.md/
+// postgresql-migration-status.md). Под Express `strict: false` (default, не
+// переопределён нигде) оба паттерна компилируются в идентичный регэксп —
+// побеждает ПЕРВЫЙ зарегистрированный, независимо от наличия trailing slash
+// в реальном запросе. В унаследованном порядке (редирект-заглушка первой)
+// реальный UPDATE-обработчик ниже был недостижимым мёртвым кодом, а форма
+// редактирования ресторана (её `action` — без trailing slash) реально
+// попадала бы в бесконечный 307-redirect-цикл на саму себя. Фикс — локальный
+// (только порядок двух router.post() в этом файле), не меняет внешний
+// контракт (тело/статусы обоих обработчиков не тронуты), восстанавливает
+// поведение, уже очевидное из самого кода — форма ведёт на путь без
+// trailing slash, значит реальный UPDATE и должен на него отвечать.
+// Воспроизведено тестом ДО фикса и подтверждено тестом ПОСЛЕ (см.
+// applicationAssemblyStage7.test.js, раздел E). SQLite-оригинал
+// (routes/admin.js) НЕ тронут — там баг остаётся, требует отдельного
+// product-решения (вне мандата Stage 7, затрагивает живой production-путь).
 router.post('/restaurants/:id', async (req, res) => {
   try {
     const { name, cuisine, photo_url, cities, address, hours, phone, delivery_price, min_order, default_cook_minutes } = req.body;
@@ -329,6 +345,15 @@ router.post('/restaurants/:id', async (req, res) => {
     res.status(500).send('Внутренняя ошибка сервера');
   }
 });
+
+// После фикса выше — недостижимый код (та же причина, по которой раньше
+// недостижимым был реальный UPDATE-обработчик: strict:false компилирует
+// '/restaurants/:id' и '/restaurants/:id/' в идентичный регэксп, поэтому
+// маршрут, зарегистрированный первым, перехватывает ОБА варианта запроса,
+// с trailing slash и без). Оставлен как есть (не удалён) — минимальный,
+// локальный диф; удаление отдельного маршрута — уже другое, более широкое
+// решение, не входящее в мандат "поменять порядок регистрации".
+router.post('/restaurants/:id/', (req, res) => res.redirect(307, `/admin/restaurants/${req.params.id}`));
 
 router.post('/restaurants/:id/pause', async (req, res) => {
   try {

@@ -25,7 +25,14 @@ const db = require('../../db/postgresql');
 // АКТУАЛЬНый набор schedulers на момент вызова (на случай, если вызывающий
 // код когда-нибудь начнёт/остановит scheduler динамически), а не снимок на
 // момент createHealthCheck().
-function createHealthCheck({ getSchedulers = () => [] } = {}) {
+//
+// getBotState() — Stage 7 добавление, полностью опциональное (default отдаёт
+// null, обратная совместимость со Stage 6 вызывающим кодом/тестами, которые
+// этот параметр не передают). Bot state НЕ участвует в `ok` — временный
+// сбой Telegram не должен превращать readiness в false (см.
+// server/docs/postgresql-application-assembly.md, раздел "Bot lifecycle и
+// readiness"), только наблюдаемое поле в ответе.
+function createHealthCheck({ getSchedulers = () => [], getBotState = () => null } = {}) {
   async function checkDatabase() {
     try {
       await db.query('SELECT 1');
@@ -60,16 +67,21 @@ function createHealthCheck({ getSchedulers = () => [] } = {}) {
   }
 
   // Readiness — реальная проверка всех зависимостей, перечисленных заданием.
+  // `bot` — наблюдаемое поле (см. комментарий у getBotState выше), не влияет
+  // на `ok`: null, если вызывающий код не передал getBotState (Stage 6
+  // поведение не меняется, bot ещё не существовал на момент Stage 6).
   async function readiness() {
     const database = await checkDatabase();
     const pool = checkPool();
     const schedulers = checkSchedulers();
+    const bot = getBotState();
     return {
       ok: database.ok,
       uptimeSec: Math.floor(process.uptime()),
       database,
       pool,
       schedulers,
+      bot,
     };
   }
 
