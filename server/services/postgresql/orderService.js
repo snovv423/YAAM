@@ -1180,8 +1180,8 @@ async function restaurantAdvance(orderId, nextStatus, { estimatedMinutes } = {})
 //      awaiting_restaurant ветки, как и в оригинале).
 //   4. awaiting_restaurant -> claim refund (если есть succeeded-платёж) + ->
 //      cancelled, одной транзакцией.
-//   5. race-проигрыш финального UPDATE -> throw refundInvariant('не удалось
-//      атомарно отменить заказ').
+//   5. race-проигрыш финального UPDATE -> см. HIGH-фикс ниже (Production
+//      Switch Stage 9 closure).
 //
 // SQL-стратегия: в отличие от restaurantAccept/restaurantDecline, здесь
 // предварительное чтение НЕОБХОДИМО (задание, п.6, исключение) — ожидаемый
@@ -1192,8 +1192,33 @@ async function restaurantAdvance(orderId, nextStatus, { estimatedMinutes } = {})
 // эффект, что и restaurantAdvance в Wave 1): окно между чтением current и
 // финальным conditional UPDATE РЕАЛЬНО существует и достижимо под
 // PostgreSQL — проверено живым concurrency-тестом.
+//
+// HIGH-фикс (независимый Codex-аудит, "concurrent cancel HTTP 500",
+// воспроизведён детерминированным barrier-тестом на реальных row-lock'ах
+// ДО этого фикса — см. commit message/PDF-отчёт за точным механизмом):
+// раньше rowCount!==1 БЕЗУСЛОВНО трактовался как нарушенный инвариант
+// (throw refundInvariant -> публичный 500), даже когда единственная причина
+// проигрыша — конкурентный ПОБЕДИТЕЛЬ уже успешно перевёл тот же заказ в
+// 'cancelled' долями секунды раньше (double-click/сетевой retry/два вкладки
+// — реалистичный сценарий, не экзотика). Теперь при rowCount!==1 состояние
+// перечитывается ЕЩЁ РАЗ, в ТОЙ ЖЕ транзакции (READ COMMITTED — свежий
+// снимок на каждый оператор, тот же принцип, что и в markPaid/
+// restaurantDecline) и различается три исхода:
+//   - fresh.status === 'cancelled' -> конкурентный победитель уже завершил
+//     ИМЕННО этот переход — безопасный идемпотентный успех для проигравшего
+//     запроса (тот же HTTP 200, что получил победитель), НЕ ошибка. changed
+//     остаётся false — событие 'order:status' уже эмитировал победитель,
+//     повторно эмитить нельзя (тот же принцип, что Stage 2 закрепила для
+//     restaurantDecline/sweepTimeouts).
+//   - fresh.status — что-то ДРУГОЕ (не cancelled) -> настоящий бизнес-
+//     конфликт (например, ресторан принял заказ ровно в этот момент) — та
+//     же явная ошибка "уже готовится", что и раньше для этой ветки. Гонка
+//     НЕ маскируется как успех.
+//   - fresh не существует -> реальный нарушенный инвариант (см. ниже),
+//     как и раньше.
 async function cancelByCustomer(orderId) {
   let refundRow = null;
+  let changed = false;
   const order = await db.transaction(async (client) => {
     const current = await getOrder(orderId, client);
     if (!current) throw new Error('заказ не найден');
@@ -1215,17 +1240,31 @@ async function cancelByCustomer(orderId) {
       [orderId, current.status],
       client
     );
-    if (updated.rowCount !== 1) throw refundInvariant('не удалось атомарно отменить заказ');
+    if (updated.rowCount === 1) {
+      changed = true;
+      return getOrder(orderId, client);
+    }
 
-    return getOrder(orderId, client);
+    const fresh = await getOrder(orderId, client);
+    if (!fresh) throw refundInvariant('заказ исчез во время отмены — нарушен инвариант');
+    if (fresh.status === 'cancelled') {
+      return fresh; // конкурентный победитель уже отменил — идемпотентный успех
+    }
+    throw new Error('заказ уже готовится — отменить нельзя, свяжитесь с рестораном');
   });
-  // Throw-based гвард — см. restaurantAdvance выше, тот же принцип.
-  orderEvents.emit('order:status', order);
+  if (changed) {
+    orderEvents.emit('order:status', order);
+  }
   // Production Switch — Stage 8: сетевой возврат запускается СТРОГО после
   // commit (fire-and-forget, не await'ится) — см. scheduleRefundProcessing.
   // reserveRefundRow сама идемпотентна (partial UNIQUE index), поэтому
-  // повторный вызов cancelByCustomer на уже отменённом заказе безопасен —
-  // сюда просто не дойдёт (current.status уже не в допустимом списке).
+  // повторный/конкурентный вызов cancelByCustomer безопасен — либо не
+  // доходит до резервации (current.status уже не в допустимом списке), либо
+  // (Stage 9 HIGH-фикс, awaiting_restaurant race) оба конкурента резервируют
+  // ОДНУ И ТУ ЖЕ строку (reserveRefundRow идемпотентна сама по себе), и оба
+  // safely вызывают scheduleRefundProcessing на один и тот же refund id —
+  // ensureRefundReady() (Stage 8) сама идемпотентна (in-flight Map + SQL
+  // WHERE-guard), повторный вызов не создаёт дублирующий сетевой возврат.
   if (refundRow) scheduleRefundProcessing(refundRow.id);
   return order;
 }
