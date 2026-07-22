@@ -7,11 +7,10 @@ const {
   assertMatchingProviderObject,
 } = require('./providerErrorTaxonomy');
 
-// ЮKassa, MVP-scope: только СБП, только capture=true (см. YAAM-payment-
-// capture-model-ADR.pdf — official-подтверждённый факт: СБП не поддерживает
-// двухстадийную оплату, поэтому capture=false здесь сознательно не
-// рассматривается — не "пока не сделали", а архитектурно не нужно для этого
-// способа оплаты). Historical note: изначально (более ранняя задача) только
+// ЮKassa, текущий scope: только тестовый магазин (sandbox), банковская карта,
+// capture=true. Production-СБП остаётся отдельным будущим этапом: обычный
+// тестовый магазин его не поддерживает, а live credentials этот provider
+// намеренно отвергает. Historical note: изначально (более ранняя задача) только
 // createPayment() был реализован, getStatus/refund/verifyWebhook каждый
 // бросал явный 'not implemented'. К Production Switch Stage 8 все методы
 // провайдера реализованы (createPayment, getStatus, refund, getRefund,
@@ -39,21 +38,8 @@ const {
 //   verifyWebhook()/mockProvider.js и подтверждён паттерном Medusa.js
 //   (getWebhookActionAndData возвращает action, не мутирует состояние сам).
 //
-// ВАЖНОЕ ИСПРАВЛЕНИЕ существовавшего до этой задачи комментария-заготовки:
-// ниже было написано confirmation.type='qr' — это неверно конкретно для СБП.
-// Официальная страница интеграции СБП прямо указывает confirmation
-// type = 'redirect' (пользователь либо сканирует QR на десктопе, либо
-// выбирает банк на мобильном — то и другое отображается на СТОРОНЕ ЮKassa
-// после редиректа, не строится нами). Используется здесь.
-//
-// fix(payments): enforce SBP create payment contract — исправления по
-// результатам независимого pre-push review commit 333c951 (см.
-// YAAM-yookassa-createpayment-pre-push-review.pdf):
-// - HIGH: request body не форсировал СБП (payment_method_data отсутствовал) —
-//   добавлено ниже, точный формат подтверждён повторным fetch официальной
-//   страницы интеграции СБП: { "type": "sbp" }, без дополнительных вложенных
-//   полей ("В request можно передавать любые другие параметры, кроме
-//   payment_method_id, payment_token, airline").
+// confirmation.type='redirect' используется и для sandbox-карты: вся форма
+// оплаты остаётся на стороне ЮKassa, YAAM получает только HTTPS URL.
 // - MEDIUM: amount/idempotencyKey не валидировались локально до сетевого
 //   вызова — validateAmount()/validateIdempotencyKey() ниже, fail-closed до
 //   fetch, категория FATAL_REQUEST (payload-проблема на нашей стороне,
@@ -104,12 +90,10 @@ const {
 // нормализованный статус.
 const YOOKASSA_API_BASE_URL = 'https://api.yookassa.ru/v3';
 
-// Официальные лимиты ЮKassa для СБП (перепроверено на странице интеграции
-// СБП): минимум 1 рубль, максимум 700 000 рублей (порог можно увеличить
-// только через менеджера ЮKassa — здесь фиксируем стандартный документированный
-// диапазон, не пытаемся угадывать индивидуальные лимиты конкретного магазина).
-const SBP_MIN_AMOUNT_RUB = 1;
-const SBP_MAX_AMOUNT_RUB = 700000;
+// Консервативный операционный диапазон YAAM. Это локальный business guard,
+// а не утверждение об универсальных лимитах каждого способа оплаты ЮKassa.
+const PAYMENT_MIN_AMOUNT_RUB = 1;
+const PAYMENT_MAX_AMOUNT_RUB = 700000;
 
 // Официальный лимит Idempotence-Key (см. "Формат взаимодействия" в
 // документации ЮKassa): "Длина не больше 64 символов". Минимальная длина и
@@ -119,13 +103,15 @@ const SBP_MAX_AMOUNT_RUB = 700000;
 // через сырое значение, которое напрямую становится значением заголовка.
 const IDEMPOTENCE_KEY_MAX_LENGTH = 64;
 
-// Production Switch — Stage 8: MVP-scope события вебхука (только СБП,
-// capture=true — см. YAAM-payment-capture-model-ADR.pdf) — значение это
+// Поддерживаемые события sandbox-потока с capture=true — значение это
 // ожидаемый нормализованный статус, который канонический getStatus() ОБЯЗАН
 // вернуть, чтобы уведомление считалось подтверждённым (см. verifyWebhook()).
-const SUPPORTED_WEBHOOK_EVENTS = Object.freeze({
+const SUPPORTED_PAYMENT_WEBHOOK_EVENTS = Object.freeze({
   'payment.succeeded': 'succeeded',
   'payment.canceled': 'failed',
+});
+const SUPPORTED_REFUND_WEBHOOK_EVENTS = Object.freeze({
+  'refund.succeeded': 'succeeded',
 });
 
 // Реальные уведомления ЮKassa компактны (id/event/object с суммой/статусом)
@@ -235,9 +221,8 @@ function normalizeGetRefundStatus(rawStatus) {
 // терминальный успех. 'canceled' — терминальный провал (включает ЛЮБУЮ
 // причину из cancellation_details.reason — 23 документированные причины,
 // от 3d_secure_failed до fraud_suspected — интерфейс не поддерживает передачу
-// конкретной причины дальше, только сам факт отмены; для СБП без
-// payment_method_data ограничений это по-прежнему безопасно, т.к. 'canceled'
-// у ЮKassa всегда терминален и однозначен независимо от причины). 'pending' и
+// конкретной причины дальше, только сам факт отмены; 'canceled' у ЮKassa
+// всегда терминален и однозначен независимо от причины). 'pending' и
 // 'waiting_for_capture' — оба ещё НЕ финальны (waiting_for_capture возможен
 // только теоретически при capture=true, если списание почему-то ещё не
 // произошло атомарно вместе с подтверждением — MVP всегда шлёт capture=true,
@@ -346,11 +331,8 @@ function localValidationError(operation, context, reason, ErrorClass = YookassaC
 
 // amount приходит от вызывающего кода (paymentService.js) как число рублей —
 // та же семантика для createPayment (сумма платежа) и refund() (сумма
-// возврата): официальный минимум для СБП — 1 руб. для обеих операций,
-// максимум для refund официально не задан отдельно, а ограничен размером
-// исходного платежа (сам provider этого не знает и не обязан — это уже
-// проверено выше по стеку при создании платежа; локально проверяем те же
-// структурные правила, что уже применялись бы к любой валидной СБП-сумме).
+// возврата). Для refund верхняя граница дополнительно физически ограничена
+// размером исходного платежа; этот инвариант проверяется выше по стеку.
 // Проверяем ДО сетевого вызова — провайдер не должен полагаться на то, что
 // выше по стеку это уже сделали (defense-in-depth, тот же принцип, что и
 // fail-closed проверка ключей/return_url в конструкторе/createPayment).
@@ -364,10 +346,10 @@ function validateAmount(amount, context = {}, operation = 'createPayment', Error
   if (amount <= 0) {
     throw localValidationError(operation, context, 'amount должен быть строго больше нуля', ErrorClass);
   }
-  if (amount < SBP_MIN_AMOUNT_RUB || amount > SBP_MAX_AMOUNT_RUB) {
+  if (amount < PAYMENT_MIN_AMOUNT_RUB || amount > PAYMENT_MAX_AMOUNT_RUB) {
     throw localValidationError(
       operation, context,
-      `amount вне поддерживаемого диапазона ЮKassa для СБП (${SBP_MIN_AMOUNT_RUB}..${SBP_MAX_AMOUNT_RUB} руб.)`,
+      `amount вне разрешённого YAAM диапазона (${PAYMENT_MIN_AMOUNT_RUB}..${PAYMENT_MAX_AMOUNT_RUB} руб.)`,
       ErrorClass,
     );
   }
@@ -473,12 +455,24 @@ class YookassaProvider extends PaymentProviderInterface {
     super();
     if (!process.env.YOOKASSA_SHOP_ID || !process.env.YOOKASSA_SECRET_KEY) {
       throw new Error(
-        'YOOKASSA_SHOP_ID / YOOKASSA_SECRET_KEY не заданы. ' +
-        'ЮKassa-провайдер ещё не полностью реализован — см. комментарий в начале файла.'
+        'YOOKASSA_SHOP_ID / YOOKASSA_SECRET_KEY не заданы.'
       );
     }
     this.shopId = process.env.YOOKASSA_SHOP_ID;
     this.secretKey = process.env.YOOKASSA_SECRET_KEY;
+    if (process.env.YOOKASSA_ENV !== 'sandbox') {
+      throw new YookassaConfigurationError(
+        'YOOKASSA_ENV=sandbox обязателен: live-режим намеренно не поддерживается на текущем этапе'
+      );
+    }
+    if (!/^\d+$/.test(this.shopId)) {
+      throw new YookassaConfigurationError('YOOKASSA_SHOP_ID должен быть числовым идентификатором магазина');
+    }
+    if (!this.secretKey.startsWith('test_')) {
+      throw new YookassaConfigurationError(
+        'Для YOOKASSA_ENV=sandbox разрешён только тестовый Secret Key с префиксом test_'
+      );
+    }
   }
 
   _authHeader() {
@@ -502,19 +496,20 @@ class YookassaProvider extends PaymentProviderInterface {
       // требует его обязательно), лучше остановиться заранее с понятной
       // причиной, чем отправить заведомо невалидный запрос.
       throw new YookassaConfigurationError(
-        'YOOKASSA_RETURN_URL не задан — обязателен для confirmation.type=redirect (СБП)'
+        'YOOKASSA_RETURN_URL не задан — обязателен для confirmation.type=redirect'
       );
     }
     validateReturnUrl(returnUrl);
 
     const requestBody = {
       amount: { value: amount.toFixed(2), currency: 'RUB' },
-      // HIGH-исправление (pre-push review commit 333c951): без этого поля
-      // ЮKassa показывает пользователю ПОЛНЫЙ выбор способов оплаты (карта,
-      // кошелёк и т.д.), а не только СБП — прямое нарушение MVP-решения
-      // "только СБП" (см. ADR). Формат подтверждён официальной документацией
-      // интеграции СБП: единственное поле type='sbp', без вложенных полей.
-      payment_method_data: { type: 'sbp' },
+      // Обычный тестовый магазин ЮKassa поддерживает только банковские карты
+      // и ЮMoney; СБП доступен лишь в настоящем магазине. Этот provider
+      // намеренно sandbox-only (см. constructor), поэтому фиксируем тестовую
+      // карту явно, не отдавая выбор способа оплаты на сторону платёжной формы.
+      // Возврат к production-only СБП требует отдельного review и снятия
+      // sandbox guard — случайно включить live credentials этим кодом нельзя.
+      payment_method_data: { type: 'bank_card' },
       // MVP-решение зафиксировано ADR (YAAM-payment-capture-model-ADR.pdf) —
       // capture=true всегда, явно (не полагаемся на дефолт ЮKassa).
       capture: true,
@@ -579,6 +574,9 @@ class YookassaProvider extends PaymentProviderInterface {
       // здесь — не "другой валидный случай", а fail-safe UNKNOWN_RESULT.
       const hasExpectedShape = typeof parsedBody?.id === 'string'
         && parsedBody?.status === 'pending'
+        && parsedBody?.test === true
+        && parsedBody?.amount?.value === amount.toFixed(2)
+        && parsedBody?.amount?.currency === 'RUB'
         && parsedBody?.confirmation?.type === 'redirect'
         && isHttpsUrl(parsedBody?.confirmation?.confirmation_url);
       if (!hasExpectedShape) isMalformed = true;
@@ -609,7 +607,7 @@ class YookassaProvider extends PaymentProviderInterface {
     return new ErrorClass(category, context);
   }
 
-  async getStatus(providerPaymentId) {
+  async getStatus(providerPaymentId, { amount, currency } = {}) {
     validateProviderPaymentId(providerPaymentId);
 
     const controller = new AbortController();
@@ -668,7 +666,13 @@ class YookassaProvider extends PaymentProviderInterface {
       // ещё не значит, что телу можно доверять — status тоже должен быть
       // ожидаемого вида (сам helper выше не знает про status — это уже
       // getStatus-специфичная, не переиспользуемая проверка).
-      if (typeof parsedBody?.status !== 'string') isMalformed = true;
+      const hasCanonicalShape = typeof parsedBody?.status === 'string'
+        && parsedBody?.test === true
+        && typeof parsedBody?.amount?.value === 'string'
+        && typeof parsedBody?.amount?.currency === 'string';
+      if (!hasCanonicalShape) isMalformed = true;
+      if (amount !== undefined && parsedBody?.amount?.value !== Number(amount).toFixed(2)) isMalformed = true;
+      if (currency !== undefined && parsedBody?.amount?.currency !== currency) isMalformed = true;
     }
 
     if (isMalformed) {
@@ -987,51 +991,68 @@ class YookassaProvider extends PaymentProviderInterface {
     if (!payload || typeof payload !== 'object') return null;
     if (payload.type !== 'notification') return null;
 
-    // MVP-scope (см. YAAM-payment-capture-model-ADR.pdf: только СБП,
-    // capture=true) — единственные два события, на которые реально
-    // подписан магазин и которые реально обрабатываются
-    // (routes/postgresql/api.js): payment.succeeded, payment.canceled.
-    // Любой другой event (включая корректные, но не подписанные в этом MVP,
-    // например refund.succeeded) — не наш случай, fail closed, НЕ угадываем.
-    const expectedCanonicalStatus = SUPPORTED_WEBHOOK_EVENTS[payload.event];
-    if (!expectedCanonicalStatus) return null;
-
     const object = payload.object;
     if (!object || typeof object.id !== 'string' || !object.id) return null;
 
-    let canonicalStatus;
-    try {
-      // Переиспользует уже реализованный, отдельно протестированный
-      // getStatus() — тот же HTTP-клиент/таймаут/классификация ошибок, что
-      // и everywhere else в этом провайдере (reuse first).
-      canonicalStatus = await this.getStatus(object.id);
-    } catch (err) {
-      console.error(`[yookassa] webhook canonical lookup failed for ${object.id}:`, err?.message || err);
-      return null; // не удалось подтвердить — fail closed
+    const amountValue = object.amount?.value;
+    const currency = object.amount?.currency;
+    if (typeof amountValue !== 'string' || !/^\d+\.\d{2}$/.test(amountValue) || currency !== 'RUB') return null;
+
+    const expectedPaymentStatus = SUPPORTED_PAYMENT_WEBHOOK_EVENTS[payload.event];
+    if (expectedPaymentStatus) {
+      let canonicalStatus;
+      try {
+        // Сверяем не только status/id, но и сумму/валюту с каноническим
+        // Payment. Тело webhook — лишь триггер, а не источник финансовых
+        // данных: подменённая amount больше не может пройти за счёт одного
+        // успешного GET статуса.
+        canonicalStatus = await this.getStatus(object.id, {
+          amount: Number(amountValue),
+          currency,
+        });
+      } catch (err) {
+        console.error(`[yookassa] webhook canonical lookup failed for ${object.id}:`, err?.message || err);
+        return null;
+      }
+
+      if (canonicalStatus !== expectedPaymentStatus) {
+        console.error(
+          `[yookassa] webhook status mismatch for ${object.id}: notification claims ${payload.event}, canonical=${canonicalStatus}`
+        );
+        return null;
+      }
+
+      return {
+        type: 'payment',
+        providerPaymentId: object.id,
+        status: canonicalStatus,
+        amount: amountValue,
+        currency,
+      };
     }
 
-    if (canonicalStatus !== expectedCanonicalStatus) {
-      // Уведомление утверждает одно, актуальное состояние на стороне
-      // ЮKassa — другое (устаревшее/out-of-order сообщение либо подделка).
-      // Безопасно отклонить именно ЭТО уведомление — если реальный статус
-      // действительно succeeded/failed, следующее подлинное уведомление
-      // (или сверочный sweep, см. orderService) даст верный результат.
-      console.error(
-        `[yookassa] webhook status mismatch for ${object.id}: notification claims ${payload.event}, canonical=${canonicalStatus}`
-      );
+    const expectedRefundStatus = SUPPORTED_REFUND_WEBHOOK_EVENTS[payload.event];
+    if (!expectedRefundStatus || typeof object.payment_id !== 'string' || !object.payment_id) return null;
+
+    let canonicalRefundStatus;
+    try {
+      canonicalRefundStatus = await this.getRefund(object.id, {
+        providerPaymentId: object.payment_id,
+        amount: Number(amountValue),
+      });
+    } catch (err) {
+      console.error(`[yookassa] refund webhook canonical lookup failed for ${object.id}:`, err?.message || err);
       return null;
     }
-
-    // amount/currency — то, что заявляет ТЕЛО уведомления (уже прошедшее
-    // каноническую проверку id/статуса выше) — вызывающий код (webhook
-    // route) обязан ДОПОЛНИТЕЛЬНО сверить их с суммой сохранённого платежа
-    // из своей БД: getStatus() возвращает только нормализованную строку
-    // статуса, не сумму, поэтому сверка суммы структурно не может произойти
-    // здесь, в provider-слое, который ничего не знает о нашей БД.
-    const amount = object.amount && typeof object.amount === 'object' ? object.amount.value : undefined;
-    const currency = object.amount && typeof object.amount === 'object' ? object.amount.currency : undefined;
-
-    return { providerPaymentId: object.id, status: canonicalStatus, amount, currency };
+    if (canonicalRefundStatus !== expectedRefundStatus) return null;
+    return {
+      type: 'refund',
+      providerRefundId: object.id,
+      providerPaymentId: object.payment_id,
+      status: canonicalRefundStatus,
+      amount: amountValue,
+      currency,
+    };
   }
 }
 

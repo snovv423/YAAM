@@ -37,12 +37,13 @@ before(async () => {
   delete process.env.APP_ENV;
   delete process.env.ADMIN_USER;
   delete process.env.ADMIN_PASS;
-  // Дамми-значения — нужны ТОЛЬКО чтобы YookassaProvider не бросал в своём
-  // конструкторе при PAYMENT_PROVIDER=yookassa (F-раздел); реальный сетевой
-  // вызов ЮKassa этими тестами не выполняется (verifyWebhook — единственный
-  // проверяемый метод, либо реальный "not implemented"-стаб, либо monkey-patch).
-  process.env.YOOKASSA_SHOP_ID = process.env.YOOKASSA_SHOP_ID || 'stage7-test-shop-id';
-  process.env.YOOKASSA_SECRET_KEY = process.env.YOOKASSA_SECRET_KEY || 'stage7-test-secret-key';
+  // Заведомо фиктивные sandbox-значения нужны только для assembly-тестов
+  // маршрута. Полный сетевой payment flow здесь не запускается.
+  process.env.YOOKASSA_SHOP_ID = process.env.YOOKASSA_SHOP_ID || '999997';
+  process.env.YOOKASSA_SECRET_KEY = process.env.YOOKASSA_SECRET_KEY || 'test_stage7_fake_secret';
+  process.env.YOOKASSA_ENV = process.env.YOOKASSA_ENV || 'sandbox';
+  process.env.YOOKASSA_RETURN_URL = process.env.YOOKASSA_RETURN_URL || 'https://yaam.su/return';
+  process.env.YOOKASSA_WEBHOOK_URL = process.env.YOOKASSA_WEBHOOK_URL || 'https://api-pg.yaam.su/api/webhooks/payment';
 
   cluster = await startEmbeddedPostgres('app-assembly-stage7');
   await cluster.createDatabase(DATABASE_NAME);
@@ -604,9 +605,10 @@ test('F3: дублирующая доставка webhook не вызывает 
       // отклонено как несовпадение сумм (это отдельно и исчерпывающе
       // протестировано в paymentSafetyStage8.test.js, здесь не дублируется).
       reloadedPaymentService.verifyWebhook = () => ({
+        type: 'payment',
         providerPaymentId: pendingPayment.provider_payment_id,
         status: 'succeeded',
-        amount: pendingPayment.amount,
+        amount: Number(pendingPayment.amount).toFixed(2),
         currency: 'RUB',
       });
 
@@ -817,6 +819,24 @@ test('H7: security-sensitive ENV не имеют тихих fallback в producti
     () => appModule.createPostgresqlApp({ env: { APP_ENV: 'production', TRUST_PROXY: 'loopback', PG_HEALTH_HOST: '0.0.0.0' } }),
     /PG_HEALTH_HOST/
   );
+});
+
+test('H8: YooKassa staging-конфигурация fail-closed: только sandbox/test key/HTTPS authoritative webhook', () => {
+  const { validateAppEnv } = appModule;
+  const valid = {
+    PAYMENT_PROVIDER: 'yookassa',
+    YOOKASSA_ENV: 'sandbox',
+    YOOKASSA_SHOP_ID: '999995',
+    YOOKASSA_SECRET_KEY: 'test_assembly_fake_secret',
+    YOOKASSA_RETURN_URL: 'https://yaam.su/payment-return',
+    YOOKASSA_WEBHOOK_URL: 'https://api-pg.yaam.su/api/webhooks/payment',
+  };
+  assert.doesNotThrow(() => validateAppEnv(valid));
+  assert.throws(() => validateAppEnv({ ...valid, YOOKASSA_ENV: 'production' }), /YOOKASSA_ENV=sandbox/);
+  assert.throws(() => validateAppEnv({ ...valid, YOOKASSA_SECRET_KEY: 'live_fake_secret' }), /тестовым ключом/);
+  assert.throws(() => validateAppEnv({ ...valid, YOOKASSA_WEBHOOK_URL: 'https://api-pg.yaam.su/wrong' }), /\/api\/webhooks\/payment/);
+  assert.throws(() => validateAppEnv({ ...valid, YOOKASSA_RETURN_URL: 'http://yaam.su/return' }), /HTTPS/);
+  assert.throws(() => validateAppEnv({ ...valid, ENABLE_DEV_PAYMENT_ROUTES: 'true' }), /нельзя включать/);
 });
 
 // ===========================================================================

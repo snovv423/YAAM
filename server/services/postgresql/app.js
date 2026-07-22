@@ -43,6 +43,44 @@ const KNOWN_APP_ENVS = ['local', 'staging', 'production'];
 function validateAppEnv(env) {
   const errors = [];
 
+  if (env.PAYMENT_PROVIDER !== undefined && !['mock', 'yookassa'].includes(env.PAYMENT_PROVIDER)) {
+    errors.push('PAYMENT_PROVIDER допускает только "mock" или "yookassa".');
+  }
+
+  if (env.PAYMENT_PROVIDER === 'yookassa') {
+    if (env.YOOKASSA_ENV !== 'sandbox') {
+      errors.push('Для текущего этапа PAYMENT_PROVIDER=yookassa требует YOOKASSA_ENV=sandbox.');
+    }
+    if (!/^\d+$/.test(env.YOOKASSA_SHOP_ID || '')) {
+      errors.push('YOOKASSA_SHOP_ID обязателен и должен быть числовым идентификатором тестового магазина.');
+    }
+    if (typeof env.YOOKASSA_SECRET_KEY !== 'string' || !env.YOOKASSA_SECRET_KEY.startsWith('test_')) {
+      errors.push('YOOKASSA_SECRET_KEY должен быть тестовым ключом с префиксом test_.');
+    }
+    for (const [name, value] of [
+      ['YOOKASSA_RETURN_URL', env.YOOKASSA_RETURN_URL],
+      ['YOOKASSA_WEBHOOK_URL', env.YOOKASSA_WEBHOOK_URL],
+    ]) {
+      try {
+        if (!value || new URL(value).protocol !== 'https:') errors.push(`${name} должен быть задан как HTTPS URL.`);
+      } catch {
+        errors.push(`${name} должен быть задан как HTTPS URL.`);
+      }
+    }
+    if (env.YOOKASSA_WEBHOOK_URL) {
+      try {
+        if (new URL(env.YOOKASSA_WEBHOOK_URL).pathname !== WEBHOOK_PATH) {
+          errors.push(`YOOKASSA_WEBHOOK_URL должен вести точно на ${WEBHOOK_PATH}.`);
+        }
+      } catch {
+        // Некорректный URL уже добавлен в errors выше.
+      }
+    }
+    if (env.ENABLE_DEV_PAYMENT_ROUTES === 'true') {
+      errors.push('ENABLE_DEV_PAYMENT_ROUTES нельзя включать вместе с PAYMENT_PROVIDER=yookassa.');
+    }
+  }
+
   if (
     env.ENABLE_DEV_PAYMENT_ROUTES !== undefined &&
     env.ENABLE_DEV_PAYMENT_ROUTES !== '' &&

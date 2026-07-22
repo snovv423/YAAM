@@ -2109,6 +2109,18 @@ async function getPaymentByProviderPaymentId(providerPaymentId, client = null) {
   return rows[0] || null;
 }
 
+async function getRefundByProviderRefundId(providerRefundId, client = null) {
+  const rows = await db.query(
+    `SELECT r.*, p.provider_payment_id
+     FROM refunds r
+     JOIN payments p ON p.id = r.payment_id
+     WHERE r.provider_refund_id = $1`,
+    [providerRefundId],
+    client
+  );
+  return rows[0] || null;
+}
+
 async function getPendingPaymentForOrder(orderId, client = null) {
   const rows = await db.query(
     `SELECT * FROM payments WHERE order_id = $1 AND status = 'pending' ORDER BY id DESC LIMIT 1`,
@@ -2644,6 +2656,7 @@ module.exports = {
   recoverOrder,
   retryPayment,
   getPaymentByProviderPaymentId,
+  getRefundByProviderRefundId,
   getPendingPaymentForOrder,
   OrderAccessInputError,
   OrderCreationRecoveryNotFoundError,

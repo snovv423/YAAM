@@ -8,6 +8,7 @@ const assert = require('node:assert/strict');
 const ORIGINAL_ENV = {
   YOOKASSA_SHOP_ID: process.env.YOOKASSA_SHOP_ID,
   YOOKASSA_SECRET_KEY: process.env.YOOKASSA_SECRET_KEY,
+  YOOKASSA_ENV: process.env.YOOKASSA_ENV,
   YOOKASSA_RETURN_URL: process.env.YOOKASSA_RETURN_URL,
   PAYMENT_CREATE_TIMEOUT_MS: process.env.PAYMENT_CREATE_TIMEOUT_MS,
 };
@@ -35,8 +36,9 @@ function freshProviderClass() {
 function setFakeTestCredentials() {
   // Заведомо фейковые, явно тестовые строки — не похожи на реальный формат
   // (у настоящих ключей ЮKassa другой префикс/длина), только для юнит-теста.
-  process.env.YOOKASSA_SHOP_ID = 'test_shop_000000';
+  process.env.YOOKASSA_SHOP_ID = '999999';
   process.env.YOOKASSA_SECRET_KEY = 'test_secret_fake_value_never_real';
+  process.env.YOOKASSA_ENV = 'sandbox';
   process.env.YOOKASSA_RETURN_URL = 'https://yaam.su/return-test';
 }
 
@@ -46,6 +48,16 @@ beforeEach(() => {
 afterEach(() => {
   global.fetch = ORIGINAL_FETCH;
 });
+
+function sandboxPaymentBody({ id = 'x', amount = '300.00', status = 'pending', confirmationUrl = 'https://yookassa.ru/checkout/redirect/test' } = {}) {
+  return {
+    id,
+    status,
+    test: true,
+    amount: { value: amount, currency: 'RUB' },
+    confirmation: { type: 'redirect', confirmation_url: confirmationUrl },
+  };
+}
 
 test('конструктор бросает без YOOKASSA_SHOP_ID/SECRET_KEY (fail-closed, поведение не изменилось)', () => {
   delete process.env.YOOKASSA_SHOP_ID;
@@ -58,6 +70,20 @@ test('конструктор успешно создаёт экземпляр с
   setFakeTestCredentials();
   const YookassaProvider = freshProviderClass();
   assert.doesNotThrow(() => new YookassaProvider());
+});
+
+test('Sandbox guard: без YOOKASSA_ENV=sandbox провайдер fail-closed', () => {
+  setFakeTestCredentials();
+  delete process.env.YOOKASSA_ENV;
+  const YookassaProvider = freshProviderClass();
+  assert.throws(() => new YookassaProvider(), /YOOKASSA_ENV=sandbox/);
+});
+
+test('Sandbox guard: live Secret Key отклоняется до любого сетевого вызова', () => {
+  setFakeTestCredentials();
+  process.env.YOOKASSA_SECRET_KEY = 'live_fake_never_real';
+  const YookassaProvider = freshProviderClass();
+  assert.throws(() => new YookassaProvider(), /тестовый Secret Key/);
 });
 
 // Production Switch — Stage 8: verifyWebhook() реализована (канонический
@@ -99,11 +125,7 @@ test('createPayment() строит корректный HTTP-запрос: URL, 
     return {
       ok: true,
       status: 200,
-      json: async () => ({
-        id: 'yk_payment_123',
-        status: 'pending',
-        confirmation: { type: 'redirect', confirmation_url: 'https://yookassa.ru/checkout/redirect/abc' },
-      }),
+      json: async () => sandboxPaymentBody({ id: 'yk_payment_123', amount: '1500.00', confirmationUrl: 'https://yookassa.ru/checkout/redirect/abc' }),
     };
   };
   const YookassaProvider = freshProviderClass();
@@ -114,7 +136,7 @@ test('createPayment() строит корректный HTTP-запрос: URL, 
   assert.equal(capturedOptions.method, 'POST');
   assert.equal(capturedOptions.headers['Idempotence-Key'], 'idem-key-1');
   assert.equal(capturedOptions.headers['Content-Type'], 'application/json');
-  const expectedAuth = 'Basic ' + Buffer.from('test_shop_000000:test_secret_fake_value_never_real').toString('base64');
+  const expectedAuth = 'Basic ' + Buffer.from('999999:test_secret_fake_value_never_real').toString('base64');
   assert.equal(capturedOptions.headers.Authorization, expectedAuth);
 
   const body = JSON.parse(capturedOptions.body);
@@ -130,7 +152,7 @@ test('amount форматируется как строка с ровно дву
   let capturedOptions;
   global.fetch = async (url, options) => {
     capturedOptions = options;
-    return { ok: true, status: 200, json: async () => ({ id: 'x', status: 'pending', confirmation: { type: 'redirect', confirmation_url: 'https://x' } }) };
+    return { ok: true, status: 200, json: async () => sandboxPaymentBody({ confirmationUrl: 'https://x' }) };
   };
   const YookassaProvider = freshProviderClass();
   const provider = new YookassaProvider();
@@ -138,16 +160,12 @@ test('amount форматируется как строка с ровно дву
   assert.equal(JSON.parse(capturedOptions.body).amount.value, '300.00');
 });
 
-test('успешный ответ (redirect-confirmation для СБП): paymentUrl заполнен, qrPayload=null (confirmation_data отсутствует у redirect-типа)', async () => {
+test('успешный sandbox-ответ (redirect confirmation): paymentUrl заполнен, qrPayload=null', async () => {
   setFakeTestCredentials();
   global.fetch = async () => ({
     ok: true,
     status: 200,
-    json: async () => ({
-      id: 'yk_payment_456',
-      status: 'pending',
-      confirmation: { type: 'redirect', confirmation_url: 'https://yookassa.ru/checkout/redirect/xyz', return_url: 'https://yaam.su/return-test' },
-    }),
+    json: async () => sandboxPaymentBody({ id: 'yk_payment_456', amount: '500.00', confirmationUrl: 'https://yookassa.ru/checkout/redirect/xyz' }),
   });
   const YookassaProvider = freshProviderClass();
   const provider = new YookassaProvider();
@@ -180,6 +198,32 @@ test('200 OK, но тело без ожидаемых полей (нет confirm
   await assert.rejects(
     () => provider.createPayment({ orderId: 1, amount: 300, description: 'd', idempotencyKey: 'k' }),
     (err) => err instanceof ProviderResultUnknownError,
+  );
+});
+
+test('Sandbox guard: createPayment отклоняет Payment с test=false', async () => {
+  setFakeTestCredentials();
+  global.fetch = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ ...sandboxPaymentBody(), test: false }),
+  });
+  const YookassaProvider = freshProviderClass();
+  const provider = new YookassaProvider();
+  await assert.rejects(
+    () => provider.createPayment({ orderId: 1, amount: 300, description: 'd', idempotencyKey: 'k' }),
+    (err) => err.name === 'ProviderResultUnknownError',
+  );
+});
+
+test('createPayment отклоняет канонический ответ с другой суммой', async () => {
+  setFakeTestCredentials();
+  global.fetch = async () => ({ ok: true, status: 200, json: async () => sandboxPaymentBody({ amount: '299.00' }) });
+  const YookassaProvider = freshProviderClass();
+  const provider = new YookassaProvider();
+  await assert.rejects(
+    () => provider.createPayment({ orderId: 1, amount: 300, description: 'd', idempotencyKey: 'k' }),
+    (err) => err.name === 'ProviderResultUnknownError',
   );
 });
 
@@ -306,7 +350,7 @@ function fetchShouldNotBeCalled() {
 
 // --- HIGH: payment_method_data ---------------------------------------------
 
-test('HIGH-исправление: requestBody содержит payment_method_data: { type: "sbp" } (официальный формат ЮKassa)', async () => {
+test('Sandbox: requestBody содержит payment_method_data: { type: "bank_card" } и не пытается использовать СБП', async () => {
   setFakeTestCredentials();
   let capturedOptions;
   global.fetch = async (url, options) => {
@@ -314,11 +358,7 @@ test('HIGH-исправление: requestBody содержит payment_method_d
     return {
       ok: true,
       status: 200,
-      json: async () => ({
-        id: 'yk_payment_sbp',
-        status: 'pending',
-        confirmation: { type: 'redirect', confirmation_url: 'https://yookassa.ru/checkout/redirect/sbp' },
-      }),
+      json: async () => sandboxPaymentBody({ id: 'yk_payment_card' }),
     };
   };
   const YookassaProvider = freshProviderClass();
@@ -327,7 +367,7 @@ test('HIGH-исправление: requestBody содержит payment_method_d
 
   const body = JSON.parse(capturedOptions.body);
   assert.ok(Object.prototype.hasOwnProperty.call(body, 'payment_method_data'), 'payment_method_data должен присутствовать в теле запроса');
-  assert.deepEqual(body.payment_method_data, { type: 'sbp' }, 'единственное официально документированное поле для СБП');
+  assert.deepEqual(body.payment_method_data, { type: 'bank_card' });
 });
 
 // --- MEDIUM: валидация amount -----------------------------------------------
@@ -364,7 +404,7 @@ test('MEDIUM-исправление: корректный amount с двумя �
   let capturedOptions;
   global.fetch = async (url, options) => {
     capturedOptions = options;
-    return { ok: true, status: 200, json: async () => ({ id: 'x', status: 'pending', confirmation: { type: 'redirect', confirmation_url: 'https://yookassa.ru/x' } }) };
+    return { ok: true, status: 200, json: async () => sandboxPaymentBody({ amount: '199.99' }) };
   };
   const YookassaProvider = freshProviderClass();
   const provider = new YookassaProvider();
@@ -402,7 +442,7 @@ test('MEDIUM-исправление: валидный idempotencyKey перед�
   const KEY = '  idem-key-with-spaces-1  ';
   global.fetch = async (url, options) => {
     capturedOptions = options;
-    return { ok: true, status: 200, json: async () => ({ id: 'x', status: 'pending', confirmation: { type: 'redirect', confirmation_url: 'https://yookassa.ru/x' } }) };
+    return { ok: true, status: 200, json: async () => sandboxPaymentBody() };
   };
   const YookassaProvider = freshProviderClass();
   const provider = new YookassaProvider();
@@ -438,7 +478,7 @@ test('MEDIUM-исправление: 200 OK со status="pending" (нормал�
   global.fetch = async () => ({
     ok: true,
     status: 200,
-    json: async () => ({ id: 'yk_ok', status: 'pending', confirmation: { type: 'redirect', confirmation_url: 'https://yookassa.ru/checkout/redirect/ok' } }),
+    json: async () => sandboxPaymentBody({ id: 'yk_ok', confirmationUrl: 'https://yookassa.ru/checkout/redirect/ok' }),
   });
   const YookassaProvider = freshProviderClass();
   const provider = new YookassaProvider();

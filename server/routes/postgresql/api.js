@@ -323,7 +323,7 @@ if (process.env.PAYMENT_PROVIDER === 'yookassa') {
   // обязательным механизмом подлинности.
   const enforceIpAllowlist = process.env.YOOKASSA_WEBHOOK_ENFORCE_IP_ALLOWLIST === 'true';
 
-  router.post('/webhooks/payment', express.raw({ type: '*/*', limit: '64kb' }), async (req, res) => {
+  router.post('/webhooks/payment', express.raw({ type: 'application/json', limit: '64kb' }), async (req, res) => {
     const logId = req.id || 'n/a';
     try {
       if (enforceIpAllowlist && !isTrustedYookassaIp(req.ip)) {
@@ -331,10 +331,34 @@ if (process.env.PAYMENT_PROVIDER === 'yookassa') {
         return res.status(403).json({ error: 'forbidden' });
       }
 
+      if (!Buffer.isBuffer(req.body)) {
+        return res.status(415).json({ error: 'application/json required' });
+      }
       const event = await paymentService.verifyWebhook(req.body.toString('utf8'), req.headers);
       if (!event) {
         console.error(`[api-postgresql] webhook rejected: unverifiable notification id=${logId}`);
         return res.status(400).json({ error: 'invalid webhook notification' });
+      }
+
+      if (event.type === 'refund') {
+        const refund = await orderService.getRefundByProviderRefundId(event.providerRefundId);
+        if (!refund) {
+          console.error(`[api-postgresql] refund webhook rejected: unknown provider_refund_id id=${logId}`);
+          return res.status(404).json({ error: 'refund not found' });
+        }
+        const amountOk = event.amount === Number(refund.amount).toFixed(2);
+        const paymentOk = event.providerPaymentId === refund.provider_payment_id;
+        if (!amountOk || event.currency !== 'RUB' || !paymentOk) {
+          console.error(`[api-postgresql] refund webhook rejected: identity/amount mismatch id=${logId} refund=${refund.id}`);
+          return res.status(400).json({ error: 'refund mismatch' });
+        }
+        await orderService.finalizeRefundSucceeded(refund.id, event.providerRefundId);
+        console.log(`[api-postgresql] refund webhook applied: refund=${refund.id} status=${event.status} id=${logId}`);
+        return res.json({ ok: true });
+      }
+
+      if (event.type !== 'payment') {
+        return res.status(400).json({ error: 'unsupported webhook event' });
       }
 
       const payment = await orderService.getPaymentByProviderPaymentId(event.providerPaymentId);
@@ -343,15 +367,10 @@ if (process.env.PAYMENT_PROVIDER === 'yookassa') {
         return res.status(404).json({ error: 'payment not found' });
       }
 
-      // amount/currency пришли из ТЕЛА уведомления (уже прошедшего
-      // каноническую проверку статуса в verifyWebhook, но не проверку
-      // суммы — provider ничего не знает про нашу БД) — сверяем с тем, на
-      // что реально был создан этот платёж. Несовпадение — красный флаг
-      // (рассинхронизация/повреждение данных/подделка тела при пройденной
-      // канонической проверке id+статуса) — не применяем событие.
-      const expectedAmount = payment.amount;
-      const notifiedAmount = event.amount !== undefined ? Number(event.amount) : NaN;
-      const amountOk = Number.isFinite(notifiedAmount) && notifiedAmount === expectedAmount;
+      // Provider уже сверил amount/currency уведомления с каноническим
+      // объектом YooKassa. Здесь второй независимый инвариант: каноническая
+      // сумма должна совпасть с локальной записью payment.
+      const amountOk = event.amount === Number(payment.amount).toFixed(2);
       const currencyOk = event.currency === 'RUB';
       if (!amountOk || !currencyOk) {
         console.error(

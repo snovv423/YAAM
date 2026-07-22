@@ -50,7 +50,7 @@ bootstrap.js` (Stage 6, `health.js` получил аддитивное расш
 3. `securityHeadersMiddleware` — `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy` (штатными средствами, без новой зависимости — helmet не добавлен, задание прямо просило обосновывать новые пакеты).
 4. CORS — `cors(buildCorsOptions())`, `config/cors.js` переиспользован как есть.
 5. `GET /health/*` — регистрируются здесь, ДО readiness-гейта и ДО JSON-парсинга (не нуждаются в body, не должны сами зависеть от гейта, который они же и репортуют).
-6. Webhook raw-body carve-out + `express.json()`/`express.urlencoded()` для остального — тот же приём, что и SQLite `server.js` (глобальный JSON-парсер явно пропускает `/api/webhooks/payment`, роутер сам применяет `express.raw({type:'*/*'})` точечно на этом одном маршруте).
+6. Webhook raw-body carve-out + `express.json()`/`express.urlencoded()` для остального — глобальный JSON-парсер явно пропускает `/api/webhooks/payment`, а роутер применяет `express.raw({type:'application/json', limit:'64kb'})` точечно на этом одном маршруте.
 7. Readiness-гейт — 503 для всего, что не `/health*`, пока `!ready`.
 8. `/api` (public API).
 9. `/admin` (Basic Auth на точке монтирования, если заданы `ADMIN_USER`/`ADMIN_PASS`; иначе не монтируется вовсе).

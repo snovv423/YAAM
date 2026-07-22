@@ -8,6 +8,7 @@ const assert = require('node:assert/strict');
 const ORIGINAL_ENV = {
   YOOKASSA_SHOP_ID: process.env.YOOKASSA_SHOP_ID,
   YOOKASSA_SECRET_KEY: process.env.YOOKASSA_SECRET_KEY,
+  YOOKASSA_ENV: process.env.YOOKASSA_ENV,
   YOOKASSA_RETURN_URL: process.env.YOOKASSA_RETURN_URL,
   PAYMENT_STATUS_TIMEOUT_MS: process.env.PAYMENT_STATUS_TIMEOUT_MS,
 };
@@ -33,8 +34,9 @@ function freshProviderClass() {
 }
 
 function setFakeTestCredentials() {
-  process.env.YOOKASSA_SHOP_ID = 'test_shop_000000';
+  process.env.YOOKASSA_SHOP_ID = '999999';
   process.env.YOOKASSA_SECRET_KEY = 'test_secret_fake_value_never_real';
+  process.env.YOOKASSA_ENV = 'sandbox';
 }
 
 beforeEach(() => {
@@ -43,6 +45,16 @@ beforeEach(() => {
 afterEach(() => {
   global.fetch = ORIGINAL_FETCH;
 });
+
+function sandboxPaymentBody(id, status = 'pending', overrides = {}) {
+  return {
+    id,
+    status,
+    test: true,
+    amount: { value: '300.00', currency: 'RUB' },
+    ...overrides,
+  };
+}
 
 function fetchShouldNotBeCalled() {
   return async () => { throw new Error('fetch не должен вызываться — валидация должна остановить запрос раньше'); };
@@ -56,7 +68,7 @@ test('getStatus() строит корректный GET-запрос: URL с id,
   global.fetch = async (url, options) => {
     capturedUrl = url;
     capturedOptions = options;
-    return { ok: true, status: 200, json: async () => ({ id: 'yk_payment_1', status: 'pending' }) };
+    return { ok: true, status: 200, json: async () => sandboxPaymentBody('yk_payment_1') };
   };
   const YookassaProvider = freshProviderClass();
   const provider = new YookassaProvider();
@@ -64,7 +76,7 @@ test('getStatus() строит корректный GET-запрос: URL с id,
 
   assert.equal(capturedUrl, 'https://api.yookassa.ru/v3/payments/yk_payment_1');
   assert.equal(capturedOptions.method, 'GET');
-  const expectedAuth = 'Basic ' + Buffer.from('test_shop_000000:test_secret_fake_value_never_real').toString('base64');
+  const expectedAuth = 'Basic ' + Buffer.from('999999:test_secret_fake_value_never_real').toString('base64');
   assert.equal(capturedOptions.headers.Authorization, expectedAuth);
   assert.equal(capturedOptions.body, undefined, 'GET не должен иметь тело');
   assert.equal(capturedOptions.headers['Idempotence-Key'], undefined, 'GET не требует Idempotence-Key (только POST/DELETE)');
@@ -76,7 +88,7 @@ test('getStatus() URL-кодирует providerPaymentId (защита от не
   let capturedUrl;
   global.fetch = async (url) => {
     capturedUrl = url;
-    return { ok: true, status: 200, json: async () => ({ id: 'id with space/slash', status: 'pending' }) };
+    return { ok: true, status: 200, json: async () => sandboxPaymentBody('id with space/slash') };
   };
   const YookassaProvider = freshProviderClass();
   const provider = new YookassaProvider();
@@ -112,7 +124,7 @@ for (const [label, id] of INVALID_PROVIDER_PAYMENT_IDS) {
 
 test('getStatus(): status="pending" -> "pending"', async () => {
   setFakeTestCredentials();
-  global.fetch = async () => ({ ok: true, status: 200, json: async () => ({ id: 'x', status: 'pending' }) });
+  global.fetch = async () => ({ ok: true, status: 200, json: async () => sandboxPaymentBody('x', 'pending') });
   const YookassaProvider = freshProviderClass();
   const provider = new YookassaProvider();
   assert.equal(await provider.getStatus('x'), 'pending');
@@ -120,7 +132,7 @@ test('getStatus(): status="pending" -> "pending"', async () => {
 
 test('getStatus(): status="waiting_for_capture" -> "pending" (ещё не финальный успех)', async () => {
   setFakeTestCredentials();
-  global.fetch = async () => ({ ok: true, status: 200, json: async () => ({ id: 'x', status: 'waiting_for_capture' }) });
+  global.fetch = async () => ({ ok: true, status: 200, json: async () => sandboxPaymentBody('x', 'waiting_for_capture') });
   const YookassaProvider = freshProviderClass();
   const provider = new YookassaProvider();
   assert.equal(await provider.getStatus('x'), 'pending');
@@ -128,10 +140,29 @@ test('getStatus(): status="waiting_for_capture" -> "pending" (ещё не фин
 
 test('getStatus(): status="succeeded" -> "succeeded"', async () => {
   setFakeTestCredentials();
-  global.fetch = async () => ({ ok: true, status: 200, json: async () => ({ id: 'x', status: 'succeeded' }) });
+  global.fetch = async () => ({ ok: true, status: 200, json: async () => sandboxPaymentBody('x', 'succeeded') });
   const YookassaProvider = freshProviderClass();
   const provider = new YookassaProvider();
   assert.equal(await provider.getStatus('x'), 'succeeded');
+});
+
+test('getStatus(): sandbox отклоняет канонический Payment с test=false', async () => {
+  setFakeTestCredentials();
+  global.fetch = async () => ({ ok: true, status: 200, json: async () => sandboxPaymentBody('x', 'succeeded', { test: false }) });
+  const YookassaProvider = freshProviderClass();
+  const provider = new YookassaProvider();
+  await assert.rejects(() => provider.getStatus('x'), (err) => err.name === 'ProviderResultUnknownError');
+});
+
+test('getStatus(): ожидаемая сумма/валюта сверяются с каноническим Payment', async () => {
+  setFakeTestCredentials();
+  global.fetch = async () => ({ ok: true, status: 200, json: async () => sandboxPaymentBody('x', 'succeeded') });
+  const YookassaProvider = freshProviderClass();
+  const provider = new YookassaProvider();
+  await assert.rejects(
+    () => provider.getStatus('x', { amount: 299, currency: 'RUB' }),
+    (err) => err.name === 'ProviderResultUnknownError',
+  );
 });
 
 const CANCELLATION_REASONS = ['fraud_suspected', 'expired_on_confirmation', 'insufficient_funds', 'canceled_by_merchant'];
@@ -141,7 +172,7 @@ for (const reason of CANCELLATION_REASONS) {
     global.fetch = async () => ({
       ok: true,
       status: 200,
-      json: async () => ({ id: 'x', status: 'canceled', cancellation_details: { party: 'yoo_money', reason } }),
+      json: async () => sandboxPaymentBody('x', 'canceled', { cancellation_details: { party: 'yoo_money', reason } }),
     });
     const YookassaProvider = freshProviderClass();
     const provider = new YookassaProvider();
@@ -153,7 +184,7 @@ for (const reason of CANCELLATION_REASONS) {
 
 test('getStatus(): неизвестный/будущий provider-статус -> ProviderResultUnknownError (не угадывается как succeeded/failed)', async () => {
   setFakeTestCredentials();
-  global.fetch = async () => ({ ok: true, status: 200, json: async () => ({ id: 'x', status: 'refunded_by_some_future_api_version' }) });
+  global.fetch = async () => ({ ok: true, status: 200, json: async () => sandboxPaymentBody('x', 'refunded_by_some_future_api_version') });
   const YookassaProvider = freshProviderClass();
   const { ProviderResultUnknownError } = require('../services/paymentProviders/providerErrorTaxonomy');
   const provider = new YookassaProvider();

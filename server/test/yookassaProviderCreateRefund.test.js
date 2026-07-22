@@ -9,6 +9,7 @@ const assert = require('node:assert/strict');
 const ORIGINAL_ENV = {
   YOOKASSA_SHOP_ID: process.env.YOOKASSA_SHOP_ID,
   YOOKASSA_SECRET_KEY: process.env.YOOKASSA_SECRET_KEY,
+  YOOKASSA_ENV: process.env.YOOKASSA_ENV,
   YOOKASSA_RETURN_URL: process.env.YOOKASSA_RETURN_URL,
   PAYMENT_REFUND_TIMEOUT_MS: process.env.PAYMENT_REFUND_TIMEOUT_MS,
 };
@@ -34,8 +35,9 @@ function freshProviderClass() {
 }
 
 function setFakeTestCredentials() {
-  process.env.YOOKASSA_SHOP_ID = 'test_shop_000000';
+  process.env.YOOKASSA_SHOP_ID = '999999';
   process.env.YOOKASSA_SECRET_KEY = 'test_secret_fake_value_never_real';
+  process.env.YOOKASSA_ENV = 'sandbox';
 }
 
 beforeEach(() => {
@@ -81,7 +83,7 @@ test('refund(): правильный endpoint, POST, Basic Auth, Content-Type, I
 
   assert.equal(capturedUrl, 'https://api.yookassa.ru/v3/refunds');
   assert.equal(capturedOptions.method, 'POST');
-  const expectedAuth = 'Basic ' + Buffer.from('test_shop_000000:test_secret_fake_value_never_real').toString('base64');
+  const expectedAuth = 'Basic ' + Buffer.from('999999:test_secret_fake_value_never_real').toString('base64');
   assert.equal(capturedOptions.headers.Authorization, expectedAuth);
   assert.equal(capturedOptions.headers['Content-Type'], 'application/json');
   assert.equal(capturedOptions.headers['Idempotence-Key'], 'refund-idem-key-1');
@@ -392,7 +394,7 @@ const INVALID_AMOUNTS = [
   ['ноль', 0],
   ['отрицательное', -100],
   ['дробные копейки (3 знака)', 100.001],
-  ['сумма выше официального лимита СБП (> 700000)', 5000000],
+  ['сумма выше локального YAAM-лимита (> 700000)', 5000000],
 ];
 
 for (const [label, amount] of INVALID_AMOUNTS) {
@@ -574,8 +576,8 @@ test('regression sanity: createPayment/getStatus продолжают работ
   process.env.YOOKASSA_RETURN_URL = 'https://yaam.su/return-test';
   global.fetch = async (url) => {
     if (String(url).includes('/refunds')) return { ok: true, status: 200, json: async () => validRefundBody() };
-    if (String(url).includes('/payments/')) return { ok: true, status: 200, json: async () => ({ id: 'p1', status: 'pending', confirmation: { type: 'redirect', confirmation_url: 'https://y/x' } }) };
-    return { ok: true, status: 200, json: async () => ({ id: 'p2', status: 'pending', confirmation: { type: 'redirect', confirmation_url: 'https://y/x' } }) };
+    if (String(url).includes('/payments/')) return { ok: true, status: 200, json: async () => ({ id: 'p1', status: 'pending', test: true, amount: { value: '10.00', currency: 'RUB' } }) };
+    return { ok: true, status: 200, json: async () => ({ id: 'p2', status: 'pending', test: true, amount: { value: '300.00', currency: 'RUB' }, confirmation: { type: 'redirect', confirmation_url: 'https://y/x' } }) };
   };
   const YookassaProvider = freshProviderClass();
   const provider = new YookassaProvider();

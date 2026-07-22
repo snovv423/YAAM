@@ -29,9 +29,11 @@ let db;
 
 before(async () => {
   process.env.PAYMENT_PROVIDER = 'yookassa';
-  process.env.YOOKASSA_SHOP_ID = 'stage9-test-shop';
-  process.env.YOOKASSA_SECRET_KEY = 'stage9-test-secret';
+  process.env.YOOKASSA_SHOP_ID = '999996';
+  process.env.YOOKASSA_SECRET_KEY = 'test_stage9_fake_secret';
+  process.env.YOOKASSA_ENV = 'sandbox';
   process.env.YOOKASSA_RETURN_URL = 'https://yaam.su/return';
+  process.env.YOOKASSA_WEBHOOK_URL = 'https://api-pg.yaam.su/api/webhooks/payment';
   process.env.YOOKASSA_WEBHOOK_ENFORCE_IP_ALLOWLIST = 'true';
 
   cluster = await startEmbeddedPostgres('trust-proxy-stage9');

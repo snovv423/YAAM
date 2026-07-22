@@ -312,13 +312,9 @@ curl -s https://api-pg.yaam.su/api/restaurants \
 
 ## 7. YooKassa TEST account validation
 
-**Статус: НЕ ВЫПОЛНЕНО — честно, не выдумано.** Тестовые credentials
-ЮKassa отсутствуют в окружении, где готовился Stage 9 (проверено — нет ни
-в `process.env`, ни в `.env.example`, ни где-либо в репозитории). Согласно
-прямому указанию задания ("если test credentials отсутствуют — ничего не
-придумывать, честно написать, что данный этап невозможно выполнить") —
-этот раздел НЕ содержит результатов реальной проверки, только чеклист для
-выполнения, когда credentials появятся.
+**Статус: код и fail-closed конфигурация подготовлены; реальный Sandbox
+acceptance выполняется отдельным контролируемым шагом.** Секретный ключ
+никогда не помещается в этот runbook, Git или shell argv.
 
 Когда тестовые `YOOKASSA_SHOP_ID`/`SECRET_KEY` будут получены (личный
 кабинет ЮKassa, тестовый режим):
@@ -326,9 +322,12 @@ curl -s https://api-pg.yaam.su/api/restaurants \
 ```bash
 # В .env.postgresql:
 #   PAYMENT_PROVIDER=yookassa
+#   YOOKASSA_ENV=sandbox
 #   YOOKASSA_SHOP_ID=<тестовый shop id>
-#   YOOKASSA_SECRET_KEY=<тестовый secret key>
-#   YOOKASSA_RETURN_URL=https://yaam.su/return
+#   YOOKASSA_SECRET_KEY=<тестовый ключ test_...>
+#   YOOKASSA_RETURN_URL=https://yaam.su/
+#   YOOKASSA_WEBHOOK_URL=https://api-pg.yaam.su/api/webhooks/payment
+#   ENABLE_DEV_PAYMENT_ROUTES=false
 sudo systemctl restart yaam-backend-postgresql
 ```
 
@@ -337,7 +336,7 @@ sudo systemctl restart yaam-backend-postgresql
 
 1. **create payment** — реальный `POST /v3/payments` через
    `YookassaProvider.createPayment()`; подтвердить `confirmation.confirmation_url`
-   реально открывается и ведёт на страницу оплаты СБП ЮKassa (тестовый режим).
+   реально открывается и ведёт на sandbox-страницу оплаты банковской картой.
 2. **payment succeeded** — оплатить тестовый платёж (тестовые реквизиты
    ЮKassa для sandbox), подтвердить `getStatus()` возвращает `'succeeded'`.
 3. **webhook** — подтвердить, что ЮKassa реально присылает
@@ -361,8 +360,9 @@ sudo systemctl restart yaam-backend-postgresql
    `paymentSafetyStage8.test.js`'s C1) на реальной БД, подтвердить, что
    `sweepStuckRefunds()` реально подхватывает его и доводит до провайдера.
 
-**Ничего из этого НЕ было выполнено** — реальных денег на этом этапе
-использовать нельзя (задание, п.7), а тестовых credentials нет.
+Фактические результаты этой проверки должны фиксироваться в отдельном
+acceptance-отчёте; наличие конфигурации в runbook не является доказательством
+живого Sandbox-теста.
 
 ## 8. Production logging
 

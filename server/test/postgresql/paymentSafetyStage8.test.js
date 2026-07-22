@@ -40,9 +40,11 @@ let paymentServiceForOrderService;
 
 before(async () => {
   process.env.PAYMENT_PROVIDER = 'mock';
-  process.env.YOOKASSA_SHOP_ID = 'stage8-test-shop';
-  process.env.YOOKASSA_SECRET_KEY = 'stage8-test-secret';
+  process.env.YOOKASSA_SHOP_ID = '999998';
+  process.env.YOOKASSA_SECRET_KEY = 'test_stage8_fake_secret';
+  process.env.YOOKASSA_ENV = 'sandbox';
   process.env.YOOKASSA_RETURN_URL = 'https://yaam.su/return';
+  process.env.YOOKASSA_WEBHOOK_URL = 'https://api-pg.yaam.su/api/webhooks/payment';
 
   cluster = await startEmbeddedPostgres('payment-safety-stage8');
   await cluster.createDatabase(DATABASE_NAME);
@@ -94,6 +96,8 @@ function createFakeYookassaTransport() {
       return jsonResponse(200, {
         id,
         status: 'pending',
+        test: true,
+        amount: body.amount,
         confirmation: { type: 'redirect', confirmation_url: `https://yookassa.ru/pay/${id}` },
       });
     }
@@ -111,7 +115,7 @@ function createFakeYookassaTransport() {
       const id = decodeURIComponent(getPaymentMatch[1]);
       const p = payments.get(id);
       if (!p) return jsonResponse(404, { type: 'error', id: 'req_1', code: 'not_found' });
-      return jsonResponse(200, { id, status: p.status, amount: { value: p.amount, currency: p.currency } });
+      return jsonResponse(200, { id, status: p.status, test: true, amount: { value: p.amount, currency: p.currency } });
     }
 
     if (method === 'POST' && url.endsWith('/v3/refunds')) {
@@ -281,16 +285,12 @@ async function fetchJson(url, opts) {
 // A. Webhook authenticity (реальный YookassaProvider против fake transport)
 // ===========================================================================
 
-test('A1: валидное уведомление, канонический lookup подтверждает — событие принято', async () => {
+test('A1: создание sandbox-платежа возвращает безопасный providerPaymentId', async () => {
   const restore = installFakeFetch(createFakeYookassaTransport().handler);
   try {
     const YookassaProvider = require('../../services/paymentProviders/yookassaProvider.js');
     const provider = new YookassaProvider();
     const created = await provider.createPayment({ orderId: 1, amount: 500, description: 'test', idempotencyKey: crypto.randomUUID() });
-    // Транспорт хранит платёж в 'pending' — переведём в 'succeeded' напрямую
-    // через отдельный fake handler instance с общим Map недоступен здесь,
-    // поэтому создаём общий transport заранее (см. A5 ниже для полного
-    // end-to-end через реальный webhook route).
     assert.ok(created.providerPaymentId);
   } finally {
     restore();
@@ -309,7 +309,7 @@ test('A3: неподдерживаемый event — отклонено (null), 
   try {
     const YookassaProvider = require('../../services/paymentProviders/yookassaProvider.js');
     const provider = new YookassaProvider();
-    const result = await provider.verifyWebhook(JSON.stringify({ type: 'notification', event: 'refund.succeeded', object: { id: 'x' } }));
+    const result = await provider.verifyWebhook(JSON.stringify({ type: 'notification', event: 'payment.waiting_for_capture', object: { id: 'x' } }));
     assert.equal(result, null);
     assert.equal(fetchCalled, false, 'неподдерживаемый event не должен вызывать канонический lookup');
   } finally {
@@ -339,7 +339,7 @@ test('A5: канонический lookup недоступен (сетевая �
     const YookassaProvider = require('../../services/paymentProviders/yookassaProvider.js');
     const provider = new YookassaProvider();
     const result = await provider.verifyWebhook(JSON.stringify({
-      type: 'notification', event: 'payment.succeeded', object: { id: 'p1' },
+      type: 'notification', event: 'payment.succeeded', object: { id: 'p1', amount: { value: '500.00', currency: 'RUB' } },
     }));
     assert.equal(result, null);
   } finally {
@@ -354,7 +354,7 @@ test('A6: неизвестный provider_payment_id (канонический 4
     const YookassaProvider = require('../../services/paymentProviders/yookassaProvider.js');
     const provider = new YookassaProvider();
     const result = await provider.verifyWebhook(JSON.stringify({
-      type: 'notification', event: 'payment.succeeded', object: { id: 'p404' },
+      type: 'notification', event: 'payment.succeeded', object: { id: 'p404', amount: { value: '500.00', currency: 'RUB' } },
     }));
     assert.equal(result, null);
   } finally {
@@ -500,6 +500,160 @@ test('A11: обычные /api маршруты продолжают работ�
   } finally {
     restore();
     await app.cleanup();
+  }
+});
+
+test('A12: webhook принимает только application/json', async () => {
+  const restore = installFakeFetch(createFakeYookassaTransport().handler);
+  const app = await startWebhookApp({ PAYMENT_PROVIDER: 'yookassa' });
+  try {
+    const res = await fetch(`${app.baseUrl}/api/webhooks/payment`, {
+      method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: '{}',
+    });
+    assert.equal(res.status, 415);
+  } finally {
+    restore();
+    await app.cleanup();
+  }
+});
+
+test('A13: refund.succeeded сверяется через API и идемпотентно финализирует ровно один локальный refund', async () => {
+  const transport = createFakeYookassaTransport();
+  const restore = installFakeFetch(transport.handler);
+  const app = await startWebhookApp({ PAYMENT_PROVIDER: 'yookassa' });
+  try {
+    const YookassaProvider = require('../../services/paymentProviders/yookassaProvider.js');
+    const provider = new YookassaProvider();
+    const { order, paymentId, providerPaymentId } = await createOrderWithYookassaPayment(provider, 500);
+    transport.setPaymentStatus(providerPaymentId, 'succeeded');
+    await orderService.markPaid(order.id, paymentId);
+
+    const providerRefundId = `fake_refund_webhook_${crypto.randomUUID()}`;
+    transport.refunds.set(providerRefundId, {
+      paymentId: providerPaymentId,
+      status: 'succeeded',
+      amount: '500.00',
+    });
+    const inserted = await db.execute(
+      `INSERT INTO refunds (
+         payment_id, provider, amount, status, reason, provider_refund_id,
+         provider_idempotency_key, attempt_count, next_attempt_at
+       ) VALUES ($1, 'yookassa', 500, 'processing', 'customer_cancel', $2, $3, 1, NOW() + INTERVAL '1 minute')
+       RETURNING id`,
+      [paymentId, providerRefundId, crypto.randomUUID()]
+    );
+    const refundId = inserted.rows[0].id;
+
+    const notify = () => fetchJson(`${app.baseUrl}/api/webhooks/payment`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: 'notification', event: 'refund.succeeded',
+        object: {
+          id: providerRefundId,
+          payment_id: providerPaymentId,
+          status: 'succeeded',
+          amount: { value: '500.00', currency: 'RUB' },
+        },
+      }),
+    });
+
+    assert.equal((await notify()).status, 200);
+    assert.equal((await notify()).status, 200, 'повторный refund webhook должен быть безопасным no-op');
+    const refunds = await db.query('SELECT status FROM refunds WHERE id = $1', [refundId]);
+    const payments = await db.query('SELECT status FROM payments WHERE id = $1', [paymentId]);
+    assert.equal(refunds[0].status, 'succeeded');
+    assert.equal(payments[0].status, 'refunded');
+  } finally {
+    restore();
+    await app.cleanup();
+  }
+});
+
+test('A14: канонически валидный webhook с неизвестным локальным payment id даёт 404 и не мутирует заказы', async () => {
+  const transport = createFakeYookassaTransport();
+  transport.payments.set('provider_orphan_payment', { status: 'succeeded', amount: '500.00', currency: 'RUB' });
+  const restore = installFakeFetch(transport.handler);
+  const app = await startWebhookApp({ PAYMENT_PROVIDER: 'yookassa' });
+  try {
+    const before = (await db.query('SELECT count(*)::int AS n FROM orders'))[0].n;
+    const res = await fetchJson(`${app.baseUrl}/api/webhooks/payment`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: 'notification', event: 'payment.succeeded',
+        object: { id: 'provider_orphan_payment', status: 'succeeded', amount: { value: '500.00', currency: 'RUB' } },
+      }),
+    });
+    assert.equal(res.status, 404);
+    const after = (await db.query('SELECT count(*)::int AS n FROM orders'))[0].n;
+    assert.equal(after, before);
+  } finally {
+    restore();
+    await app.cleanup();
+  }
+});
+
+test('A15: payment.canceled идемпотентно переводит только связанный pending payment/order в failed', async () => {
+  const transport = createFakeYookassaTransport();
+  const restore = installFakeFetch(transport.handler);
+  const app = await startWebhookApp({ PAYMENT_PROVIDER: 'yookassa' });
+  try {
+    const YookassaProvider = require('../../services/paymentProviders/yookassaProvider.js');
+    const provider = new YookassaProvider();
+    const { order, paymentId, providerPaymentId } = await createOrderWithYookassaPayment(provider, 500);
+    transport.setPaymentStatus(providerPaymentId, 'canceled');
+    const notify = () => fetchJson(`${app.baseUrl}/api/webhooks/payment`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: 'notification', event: 'payment.canceled',
+        object: { id: providerPaymentId, status: 'canceled', amount: { value: '500.00', currency: 'RUB' } },
+      }),
+    });
+    assert.equal((await notify()).status, 200);
+    assert.equal((await notify()).status, 200);
+    const payments = await db.query('SELECT status FROM payments WHERE id = $1', [paymentId]);
+    const orders = await db.query('SELECT status FROM orders WHERE id = $1', [order.id]);
+    assert.equal(payments[0].status, 'failed');
+    assert.equal(orders[0].status, 'payment_failed');
+  } finally {
+    restore();
+    await app.cleanup();
+  }
+});
+
+test('A16: pending payment переживает restart приложения, последующий webhook завершается успешно', async () => {
+  const transport = createFakeYookassaTransport();
+  const restore = installFakeFetch(transport.handler);
+  let firstApp = await startWebhookApp({ PAYMENT_PROVIDER: 'yookassa' });
+  let secondApp;
+  try {
+    const YookassaProvider = require('../../services/paymentProviders/yookassaProvider.js');
+    const provider = new YookassaProvider();
+    const { order, paymentId, providerPaymentId } = await createOrderWithYookassaPayment(provider, 500);
+    await firstApp.cleanup();
+    firstApp = null;
+
+    secondApp = await startWebhookApp({ PAYMENT_PROVIDER: 'yookassa' });
+    transport.setPaymentStatus(providerPaymentId, 'succeeded');
+    const res = await fetchJson(`${secondApp.baseUrl}/api/webhooks/payment`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: 'notification', event: 'payment.succeeded',
+        object: { id: providerPaymentId, status: 'succeeded', amount: { value: '500.00', currency: 'RUB' } },
+      }),
+    });
+    assert.equal(res.status, 200);
+    const payments = await db.query('SELECT status FROM payments WHERE id = $1', [paymentId]);
+    const orders = await db.query('SELECT status FROM orders WHERE id = $1', [order.id]);
+    assert.equal(payments[0].status, 'succeeded');
+    assert.equal(orders[0].status, 'awaiting_restaurant');
+  } finally {
+    restore();
+    if (firstApp) await firstApp.cleanup();
+    if (secondApp) await secondApp.cleanup();
   }
 });
 
