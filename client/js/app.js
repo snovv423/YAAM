@@ -16,6 +16,18 @@ const ORDER_TOKEN_PREFIX='yaam_ord_v1_';
 const CREATE_KEY_PREFIX='yaam_create_v1_';
 const RETRY_KEY_PREFIX='yaam_retry_v1_';
 const CREATE_ORDER_LOCK_NAME='yaam-create-order-v1';
+const UI_ICON_PATHS={
+  order:'<rect x="6" y="3.5" width="12" height="17" rx="2"/><path d="M9 8h6M9 12h6M9 16h4"/>',
+  preparing:'<path d="M5 11h14v3a5 5 0 0 1-5 5h-4a5 5 0 0 1-5-5v-3Z"/><path d="M8 8c0-1 1-1.5 1-2.5S8 4 8 3m4 5c0-1 1-1.5 1-2.5S12 4 12 3m4 5c0-1 1-1.5 1-2.5S16 4 16 3"/>',
+  delivery:'<path d="M3 6h11v10H3zM14 10h4l3 3v3h-7z"/><circle cx="7" cy="18" r="2"/><circle cx="18" cy="18" r="2"/>',
+  check:'<circle cx="12" cy="12" r="9"/><path d="m8 12 2.6 2.6L16.5 9"/>',
+  clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  payment:'<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 9h18M7 15h4"/>',
+};
+function uiIcon(name){
+  const paths=UI_ICON_PATHS[name]||UI_ICON_PATHS.order;
+  return `<svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true" focusable="false">${paths}</svg>`;
+}
 // Все изменения двух order-scoped localStorage ключей в API-режиме проходят
 // через один Web Lock. Счётчик нужен, чтобы низкоуровневые helpers могли
 // fail-closed отклонить случайную запись вне критической секции.
@@ -150,7 +162,7 @@ let demoStage='qr'; // 'qr' — создан, ждёт демо-оплаты; 's
 function normalizeRestaurant(r){
   return{
     id:r.id, name:r.name, cui:r.cuisine||'', photoUrl:r.photo_url||'', phone:r.phone||'', address:r.address||'',
-    e:'🍽️', g:'linear-gradient(135deg,#3d6b4e,#1e4630)', im:null,
+    g:'linear-gradient(135deg,#3d6b4e,#1e4630)', im:null,
     rate:r.rating||0, votes:r.rating_count||0, ordersCount:r.orders_count??null,
     hours:r.hours||'', deliv:r.delivery_price||0, min:r.min_order||0,
     open:!!r.is_open, isNew:!!r.is_new, cities:r.cities||[],
@@ -158,7 +170,7 @@ function normalizeRestaurant(r){
       cat:cat.name,
       items:cat.items.map(it=>({
         id:it.id, n:it.name, d:it.description||'', p:it.price,
-        e:'🍽️', g:'linear-gradient(135deg,#3d6b4e,#1e4630)', im:null, photoUrl:it.photo_url||'',
+        g:'linear-gradient(135deg,#3d6b4e,#1e4630)', im:null, photoUrl:it.photo_url||'',
         pop:!!it.is_popular, available:it.is_available!==0,
         w:it.weight_g, kcal:it.kcal, prot:it.protein_g, fat:it.fat_g, carb:it.carbs_g, s:it.composition,
       })),
@@ -188,7 +200,7 @@ function cardHTML(r){
   return `
   <div class="card ${r.open?'':'closed'}" onclick="${r.open?`openRest(${r.id},event)`:`shut('${r.name}')`}">
     <div class="photo ${hasSrc?'':'nophoto'}" style="background:${r.g}">
-      <span class="mj">${r.e}</span>${photo}
+      ${photo}
       <div class="chip st ${r.open?'open':'shut'}"><span class="bdot"></span>${r.open?'Открыто':'Закрыто'}</div>
       ${r.votes>=RATING_MIN_VOTES?`<div class="chip rt">★ ${r.rate} · ${r.votes}</div>`:''}
       <div class="info"><div class="itop"><div class="cname">${r.name}${r.open&&r.isNew?' <span class="newtag">NEW</span>':''}</div>${r.ordersCount?`<div class="ordcnt">уже заказали ${r.ordersCount} раз</div>`:''}</div><div class="ccui">${r.cui}</div>
@@ -217,7 +229,7 @@ async function renderList(instant){
     return;
   }
   let html='';
-  if(!openR.length){html+=`<div class="sleep"><div class="moon">🌙</div><h3>Город спит</h3><p>Сейчас всё закрыто — рестораны откроются позже.</p></div>`;}
+  if(!openR.length){html+=`<div class="sleep"><h3>Город спит</h3><p>Сейчас всё закрыто — рестораны откроются позже.</p></div>`;}
   html+=openR.map(cardHTML).join('');
   if(closedR.length) html+=`<div class="grouplbl">Закрыты сейчас</div>`+closedR.map(cardHTML).join('');
   el.innerHTML=html;
@@ -317,13 +329,13 @@ function dotTap(){if(document.getElementById('orderdot').classList.contains('on'
 const STEP_SETS={
   delivery:{
     steps:['Принят','Готовится','В пути','Доставлен'],
-    icons:['📋','👨‍🍳','🛵','✅'],
+    icons:['order','preparing','delivery','check'],
     anims:['iconpop .5s cubic-bezier(.3,1.4,.4,1), pulse-glow 2s ease-in-out .5s infinite','iconpop .5s cubic-bezier(.3,1.4,.4,1), cooking 1s ease-in-out .5s infinite','iconpop .5s cubic-bezier(.3,1.4,.4,1), riding .65s ease-in-out .5s infinite','delivered .65s cubic-bezier(.3,1.6,.4,1)'],
     statusToStep:{accepted:0,preparing:1,courier:2,delivered:3},
   },
   pickup:{
     steps:['Принят','Готовится','Готово'],
-    icons:['📋','👨‍🍳','✅'],
+    icons:['order','preparing','check'],
     anims:['iconpop .5s cubic-bezier(.3,1.4,.4,1), pulse-glow 2s ease-in-out .5s infinite','iconpop .5s cubic-bezier(.3,1.4,.4,1), cooking 1s ease-in-out .5s infinite','delivered .65s cubic-bezier(.3,1.6,.4,1)'],
     statusToStep:{accepted:0,preparing:1,delivered:2},
   },
@@ -352,7 +364,7 @@ function renderRatingStars(){
   const el=document.getElementById('st-rating-wrap');
   if(!el)return;
   if(ratingSubmitted){el.innerHTML=`<p class="rating-thanks">${ratingJustNow?'Спасибо. Оценка учтена.':'Вы уже оценили этот заказ.'}</p>`;return;}
-  el.innerHTML=`<div class="rating-wrap"><p>Как вам заказ?</p><div class="rating-stars" id="rating-stars">${[1,2,3,4,5].map(n=>`<button class="rating-star" data-n="${n}" onclick="submitRating(${n})">★</button>`).join('')}</div></div>`;
+  el.innerHTML=`<div class="rating-wrap"><p>Как вам заказ?</p><div class="rating-stars" id="rating-stars">${[1,2,3,4,5].map(n=>`<button class="rating-star" data-n="${n}" aria-label="Оценить на ${n} ${plural(n,'звезду','звезды','звёзд')}" onclick="submitRating(${n})">★</button>`).join('')}</div></div>`;
 }
 async function submitRating(n){
   document.querySelectorAll('#rating-stars .rating-star').forEach(b=>b.classList.toggle('on',Number(b.dataset.n)<=n));
@@ -378,7 +390,7 @@ function renderStatus(){
   }
   const ic=document.getElementById('st-icon');
   if(ic){
-    ic.textContent=icons[statusStep];
+    ic.innerHTML=uiIcon(icons[statusStep]);
     ic.style.animation='none';
     requestAnimationFrame(()=>{ic.style.animation=anims[statusStep];});
   }
@@ -418,7 +430,7 @@ async function doOpenRest(id){
   }
   document.getElementById('m-name').textContent=curRest.name;
   const showRating=curRest.votes>=RATING_MIN_VOTES;
-  document.getElementById('m-meta').innerHTML=`${showRating?`<span>★ ${curRest.rate} · ${curRest.votes}</span>`:''}<span>🕐 ${curRest.hours}</span>`;
+  document.getElementById('m-meta').innerHTML=`${showRating?`<span>★ ${curRest.rate} · ${curRest.votes}</span>`:''}<span>Часы: ${curRest.hours}</span>`;
   document.getElementById('msb-name').textContent=curRest.name;
   document.getElementById('msb-rate').textContent=showRating?`★ ${curRest.rate}`:'';
   const tabs=curRest.menu.map(c=>c.cat);
@@ -468,7 +480,7 @@ function dishCard(d,ci,ii){
   const hasSrc=!!(d.photoUrl||d.im);
   const photo=hasSrc?`<img src="${d.photoUrl||U(d.im,700)}" loading="lazy" onerror="this.closest('.dphoto').classList.add('nophoto');this.remove()">`:'';
   return `<div class="dish ${so?'dis':''}" ${so?'':`onclick="openDish('${k}')"`}>
-    <div class="dphoto ${hasSrc?'':'nophoto'}" style="background:${d.g}"><span class="mj">${d.e}</span>${photo}
+    <div class="dphoto ${hasSrc?'':'nophoto'}" style="background:${d.g}">${photo}
     <div class="dplate"><div class="dname">${d.n}${d.pop?' <span class="hit">Хит</span>':''}</div><div class="ddesc">${d.d}</div></div>
     <div class="dactions"><div class="dprice">${d.p} ₽</div>${so?'<span class="soldout">Нет в наличии</span>':`<div data-ctrl-key="${k}" onclick="event.stopPropagation()">${q>0?qtyHtml(k,q):`<button class="add" onclick="addItem('${k}',event)">+</button>`}</div>`}</div></div></div>`;
 }
@@ -858,13 +870,12 @@ function openDish(k){
   const det=fromApi
     ? {w:d.w||'—',kcal:d.kcal??'—',p:d.prot??'—',f:d.fat??'—',c:d.carb??'—',s:d.s||'Состав не указан'}
     : (DETAILS[d.n]||{w:300,kcal:450,p:20,f:20,c:40,s:'Натуральные ингредиенты'});
-  const h=document.getElementById('d-hero');h.querySelectorAll('.mj,img').forEach(x=>x.remove());
+  const h=document.getElementById('d-hero');h.querySelectorAll('img').forEach(x=>x.remove());
   const dishHasSrc=!!(d.photoUrl||d.im);
   h.classList.toggle('nophoto',!dishHasSrc);
   h.style.background=d.g;
   const gallery=document.getElementById('d-gallery');
   if(dishHasSrc){
-    const mj=document.createElement('span');mj.className='mj';mj.textContent=d.e;h.insertBefore(mj,h.firstChild);
     const heroSrc=d.photoUrl||U(d.im,1000);
     const img=new Image();img.src=heroSrc;img.onerror=function(){h.classList.add('nophoto');this.remove()};h.insertBefore(img,h.firstChild);
     if(d.photoUrl){
@@ -1192,7 +1203,7 @@ function renderWaitForRestaurant(){
   document.getElementById('st-substate').style.display='block';
   startResponseTimer();
   const ic=document.getElementById('st-icon');
-  ic.textContent='⏳';ic.style.animation='none';
+  ic.innerHTML=uiIcon('clock');ic.style.animation='none';
   requestAnimationFrame(()=>{ic.style.animation='iconpop .5s cubic-bezier(.3,1.4,.4,1), pulse-glow 1.4s ease-in-out .5s infinite';});
   document.getElementById('statusbg').style.background='';
   document.getElementById('st-next').style.display='block';
@@ -1516,7 +1527,7 @@ function renderAwaitingPayment(order){
   document.getElementById('st-state').textContent=`Заказ ${order.public_code} создан`;
   document.getElementById('st-substate').textContent='Оплата пока не завершена.';
   document.getElementById('st-substate').style.display='block';
-  const ic=document.getElementById('st-icon');ic.textContent='💳';ic.style.animation='none';
+  const ic=document.getElementById('st-icon');ic.innerHTML=uiIcon('payment');ic.style.animation='none';
   document.getElementById('st-next').style.display='none';
   document.getElementById('st-demowrap').style.display='none';
   document.getElementById('st-cancel-wrap').style.display='none';
@@ -1613,7 +1624,7 @@ async function pollOrderOnce(){
     const m=Math.floor(left/60),s=left%60;
     document.getElementById('st-substate').textContent=`Ответ ресторана в течение ${m}:${s<10?'0':''}${s}`;
     document.getElementById('st-substate').style.display='block';
-    const ic=document.getElementById('st-icon');ic.textContent='⏳';
+    const ic=document.getElementById('st-icon');ic.innerHTML=uiIcon('clock');
     document.getElementById('st-next').style.display='none';
     document.getElementById('st-demowrap').style.display='none';
     document.getElementById('st-cancel-wrap').style.display='block';

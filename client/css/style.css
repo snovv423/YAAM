@@ -134,7 +134,6 @@
   .card.closed{filter:grayscale(.55) brightness(.82)}
   .photo{position:relative;height:190px;background:#13402a}
   .photo>img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:1}
-  .photo .mj{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:72px;z-index:0}
   .photo::before{content:"";position:absolute;inset:0;z-index:2;background:linear-gradient(180deg,rgba(0,0,0,.1) 0%,transparent 30%,transparent 50%,rgba(4,18,11,.5) 100%)}
   .chip{position:absolute;top:12px;z-index:3;display:flex;align-items:center;gap:6px;padding:6px 11px;border-radius:999px;font-size:11.5px;font-weight:800;color:#fff;border:1px solid rgba(255,255,255,.18);box-shadow:var(--spec);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px)}
   .chip.st{left:14px}.chip.rt{right:14px}
@@ -157,7 +156,6 @@
   .cmeta b{color:rgba(255,255,255,.66);font-weight:600}
   .empty{text-align:center;color:var(--txt2);font-weight:700;font-size:15px;padding:40px 20px;line-height:1.6}
   .sleep{text-align:center;padding:30px 20px 8px}
-  .sleep .moon{font-size:50px}
   .sleep h3{font-weight:800;font-size:20px;margin-top:10px}
   .sleep p{color:var(--txt2);font-size:13.5px;font-weight:600;margin-top:5px}
   .note{font-size:11.5px;color:var(--txt2);text-align:center;padding:18px 28px 6px;line-height:1.55;font-weight:500;position:relative;z-index:2}
@@ -203,7 +201,6 @@
   .dish{position:relative;z-index:2;margin:0 14px 16px;border-radius:24px;overflow:hidden;box-shadow:var(--shadow);isolation:isolate;background:#13402a}
   .dphoto{position:relative;height:176px}
   .dphoto>img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:1}
-  .dphoto .mj{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:62px;z-index:0}
   .dphoto::before{content:"";position:absolute;inset:0;z-index:2;background:linear-gradient(180deg,rgba(0,0,0,.05),transparent 40%,rgba(4,18,11,.55) 100%)}
   .dplate{position:absolute;left:10px;right:auto;max-width:58%;bottom:10px;z-index:3;border-radius:16px;padding:9px 12px;color:#fff;background:var(--glass);border:1px solid var(--gbord);box-shadow:var(--spec),0 8px 18px rgba(0,0,0,.25);backdrop-filter:blur(18px) saturate(170%);-webkit-backdrop-filter:blur(18px) saturate(170%)}
   .dname{font-weight:800;font-size:14.5px}
@@ -219,17 +216,14 @@
   .soldout{font-size:12px;font-weight:800;color:var(--red);background:rgba(255,112,89,.16);padding:7px 11px;border-radius:10px}
   .dish.dis{filter:grayscale(.6) brightness(.8)}
   .dish.dis .dname{text-decoration:line-through;opacity:.8}
-  /* нет фото — универсальная серая заглушка вместо цветного градиента с эмодзи */
+  /* Нет фото: спокойная текстовая заглушка без декоративной пиктограммы. */
   .photo.nophoto,.dphoto.nophoto{background:linear-gradient(135deg,#3a423e,#242b28)!important}
-  .photo.nophoto .mj,.dphoto.nophoto .mj{display:none}
-  .photo.nophoto::after,.dphoto.nophoto::after{content:"🖼️";position:absolute;inset:0;z-index:1;display:flex;align-items:center;justify-content:center;font-size:48px;opacity:.3}
+  .photo.nophoto::after,.dphoto.nophoto::after{content:"Фото недоступно";position:absolute;inset:0;z-index:1;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:rgba(255,255,255,.4)}
   .hero.nophoto,.dhero.nophoto{background:linear-gradient(135deg,#3a423e,#242b28)!important}
-  .dhero.nophoto .mj{display:none}
-  .hero.nophoto::before,.dhero.nophoto::before{content:"🖼️";position:absolute;inset:0;z-index:0;display:flex;align-items:center;justify-content:center;font-size:56px;opacity:.28}
+  .hero.nophoto::before,.dhero.nophoto::before{content:"Фото недоступно";position:absolute;inset:0;z-index:0;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:rgba(255,255,255,.4)}
   /* dish detail */
   .dhero{position:relative;height:300px;background:#13402a}
   .dhero>img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:0}
-  .dhero .mj{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:96px;z-index:-1}
   .dhero::after{content:"";position:absolute;inset:0;z-index:1;background:linear-gradient(180deg,rgba(0,0,0,.28),transparent 40%,rgba(6,28,17,.85))}
   .gallery{display:flex;gap:9px;padding:14px 16px 2px;overflow-x:auto;scrollbar-width:none;margin-top:-44px;position:relative;z-index:3}
   .gallery::-webkit-scrollbar{display:none}
@@ -299,7 +293,8 @@
   .final-wrap{padding:30px 28px 40px;text-align:center;position:relative;z-index:2}
   /* галерея плавный перелист */
   .gallery{scroll-behavior:smooth;-webkit-overflow-scrolling:touch}
-  .trust .ic{font-size:18px}
+  .ui-icon{display:block;width:1em;height:1em;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+  .trust .ic{display:flex;align-items:center;justify-content:center;flex:0 0 22px;width:22px;height:22px;font-size:22px}
   .trust p{font-size:12.5px;font-weight:600;color:#c7f3df;line-height:1.4}
   .pay{width:100%;background:var(--amber);color:#3a1c00;border:none;border-radius:19px;padding:18px;font-family:inherit;font-weight:800;font-size:15.5px;cursor:pointer;box-shadow:0 12px 30px rgba(255,154,46,.5);margin-top:8px}
   .pay:active{transform:scale(.99)}
@@ -378,7 +373,8 @@
   .pline{transition:background .5s ease}
   .pdot{transition:background .4s ease,transform .3s ease,color .3s ease}
   /* иконки статуса */
-  .sticon{font-size:64px;text-align:center;margin:10px 0 6px;display:block}
+  .sticon{width:64px;height:64px;color:var(--amber);margin:10px auto 6px;display:flex;align-items:center;justify-content:center}
+  .sticon .ui-icon{width:58px;height:58px;stroke-width:1.35}
   /* спиннер подтверждения оплаты — короткая техническая пауза, не отдельный статус */
   .st-spin{display:none;width:52px;height:52px;margin:44px auto;border-radius:50%;border:4px solid rgba(255,255,255,.14);border-top-color:var(--amber);animation:stspin .8s linear infinite}
   .st-spin.on{display:block}
@@ -391,8 +387,9 @@
   .rating-wrap{text-align:center;margin-bottom:18px}
   .rating-wrap p{font-size:13.5px;font-weight:700;color:var(--txt2);margin-bottom:10px}
   .rating-stars{display:flex;justify-content:center;gap:6px}
-  .rating-star{background:none;border:none;font-size:34px;line-height:1;cursor:pointer;padding:2px;filter:grayscale(1) opacity(.5);transition:filter .15s ease,transform .15s ease}
+  .rating-star{background:none;border:none;color:var(--amber);font-size:34px;line-height:1;cursor:pointer;padding:2px;filter:grayscale(1) opacity(.62);transition:filter .15s ease,transform .15s ease}
   .rating-star.on{filter:none;transform:scale(1.12)}
+  .rating-star:focus-visible{outline:2px solid var(--amber);outline-offset:3px;border-radius:4px}
   .rating-thanks{font-size:13.5px;font-weight:700;color:var(--amber);margin-bottom:18px}
   @keyframes iconpop{from{transform:scale(.3);opacity:0}to{transform:scale(1);opacity:1}}
   @keyframes pulse-glow{0%,100%{transform:scale(1)}50%{transform:scale(1.1)}}

@@ -37,58 +37,58 @@ const DETAILS={
 const POOL=[P.meat,P.pizza,P.burger,P.cake,P.noodles];
 const M_KAVKAZ=[
  {cat:'Шашлык и мангал',items:[
-  {n:'Шашлык из баранины',d:'Мясо на углях, 250 г',p:520,e:'🍢',g:G.meat,im:P.meat,pop:true},
-  {n:'Люля-кебаб',d:'Рубленая баранина с зеленью',p:380,e:'🥩',g:G.meat,im:P.meat},
-  {n:'Шашлык из курицы',d:'Филе в маринаде',p:340,e:'🍗',g:G.meat,im:P.meat}]},
+  {n:'Шашлык из баранины',d:'Мясо на углях, 250 г',p:520,g:G.meat,im:P.meat,pop:true},
+  {n:'Люля-кебаб',d:'Рубленая баранина с зеленью',p:380,g:G.meat,im:P.meat},
+  {n:'Шашлык из курицы',d:'Филе в маринаде',p:340,g:G.meat,im:P.meat}]},
  {cat:'Чеченская кухня',items:[
-  {n:'Жижиг-галныш',d:'Хинкал с мясом и чесночным соусом',p:450,e:'🥟',g:G.honey,im:P.dumpling,pop:true},
-  {n:'Чепалгаш',d:'Лепёшка с творогом, 2 шт',p:220,e:'🫓',g:G.honey,im:P.bread},
-  {n:'Лагман',d:'Лапша, мясо, овощи',p:390,e:'🍜',g:G.honey,im:P.noodles}]},
+  {n:'Жижиг-галныш',d:'Хинкал с мясом и чесночным соусом',p:450,g:G.honey,im:P.dumpling,pop:true},
+  {n:'Чепалгаш',d:'Лепёшка с творогом, 2 шт',p:220,g:G.honey,im:P.bread},
+  {n:'Лагман',d:'Лапша, мясо, овощи',p:390,g:G.honey,im:P.noodles}]},
  {cat:'Напитки',items:[
-  {n:'Чай горный',d:'Травяной сбор, чайник',p:180,e:'🫖',g:G.green,im:P.coffee},
-  {n:'Айран',d:'Домашний, 0.5 л',p:120,e:'🥛',g:G.cool,im:P.coffee}]}
+  {n:'Чай горный',d:'Травяной сбор, чайник',p:180,g:G.green,im:P.coffee},
+  {n:'Айран',d:'Домашний, 0.5 л',p:120,g:G.cool,im:P.coffee}]}
 ];
 const M_PIZZA=[
  {cat:'Пицца',items:[
-  {n:'Пепперони',d:'Колбаса, моцарелла, 30 см',p:560,e:'🍕',g:G.red,im:P.pizza,pop:true},
-  {n:'Четыре сыра',d:'Моцарелла, пармезан, дор блю, чеддер',p:620,e:'🧀',g:G.honey,im:P.pizza},
-  {n:'Маргарита',d:'Томаты, моцарелла, базилик',p:450,e:'🍅',g:G.red,im:P.pizza}]},
+  {n:'Пепперони',d:'Колбаса, моцарелла, 30 см',p:560,g:G.red,im:P.pizza,pop:true},
+  {n:'Четыре сыра',d:'Моцарелла, пармезан, дор блю, чеддер',p:620,g:G.honey,im:P.pizza},
+  {n:'Маргарита',d:'Томаты, моцарелла, базилик',p:450,g:G.red,im:P.pizza}]},
  {cat:'Закуски',items:[
-  {n:'Картофель фри',d:'С соусом',p:190,e:'🍟',g:G.honey,im:P.burger},
-  {n:'Куриные крылья',d:'8 шт',p:340,e:'🍗',g:G.meat,im:P.meat}]}
+  {n:'Картофель фри',d:'С соусом',p:190,g:G.honey,im:P.burger},
+  {n:'Куриные крылья',d:'8 шт',p:340,g:G.meat,im:P.meat}]}
 ];
 const M_BURGER=[
  {cat:'Бургеры',items:[
-  {n:'Двойной чизбургер',d:'2 котлеты, чеддер, соус',p:420,e:'🍔',g:G.meat,im:P.burger,pop:true},
-  {n:'Куриный бургер',d:'Хрустящее филе, салат',p:340,e:'🍔',g:G.honey,im:P.burger},
-  {n:'Шаурма большая',d:'Курица, овощи, соус',p:280,e:'🌯',g:G.meat,im:P.meat}]}
+  {n:'Двойной чизбургер',d:'2 котлеты, чеддер, соус',p:420,g:G.meat,im:P.burger,pop:true},
+  {n:'Куриный бургер',d:'Хрустящее филе, салат',p:340,g:G.honey,im:P.burger},
+  {n:'Шаурма большая',d:'Курица, овощи, соус',p:280,g:G.meat,im:P.meat}]}
 ];
 const M_SWEET=[
  {cat:'Десерты',items:[
-  {n:'Чизкейк',d:'Нью-Йорк, кусок',p:260,e:'🍰',g:G.pink,im:P.cake,pop:true},
-  {n:'Пахлава',d:'Медовая, 4 шт',p:220,e:'🍯',g:G.honey,im:P.cake},
-  {n:'Эклеры',d:'Набор 6 шт',p:300,e:'🧁',g:G.pink,im:P.cake}]},
+  {n:'Чизкейк',d:'Нью-Йорк, кусок',p:260,g:G.pink,im:P.cake,pop:true},
+  {n:'Пахлава',d:'Медовая, 4 шт',p:220,g:G.honey,im:P.cake},
+  {n:'Эклеры',d:'Набор 6 шт',p:300,g:G.pink,im:P.cake}]},
  {cat:'Кофе',items:[
-  {n:'Капучино',d:'На выбор молоко',p:170,e:'☕',g:G.meat,im:P.coffee},
-  {n:'Раф',d:'Сливочный, ваниль',p:210,e:'☕',g:G.honey,im:P.coffee}]}
+  {n:'Капучино',d:'На выбор молоко',p:170,g:G.meat,im:P.coffee},
+  {n:'Раф',d:'Сливочный, ваниль',p:210,g:G.honey,im:P.coffee}]}
 ];
 const M_ASCOFFEE=[
  {cat:'Кофе',items:[
-  {n:'Капучино',d:'Эспрессо и молочная пенка',p:190,e:'☕',g:G.meat,im:P.coffee,pop:true},
-  {n:'Раф',d:'Сливочный, с ванилью',p:240,e:'☕',g:G.honey,im:P.coffee,pop:true},
-  {n:'Латте',d:'Мягкий, с молоком',p:210,e:'☕',g:G.honey,im:P.coffee},
-  {n:'Флэт уайт',d:'Двойной эспрессо, молоко',p:220,e:'☕',g:G.cool,im:P.coffee},
-  {n:'Американо',d:'Классический чёрный',p:150,e:'☕',g:G.meat,im:P.coffee}]},
+  {n:'Капучино',d:'Эспрессо и молочная пенка',p:190,g:G.meat,im:P.coffee,pop:true},
+  {n:'Раф',d:'Сливочный, с ванилью',p:240,g:G.honey,im:P.coffee,pop:true},
+  {n:'Латте',d:'Мягкий, с молоком',p:210,g:G.honey,im:P.coffee},
+  {n:'Флэт уайт',d:'Двойной эспрессо, молоко',p:220,g:G.cool,im:P.coffee},
+  {n:'Американо',d:'Классический чёрный',p:150,g:G.meat,im:P.coffee}]},
  {cat:'Десерты',items:[
-  {n:'Чизкейк',d:'Нью-Йорк, кусок',p:260,e:'🍰',g:G.pink,im:P.cake,pop:true},
-  {n:'Тирамису',d:'Маскарпоне, кофе, какао',p:280,e:'🍮',g:G.pink,im:P.cake},
-  {n:'Круассан',d:'Сливочный, хрустящий',p:160,e:'🥐',g:G.honey,im:P.bread},
-  {n:'Эклеры',d:'Набор 3 шт',p:230,e:'🧁',g:G.pink,im:P.cake}]},
+  {n:'Чизкейк',d:'Нью-Йорк, кусок',p:260,g:G.pink,im:P.cake,pop:true},
+  {n:'Тирамису',d:'Маскарпоне, кофе, какао',p:280,g:G.pink,im:P.cake},
+  {n:'Круассан',d:'Сливочный, хрустящий',p:160,g:G.honey,im:P.bread},
+  {n:'Эклеры',d:'Набор 3 шт',p:230,g:G.pink,im:P.cake}]},
  {cat:'Сэндвичи',items:[
-  {n:'Клаб-сэндвич',d:'Курица, бекон, овощи',p:340,e:'🥪',g:G.honey,im:P.bread,pop:true},
-  {n:'Панини с ветчиной',d:'Ветчина, сыр, на гриле',p:320,e:'🥪',g:G.honey,im:P.bread},
-  {n:'Сэндвич с курицей',d:'Филе, соус, салат',p:300,e:'🥪',g:G.meat,im:P.bread},
-  {n:'Брускетта',d:'Томаты, базилик, 3 шт',p:240,e:'🍅',g:G.red,im:P.bread}]}
+  {n:'Клаб-сэндвич',d:'Курица, бекон, овощи',p:340,g:G.honey,im:P.bread,pop:true},
+  {n:'Панини с ветчиной',d:'Ветчина, сыр, на гриле',p:320,g:G.honey,im:P.bread},
+  {n:'Сэндвич с курицей',d:'Филе, соус, салат',p:300,g:G.meat,im:P.bread},
+  {n:'Брускетта',d:'Томаты, базилик, 3 шт',p:240,g:G.red,im:P.bread}]}
 ];
 // ordersCount — статичное demo-число для витрины без бэкенда (сейчас прод).
 // Не формула от votes и не растёт от действий в браузере — просто зафиксированный
@@ -96,12 +96,12 @@ const M_ASCOFFEE=[
 // в app.js и orders_count в server/routes/api.js) и приходит через normalizeRestaurant()
 // только когда USE_API=true.
 const restaurants=[
- {id:1,name:'Кавказ',cui:'Шашлык · Чеченская кухня',e:'🍢',g:G.meat,im:P.meat,rate:4.8,votes:215,ordersCount:645,hours:'10:00–23:00',deliv:150,min:600,open:true,isNew:false,menu:M_KAVKAZ,cities:['Грозный','Аргун'],phone:'+7 928 100-00-01',address:'г. Грозный, пр. В.В. Путина, 1'},
- {id:2,name:'ASCOFFEE',cui:'Кофе · Десерты · Сэндвичи',e:'☕',g:G.honey,im:P.coffee,rate:4.7,votes:73,ordersCount:219,hours:'08:00–23:00',deliv:120,min:400,open:true,isNew:true,menu:M_ASCOFFEE,cities:['Грозный','Гудермес'],phone:'+7 928 100-00-02',address:'г. Грозный, ул. Тухачева, 14'},
- {id:3,name:'Бургер Хаус',cui:'Бургеры · Шаурма',e:'🍔',g:G.honey,im:P.burger,rate:4.5,votes:143,ordersCount:429,hours:'10:00–02:00',deliv:100,min:400,open:true,isNew:false,menu:M_BURGER,cities:['Грозный','Аргун','Гудермес','Шали'],phone:'+7 928 100-00-03',address:'г. Грозный, ул. Индербиева, 8'},
- {id:4,name:'Хинкальная №1',cui:'Чеченская · Кавказская',e:'🥟',g:G.green,im:P.dumpling,rate:4.9,votes:307,ordersCount:921,hours:'09:00–22:00',deliv:150,min:700,open:false,isNew:false,menu:M_KAVKAZ,cities:['Грозный','Шали'],phone:'+7 928 100-00-04',address:'г. Грозный, ул. Субры Кишиевой, 5'},
- {id:5,name:'Сладкий дом',cui:'Десерты · Кофе',e:'🍰',g:G.pink,im:P.cake,rate:4.7,votes:64,ordersCount:192,hours:'09:00–22:00',deliv:120,min:300,open:true,isNew:true,menu:M_SWEET,cities:['Грозный','Гудермес'],phone:'+7 928 100-00-05',address:'г. Грозный, пр. Ахмат-Хаджи Кадырова, 22'},
- {id:6,name:'Чайхана Восток',cui:'Плов · Лагман · Чай',e:'🍜',g:G.cool,im:P.noodles,rate:4.4,votes:41,ordersCount:123,hours:'10:00–23:00',deliv:180,min:600,open:false,isNew:false,menu:M_KAVKAZ,cities:['Грозный','Аргун'],phone:'+7 928 100-00-06',address:'г. Грозный, ул. Оганова, 3'}
+ {id:1,name:'Кавказ',cui:'Шашлык · Чеченская кухня',g:G.meat,im:P.meat,rate:4.8,votes:215,ordersCount:645,hours:'10:00–23:00',deliv:150,min:600,open:true,isNew:false,menu:M_KAVKAZ,cities:['Грозный','Аргун'],phone:'+7 928 100-00-01',address:'г. Грозный, пр. В.В. Путина, 1'},
+ {id:2,name:'ASCOFFEE',cui:'Кофе · Десерты · Сэндвичи',g:G.honey,im:P.coffee,rate:4.7,votes:73,ordersCount:219,hours:'08:00–23:00',deliv:120,min:400,open:true,isNew:true,menu:M_ASCOFFEE,cities:['Грозный','Гудермес'],phone:'+7 928 100-00-02',address:'г. Грозный, ул. Тухачева, 14'},
+ {id:3,name:'Бургер Хаус',cui:'Бургеры · Шаурма',g:G.honey,im:P.burger,rate:4.5,votes:143,ordersCount:429,hours:'10:00–02:00',deliv:100,min:400,open:true,isNew:false,menu:M_BURGER,cities:['Грозный','Аргун','Гудермес','Шали'],phone:'+7 928 100-00-03',address:'г. Грозный, ул. Индербиева, 8'},
+ {id:4,name:'Хинкальная №1',cui:'Чеченская · Кавказская',g:G.green,im:P.dumpling,rate:4.9,votes:307,ordersCount:921,hours:'09:00–22:00',deliv:150,min:700,open:false,isNew:false,menu:M_KAVKAZ,cities:['Грозный','Шали'],phone:'+7 928 100-00-04',address:'г. Грозный, ул. Субры Кишиевой, 5'},
+ {id:5,name:'Сладкий дом',cui:'Десерты · Кофе',g:G.pink,im:P.cake,rate:4.7,votes:64,ordersCount:192,hours:'09:00–22:00',deliv:120,min:300,open:true,isNew:true,menu:M_SWEET,cities:['Грозный','Гудермес'],phone:'+7 928 100-00-05',address:'г. Грозный, пр. Ахмат-Хаджи Кадырова, 22'},
+ {id:6,name:'Чайхана Восток',cui:'Плов · Лагман · Чай',g:G.cool,im:P.noodles,rate:4.4,votes:41,ordersCount:123,hours:'10:00–23:00',deliv:180,min:600,open:false,isNew:false,menu:M_KAVKAZ,cities:['Грозный','Аргун'],phone:'+7 928 100-00-06',address:'г. Грозный, ул. Оганова, 3'}
 ];
 
 // Голосование: рестораны, которых ещё нет в YAAM — клиенты голосуют, кого подключить следующим.

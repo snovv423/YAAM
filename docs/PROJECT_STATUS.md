@@ -61,7 +61,8 @@
 - Реальные рестораны и restaurant Telegram bot не подключены.
 - Юридические документы не проверены профильным юристом.
 - Safari/WebKit quality gate для полного production flow не закрыт.
-- UI no-emoji remediation ещё не выполнен; см.
+- UI no-emoji remediation завершён; user-facing source scan и mutation proof
+  защищают правило от регрессии. Трассировка:
   `docs/NO_EMOJI_REMEDIATION.md`.
 
 ## Тестирование
@@ -82,7 +83,7 @@ Stage 9 и Sandbox acceptance подтверждают только staging, а 
 
 ## Следующий безопасный этап
 
-Закрыть открытые пункты в `docs/PROJECT_BACKLOG.md`: no-emoji remediation,
-production onboarding/СБП/54-ФЗ/legal readiness, первый реальный ресторан и
-отдельное решение о подключении frontend/production traffic. До такого решения
-`yaam.su` остаётся demo, а staging — изолированным.
+Закрыть открытые пункты в `docs/PROJECT_BACKLOG.md`: production
+onboarding/СБП/54-ФЗ/legal readiness, первый реальный ресторан и отдельное
+решение о подключении frontend/production traffic. До такого решения `yaam.su`
+остаётся demo, а staging — изолированным.

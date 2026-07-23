@@ -40,7 +40,7 @@
     <p class="intro-text">YAAM собирает рестораны твоего города в одном спокойном месте — чтобы не теряться в лишнем&nbsp;шуме.</p>
   </div>
   <div class="vote-chip" id="vote-chip" onclick="openVote()">кого ждём</div>
-  <div class="ptr" id="ptr">↻ Обновление…</div>
+  <div class="ptr" id="ptr">Обновление…</div>
   <div class="sec"><h2>Открыто сейчас</h2></div>
   <div class="list" id="list"></div>
   <div class="note">Прототип YAAM. Фото — для примера; реальные снимки блюд загрузите при подключении ресторанов.</div>
@@ -102,7 +102,7 @@
     <div class="field"><label>Телефон</label><input id="c-phone" value="+7 928 000-00-00"></div>
     <div class="field"><label>Комментарий к заказу</label><input id="c-comment"></div>
     <div class="panel" id="c-items"></div>
-    <div class="trust"><span class="ic">🛡️</span><p>Оплата защищена. Не примет ресторан — вернём деньги.</p></div>
+    <div class="trust"><span class="ic" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true" focusable="false"><path d="M12 3 5 6v5.2c0 4.4 2.8 7.9 7 9.8 4.2-1.9 7-5.4 7-9.8V6l-7-3Z"/><path d="m9 12 2 2 4-4"/></svg></span><p>Оплата защищена. Не примет ресторан — вернём деньги.</p></div>
     <p class="delivery-note" id="delivery-note">Доставку организует ресторан. YAAM принимает оплату только за еду. <a href="legal/delivery.html" target="_blank" rel="noopener">Подробнее</a></p>
     <div id="legal-consent"></div>
     <button class="pay" onclick="openQR()">Оплатить еду по СБП · <span id="c-total"></span></button>
@@ -142,7 +142,7 @@
     <div class="stnum"><div class="lbl">Ваш заказ</div><div class="n order-code" id="st-num">YAAM-00001</div><div class="order-time" id="st-time"></div></div>
     <div class="st-spin" id="st-spin"></div>
     <div id="st-content">
-      <div class="sticon" id="st-icon">🍽️</div>
+      <div class="sticon" id="st-icon" aria-hidden="true"></div>
       <div class="progress" id="st-progress"></div>
       <div class="ststate" id="st-state">Принят</div>
       <div class="st-substate" id="st-substate" style="display:none"></div>

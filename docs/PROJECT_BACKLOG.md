@@ -49,21 +49,6 @@ demo. Stage 10, production onboarding и реальные платежи не н
 
 ## Medium / quality gates
 
-### No-emoji remediation
-
-Статус: **OPEN**.
-
-KODAWARI audit сообщил о 56 JS/HTML candidate lines. Полный повторный scan,
-включающий CSS pseudo-elements, дал 58 строк. Нужно:
-
-1. классифицировать каждую строку;
-2. отличить emoji от допустимых `← → ✓ ★ +`;
-3. заменить нарушения SVG/CSS/текстом;
-4. добавить автоматический source scan и browser visual regression.
-
-Inventory: `docs/NO_EMOJI_REMEDIATION.md`. В текущей documentation-задаче UI
-не меняется.
-
 ### Repository reproducibility for live ops
 
 - Добавить sanitized templates для offsite backup и host-health scripts/units.
@@ -108,6 +93,11 @@ age-key escrow и YooKassa Sandbox acceptance описаны в:
 - `server/docs/postgresql-deployment-runbook.md`;
 - `server/docs/postgresql-payment-safety.md`;
 - Git history от Waves/Stages до application baseline `c935517`.
+
+No-emoji remediation закрыт 2026-07-23: user-facing client source содержит
+0 forbidden findings, regression scanner и mutation proof добавлены, desktop
+и mobile Chromium acceptance пройдены. Полная трассировка:
+`docs/NO_EMOJI_REMEDIATION.md`.
 
 Исторические незакрытые на 2026-07-13 формулировки сохранены в
 `docs/PROJECT_BACKLOG_HISTORY_2026-07-13.md` и не являются текущим backlog.
