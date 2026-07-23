@@ -1,6 +1,6 @@
 # YAAM Project Backlog
 
-Обновлено: 2026-07-23.
+Обновлено: 2026-07-24.
 
 Этот документ содержит только открытые работы и действующие решения. Текущее
 состояние находится в `docs/PROJECT_STATUS.md`. Старый snapshot сохранён без
@@ -38,7 +38,14 @@ demo. Stage 10, production onboarding и реальные платежи не н
 
 - Отдельно утвердить API base, CORS, rollout и rollback.
 - Проверить mobile Safari/WebKit, cache propagation и active-order recovery.
-- До этого `https://yaam.su` остаётся demo и не использует staging backend.
+- До этого `https://yaam.su` остаётся demo и не использует staging backend
+  для обычных посетителей.
+- **Stage 11A закрыт**: staging-режим (`?yaam_staging_api=1`, sessionStorage,
+  публичный default не изменён) готов в `client/js/api.js`, backend contract
+  audit не нашёл расхождений. См. `docs/YAAM_PROJECT_MEMORY.md`.
+- **Stage 11B — открыт, следующая задача**: controlled browser E2E acceptance
+  (Codex) через staging + YooKassa Sandbox — create order → payment →
+  webhook → status → cancellation/refund. Не выполнено этой задачей.
 
 ### 5. First restaurant operations
 

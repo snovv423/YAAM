@@ -1,6 +1,6 @@
 # YAAM — статус проекта
 
-Обновлено: 2026-07-23.
+Обновлено: 2026-07-24. Authoritative ledger — `docs/YAAM_PROJECT_MEMORY.md`.
 
 ## Версии и окружения
 
@@ -8,16 +8,24 @@
 - Application baseline: `c9355173344b581f5958da120626bf62d4622b6f`
   (`feat(payments): enable safe YooKassa sandbox flow`).
 - Последующие documentation commits не меняют runtime.
-- Frontend: `https://yaam.su` — GitHub Pages demo, `USE_API=false`.
+- Frontend: `https://yaam.su` — GitHub Pages demo, `USE_API=false` по
+  умолчанию для всех обычных посетителей без изменений.
 - Staging backend: `https://api-pg.yaam.su`.
 - Production traffic: **OFF**.
-- Stage 10: **PREFLIGHT PASSED — EXISTING STAGING DEPLOYMENT REQUIRES
-  SERVER-SIDE VERIFICATION.** Код/тесты/архитектура проверены и готовы;
-  staging на `api-pg.yaam.su` уже развёрнут отдельным независимым треком
-  (внешняя HTTPS-доступность подтверждена), но серверная конфигурация и
-  задеплоенный commit из этого окружения не подтверждены — доступный
-  здесь SSH-ключ не прошёл аутентификацию для проверенных имён
-  пользователя. Детали: `docs/STAGE_10_STAGING_DEPLOYMENT.md`.
+- Stage 9 (VPS/PostgreSQL/Nginx/DNS/TLS/backup/monitoring) и Stage 10
+  staging (YooKassa Sandbox controlled acceptance) — **COMPLETE**, см.
+  `docs/YAAM_PROJECT_MEMORY.md` за полной evidence-таблицей. Server-side
+  SSH-verification конкретно ИЗ ЭТОГО окружения агента остаётся
+  отдельным, не блокирующим общий статус пунктом (`docs/
+  STAGE_10_STAGING_DEPLOYMENT.md`).
+- **Stage 11A (safe frontend → PostgreSQL staging API integration):
+  COMPLETE.** Явный, обратимый staging-режим (`?yaam_staging_api=1`,
+  подробности — `docs/YAAM_PROJECT_MEMORY.md`) добавлен в
+  `client/js/api.js`; публичный demo-default не изменён. Backend
+  contract audit не нашёл расхождений, требующих правок backend.
+  Read-only verification против живого `api-pg.yaam.su` подтвердила
+  корректный CORS. Полный браузерный E2E через staging + YooKassa
+  Sandbox — **Stage 11B, отдельная задача Codex, ещё не выполнена.**
 
 ## Что фактически завершено
 
@@ -84,6 +92,12 @@
 - Real iPhone/Safari verification (не через WebKit-движок desktop) —
   отдельный открытый пункт, логотип на Android этим не затронут (см.
   `docs/CROSS_DEVICE_COMPATIBILITY.md`).
+- **Stage 11B — controlled browser E2E acceptance (Codex):** frontend
+  staging mode готов на уровне кода и покрыт тестами, но полный
+  браузерный сценарий frontend → staging → PostgreSQL → YooKassa Sandbox
+  → webhook → order status → cancellation/refund ещё не пройден целиком
+  через реальный браузер. Read-only verification (CORS, health) сделана
+  в Stage 11A; создание заказа/оплата — не выполнялись.
 
 ## Тестирование
 
