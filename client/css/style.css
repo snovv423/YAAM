@@ -79,6 +79,10 @@
   .pname{font-size:12px;font-weight:600;letter-spacing:.6px;color:rgba(255,255,255,.4);text-transform:uppercase;padding:0 13px}
   @keyframes scrollx{from{transform:translate3d(0,0,0)}to{transform:translate3d(-50%,0,0)}}
   .hit{display:inline-block;font-size:9.5px;font-weight:800;letter-spacing:.5px;color:#3a1c00;background:var(--amber);padding:2px 7px;border-radius:6px;margin-left:6px;vertical-align:middle;box-shadow:0 0 8px rgba(255,154,46,.45)}
+  /* Stage 11A: видимый маркер staging-режима (Codex E2E), не для обычных
+     посетителей — виден только при активном IS_STAGING_MODE (см. app.js). */
+  .stg-badge{display:inline-block;margin-top:6px;font-size:10px;font-weight:800;letter-spacing:.8px;color:#fff;background:rgba(120,120,130,.55);border:1px solid rgba(255,255,255,.35);padding:3px 9px;border-radius:999px}
+  .stg-badge[hidden]{display:none}
   .sheet-total{padding:14px 18px 2px;display:flex;justify-content:space-between;align-items:center;border-top:1px solid var(--gbord);margin-top:4px}
   .sheet-total span:first-child{font-size:14px;font-weight:600;color:var(--txt2)}
   .sheet-total span:last-child{font-size:24px;font-weight:800}

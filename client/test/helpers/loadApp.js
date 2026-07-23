@@ -13,6 +13,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const { webcrypto } = require('node:crypto');
+const { URL, URLSearchParams } = require('node:url');
 
 function makeFakeElement(id) {
   const listeners = {};
@@ -65,13 +66,20 @@ function makeFakeElement(id) {
   };
 }
 
-function createSandbox({ apiBaseUrl } = {}) {
+function createSandbox({ apiBaseUrl, locationSearch, locationHref } = {}) {
   const store = {};
   const localStorage = {
     getItem: (k) => (Object.prototype.hasOwnProperty.call(store, k) ? store[k] : null),
     setItem: (k, v) => { store[k] = String(v); },
     removeItem: (k) => { delete store[k]; },
     clear: () => { for (const k of Object.keys(store)) delete store[k]; },
+  };
+  const sessionStore = {};
+  const sessionStorage = {
+    getItem: (k) => (Object.prototype.hasOwnProperty.call(sessionStore, k) ? sessionStore[k] : null),
+    setItem: (k, v) => { sessionStore[k] = String(v); },
+    removeItem: (k) => { delete sessionStore[k]; },
+    clear: () => { for (const k of Object.keys(sessionStore)) delete sessionStore[k]; },
   };
 
   const elementCache = new Map();
@@ -93,6 +101,7 @@ function createSandbox({ apiBaseUrl } = {}) {
   const sandbox = {
     console,
     localStorage,
+    sessionStorage,
     document: documentStub,
     navigator: {
       vibrate() {},
@@ -108,7 +117,13 @@ function createSandbox({ apiBaseUrl } = {}) {
     Uint8Array,
     btoa: (value) => Buffer.from(value, 'binary').toString('base64'),
     history: { pushState() {}, replaceState() {} },
-    location: { href: '' },
+    // Реальные URL/URLSearchParams (Node built-ins) — Stage 11A staging-
+    // activation логика в api.js их использует; без них resolveApiBaseUrl()
+    // просто безопасно откатывается на demo (try/catch), но чтобы РЕАЛЬНО
+    // протестировать саму активацию, они здесь нужны настоящими.
+    URL,
+    URLSearchParams,
+    location: { href: locationHref || ('https://yaam.su/' + (locationSearch || '')), search: locationSearch || '' },
     requestAnimationFrame: (fn) => fn(),
     AbortController,
     setInterval, clearInterval, setTimeout, clearTimeout,

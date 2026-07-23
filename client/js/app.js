@@ -1918,6 +1918,15 @@ function voteTouchEnd(){
   if(el)el.addEventListener('input',saveCartState);
 });
 
+// Stage 11A: staging-режим виден только тестировщику (?yaam_staging_api=1),
+// обычные посетители demo-сайта никогда его не видят — IS_STAGING_MODE
+// остаётся false, если window.YAAM_API_BASE_URL/query/sessionStorage не
+// задавали staging явно (см. resolveApiBaseUrl() в api.js).
+if(typeof IS_STAGING_MODE!=='undefined'&&IS_STAGING_MODE){
+  const stgBadge=document.getElementById('stgBadge');
+  if(stgBadge)stgBadge.hidden=false;
+}
+
 renderList();
 tryRestoreSession();
 initIntroLayerFX();
