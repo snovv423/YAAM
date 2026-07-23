@@ -585,6 +585,18 @@ function normalizeOrderSnapshotItems(items){
     q:Number(item?.qty??item?.q??0),
   })).filter(item=>item.n&&Number.isFinite(item.p)&&Number.isInteger(item.q)&&item.q>0);
 }
+// Stage 11A follow-up: серверный payment_expires_at/paymentExpiresAt —
+// абсолютный ISO-timestamp, всегда UTC (см. orderService.js на бэкенде).
+// Возвращает null, а не Date.now()-fallback: отсутствие серверного значения
+// (старый backend без этого поля, либо заказ не в awaiting_payment) должно
+// оставлять qrDeadline как есть — ЕДИНСТВЕННЫЙ fallback на клиентский
+// QR_TIMER_SEC остаётся в startQRTimer() ниже, только если дедлайна вообще
+// никогда не было.
+function parseServerDeadline(value){
+  if(typeof value!=='string'||!value)return null;
+  const parsed=Date.parse(value);
+  return Number.isFinite(parsed)?parsed:null;
+}
 function parseServerCreatedAt(value,fallback){
   if(typeof value==='number'&&Number.isFinite(value))return value;
   if(typeof value==='string'){
@@ -634,6 +646,12 @@ async function applyRecoveredOrder(result,credentials,{fallbackContext}={}){
   currentOrderRestaurantId=safeContext.restaurantId||null;
   currentOrderItems=normalizeOrderSnapshotItems(safeContext.items);
   orderCreatedAtMs=parseServerCreatedAt(safeContext.createdAt,credentials.submittedAt||credentials.createdAt);
+  // Единая точка входа и для СВЕЖЕГО заказа (createOrder), и для recover/exact
+  // replay — оба пути проходят через applyRecoveredOrder(). Дедлайн приходит
+  // от сервера (payment.paymentExpiresAt) и должен браться отсюда ОДИНАКОВО в
+  // обоих случаях: recover/replay не создаёт новый дедлайн просто потому, что
+  // сервер сам никогда не меняет уже выданный (см. Stage 11A follow-up ADR).
+  if(payment?.paymentExpiresAt)qrDeadline=parseServerDeadline(payment.paymentExpiresAt);
   const activeStateSaved=saveOrderState();
   // Только после надёжного active snapshot удаляем recovery capability.
   if(activeStateSaved)clearPendingOrderCredentials(credentials);
@@ -642,7 +660,7 @@ async function applyRecoveredOrder(result,credentials,{fallbackContext}={}){
   await loadOrderRestaurant(currentOrderRestaurantId);
   return order;
 }
-async function showRecoveredOrder(order){
+function showRecoveredOrder(order){
   if(order.status!=='awaiting_payment'){
     startOrderPolling();
     return;
@@ -650,7 +668,11 @@ async function showRecoveredOrder(order){
   document.getElementById('qr-amt').textContent=(currentOrderAmount||0)+' ₽';
   document.getElementById('cartbar').style.display='none';
   renderQRPaymentOptions();
-  drawQR();await startNewQRTimer();go('qr');startOrderPollingQuiet();
+  // startQRTimer() (не startNewQRTimer()) — qrDeadline уже выставлен в
+  // applyRecoveredOrder() из серверного payment.paymentExpiresAt, здесь его
+  // нельзя перезатирать свежим клиентским Date.now()+QR_TIMER_SEC: и для
+  // реально нового заказа, и для recover/replay значение уже верное.
+  drawQR();startQRTimer();go('qr');startOrderPollingQuiet();
 }
 
 async function recoverSubmittedOrder(credentials){
@@ -1388,6 +1410,12 @@ async function retryPaymentFlow(){
     const completedKey=currentRetryIdempotencyKey;
     const{payment}=await api.retryPayment(currentOrderCode,currentOrderAccessToken,completedKey);
     currentPaymentUrl=payment?.paymentUrl||null;
+    // retry — явно утверждённая новая платёжная попытка (новый providerPaymentId),
+    // сервер выдаёт под неё СВОЙ новый payment.paymentExpiresAt (см. Stage 11A
+    // follow-up) — используем его, а не старый qrDeadline. Fallback на свежий
+    // клиентский дедлайн — только если backend почему-то не прислал значение
+    // (совместимость со старой версией сервера), это ВСЁ РАВНО новая попытка.
+    qrDeadline=parseServerDeadline(payment?.paymentExpiresAt)||(Date.now()+QR_TIMER_SEC*1000);
     currentRetryIdempotencyKey=null;
     if(!await saveOrderStateSafely()){
       // Сервер уже мог создать платёж. Сохраняем ключ хотя бы в памяти, чтобы
@@ -1398,7 +1426,7 @@ async function retryPaymentFlow(){
     const sum=currentOrderAmount||totals().sum;
     document.getElementById('qr-amt').textContent=sum+' ₽';
     renderQRPaymentOptions();
-    drawQR();await startNewQRTimer();go('qr'); // новая попытка оплаты после payment_failed — новый providerPaymentId, значит и новый дедлайн
+    drawQR();startQRTimer();go('qr');
   }catch(err){
     // 4xx (кроме rate limit) — сервер однозначно отклонил этот ключ; следующий
     // ручной тап получает новый. При сети/429/5xx исход неизвестен, поэтому
@@ -1423,10 +1451,14 @@ async function recoverRetryPaymentPresentation(notifyUser=false){
     try{
       const{payment}=await api.retryPayment(currentOrderCode,currentOrderAccessToken,recoveryKey);
       currentPaymentUrl=payment?.paymentUrl||null;
-      // Ответ исходного retry мог потеряться до создания нового клиентского
-      // дедлайна. Серверного payment_expires_at пока нет, поэтому для
-      // восстановленной demo/pre-production попытки начинаем окно заново.
-      qrDeadline=Date.now()+QR_TIMER_SEC*1000;
+      // Тот же provider_idempotency_key (recoveryKey) — это восстановление
+      // УЖЕ существующей попытки после потерянного HTTP-ответа, а не новая
+      // попытка (см. Stage 11A follow-up: сервер финализирует retry ровно
+      // один раз и возвращает тот же payment.paymentExpiresAt при повторном
+      // вызове с тем же ключом). Использовать серверное значение — обязательно,
+      // придумывать новый клиентский дедлайн здесь нельзя: иначе именно
+      // потеря HTTP-ответа обнуляла бы уже идущий отсчёт.
+      qrDeadline=parseServerDeadline(payment?.paymentExpiresAt)||qrDeadline||(Date.now()+QR_TIMER_SEC*1000);
       currentRetryIdempotencyKey=null;
       if(!await saveOrderStateSafely()){
         currentRetryIdempotencyKey=recoveryKey;
@@ -1522,6 +1554,14 @@ function renderRefundLine(refundStatus,amount){
 // явное состояние вместо неопределённого экрана (раньше этот статус вообще
 // не обрабатывался ни одной веткой ниже).
 function renderAwaitingPayment(order){
+  // Каждый polling-тик подтверждает актуальный серверный дедлайн этой же
+  // попытки (сервер его никогда не меняет — см. Stage 11A follow-up), это не
+  // "продление": значение либо совпадает с уже известным, либо заполняет
+  // qrDeadline, если он ещё не был известен в этой вкладке.
+  if(order.payment_expires_at){
+    const parsed=parseServerDeadline(order.payment_expires_at);
+    if(parsed)qrDeadline=parsed;
+  }
   showStatusSpinner(false);
   document.getElementById('st-progress').style.display='none';
   document.getElementById('st-state').textContent=`Заказ ${order.public_code} создан`;

@@ -226,8 +226,23 @@ CREATE TABLE IF NOT EXISTS payment_presentations (
   payment_id INTEGER PRIMARY KEY REFERENCES payments(id) ON DELETE CASCADE,
   payment_url TEXT,
   qr_payload TEXT,
+  -- Stage 11A follow-up: неизменяемый серверный срок оплаты. Ставится РОВНО
+  -- один раз, в момент INSERT (anchored на payments.created_at — момент
+  -- начала ИМЕННО ЭТОЙ попытки, до сетевого вызова провайдера, не момент
+  -- получения ответа), и никогда не обновляется (см. ON CONFLICT в
+  -- orderService.js — expires_at сознательно исключён из DO UPDATE SET).
+  -- NULL — легитимное значение для строк, вставленных до этого изменения
+  -- (backward-compatible; frontend откатывается на клиентский таймер).
+  expires_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+-- Идемпотентно применяется и к уже существующей (staging) БД, и к свежей —
+-- на свежей это no-op (колонка уже в CREATE TABLE выше), на уже
+-- задеплоенной staging-БД реально добавляет колонку. Настоящих ALTER TABLE
+-- в этом проекте раньше не было (не требовались — миграции применялись до
+-- существования живой БД); здесь она нужна впервые именно потому, что
+-- staging уже реально развёрнут (Stage 9/10) и живёт с прежней схемой.
+ALTER TABLE payment_presentations ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
 
 -- =========================================================================
 -- payment_initial_attempts

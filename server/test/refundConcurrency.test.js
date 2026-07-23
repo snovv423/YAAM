@@ -319,8 +319,8 @@ test('provider_idempotency_key возврата никогда не попада
   assert.equal(dto.refund_status, 'processing');
   assert.equal(JSON.stringify(dto).includes('provider_idempotency_key'), false);
   assert.deepEqual(Object.keys(dto).sort(), [
-    'estimated_ready_minutes', 'fulfillment_type', 'items_total', 'public_code',
-    'rating', 'refund_status', 'restaurant_phone', 'status', 'status_updated_at',
+    'estimated_ready_minutes', 'fulfillment_type', 'items_total', 'payment_expires_at',
+    'public_code', 'rating', 'refund_status', 'restaurant_phone', 'status', 'status_updated_at',
   ]);
 });
 

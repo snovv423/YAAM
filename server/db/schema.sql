@@ -157,6 +157,11 @@ CREATE TABLE IF NOT EXISTS payment_presentations (
   payment_id INTEGER PRIMARY KEY REFERENCES payments(id) ON DELETE CASCADE,
   payment_url TEXT,
   qr_payload TEXT,
+  -- Stage 11A follow-up: неизменяемый серверный срок оплаты, тот же принцип,
+  -- что и в PostgreSQL-схеме (см. комментарий там). Никакой ALTER TABLE
+  -- здесь не нужен — нет живой SQLite production БД со старыми строками;
+  -- локальная/тестовая БД пересоздаётся npm run seed.
+  expires_at TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

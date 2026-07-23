@@ -12,6 +12,12 @@ const orderEvents = new EventEmitter();
 
 const RESTAURANT_RESPONSE_WINDOW_SEC = 180;
 const RATING_ELIGIBLE_STATUS = 'delivered';
+
+// Stage 11A follow-up (payment deadline HIGH blocker) — тот же принцип, что
+// PostgreSQL-версия: утверждённый срок оплаты YAAM — 15 минут, серверный и
+// неизменяемый (payment_presentations.expires_at), anchored на
+// payments.created_at.
+const PAYMENT_DEADLINE_MINUTES = 15;
 const initialAttemptInFlight = new Map();
 const retryAttemptInFlight = new Map();
 const refundAttemptInFlight = new Map();
@@ -204,13 +210,18 @@ function normalizeRuPhone(raw) {
 function paymentResultFromRow(paymentRow) {
   if (!paymentRow || !paymentRow.provider_payment_id) return null;
   const presentation = db.prepare(`
-    SELECT payment_url, qr_payload FROM payment_presentations WHERE payment_id = ?
+    SELECT payment_url, qr_payload, expires_at FROM payment_presentations WHERE payment_id = ?
   `).get(paymentRow.id);
   if (!presentation) return null;
   return {
     providerPaymentId: paymentRow.provider_payment_id,
     paymentUrl: presentation.payment_url || null,
     qrPayload: presentation.qr_payload || null,
+    // Stage 11A follow-up — тот же принцип, что PostgreSQL-версия: неизменяемый
+    // серверный срок оплаты, ISO-timestamp, NULL для legacy-строк без него.
+    paymentExpiresAt: presentation.expires_at
+      ? new Date(`${presentation.expires_at.replace(' ', 'T')}Z`).toISOString()
+      : null,
   };
 }
 
@@ -291,12 +302,14 @@ function finalizeInitialAttempt(paymentRowId, payment) {
       throw initialPaymentInvariant('не удалось финализировать первоначальный платёж');
     }
     db.prepare(`
-      INSERT INTO payment_presentations (payment_id, payment_url, qr_payload)
-      VALUES (?, ?, ?)
+      INSERT INTO payment_presentations (payment_id, payment_url, qr_payload, expires_at)
+      VALUES (?, ?, ?, (
+        SELECT datetime(created_at, '+' || ? || ' minutes') FROM payments WHERE id = ?
+      ))
       ON CONFLICT(payment_id) DO UPDATE SET
         payment_url = excluded.payment_url,
         qr_payload = excluded.qr_payload
-    `).run(paymentRowId, payment.paymentUrl || null, payment.qrPayload || null);
+    `).run(paymentRowId, payment.paymentUrl || null, payment.qrPayload || null, PAYMENT_DEADLINE_MINUTES, paymentRowId);
     const ready = db.prepare(`
       UPDATE payment_initial_attempts
       SET state = 'ready', updated_at = datetime('now')
@@ -379,14 +392,25 @@ const LATEST_REFUND_STATUS_SUBQUERY = `(
   ORDER BY rf.id DESC LIMIT 1
 ) AS latest_refund_status`;
 
+// Stage 11A follow-up — тот же принцип, что PostgreSQL-версия: читает уже
+// вставленный expires_at последней (по id) попытки оплаты заказа, не создаёт.
+const LATEST_PAYMENT_EXPIRES_AT_SUBQUERY = `(
+  SELECT pp.expires_at FROM payment_presentations pp
+  JOIN payments p ON p.id = pp.payment_id
+  WHERE p.order_id = o.id
+  ORDER BY p.id DESC LIMIT 1
+) AS payment_expires_at`;
+
 function getOrder(idOrCode) {
   const row = Number.isInteger(idOrCode)
     ? db.prepare(`
-        SELECT o.*, r.name AS restaurant_name, r.phone AS restaurant_phone, ${LATEST_REFUND_STATUS_SUBQUERY}
+        SELECT o.*, r.name AS restaurant_name, r.phone AS restaurant_phone,
+          ${LATEST_REFUND_STATUS_SUBQUERY}, ${LATEST_PAYMENT_EXPIRES_AT_SUBQUERY}
         FROM orders o JOIN restaurants r ON r.id = o.restaurant_id WHERE o.id = ?
       `).get(idOrCode)
     : db.prepare(`
-        SELECT o.*, r.name AS restaurant_name, r.phone AS restaurant_phone, ${LATEST_REFUND_STATUS_SUBQUERY}
+        SELECT o.*, r.name AS restaurant_name, r.phone AS restaurant_phone,
+          ${LATEST_REFUND_STATUS_SUBQUERY}, ${LATEST_PAYMENT_EXPIRES_AT_SUBQUERY}
         FROM orders o JOIN restaurants r ON r.id = o.restaurant_id WHERE o.public_code = ?
       `).get(idOrCode);
   if (!row) return null;
@@ -419,12 +443,16 @@ function toPublicOrderDTO(order) {
   const {
     public_code, status, status_updated_at, items_total,
     estimated_ready_minutes, restaurant_phone, fulfillment_type, rating,
-    latest_refund_status,
+    latest_refund_status, payment_expires_at,
   } = order;
   return {
     public_code, status, status_updated_at, items_total,
     estimated_ready_minutes, restaurant_phone, fulfillment_type, rating,
     refund_status: toPublicRefundStatus(latest_refund_status),
+    // Stage 11A follow-up — тот же принцип, что PostgreSQL-версия.
+    payment_expires_at: payment_expires_at
+      ? new Date(`${payment_expires_at.replace(' ', 'T')}Z`).toISOString()
+      : null,
   };
 }
 
@@ -436,6 +464,7 @@ function toPublicPaymentDTO(payment) {
   return {
     paymentUrl: payment.paymentUrl || null,
     qrPayload: payment.qrPayload || null,
+    paymentExpiresAt: payment.paymentExpiresAt || null,
   };
 }
 
@@ -852,12 +881,14 @@ function finalizeRetryAttempt(paymentRowId, payment) {
     `).run(payment.providerPaymentId, paymentRowId);
     if (finalized.changes !== 1) throw paymentInvariant('не удалось финализировать платёжную попытку');
     db.prepare(`
-      INSERT INTO payment_presentations (payment_id, payment_url, qr_payload)
-      VALUES (?, ?, ?)
+      INSERT INTO payment_presentations (payment_id, payment_url, qr_payload, expires_at)
+      VALUES (?, ?, ?, (
+        SELECT datetime(created_at, '+' || ? || ' minutes') FROM payments WHERE id = ?
+      ))
       ON CONFLICT(payment_id) DO UPDATE SET
         payment_url = excluded.payment_url,
         qr_payload = excluded.qr_payload
-    `).run(paymentRowId, payment.paymentUrl || null, payment.qrPayload || null);
+    `).run(paymentRowId, payment.paymentUrl || null, payment.qrPayload || null, PAYMENT_DEADLINE_MINUTES, paymentRowId);
     const retryReady = db.prepare(`
       UPDATE payment_retry_attempts
       SET state = 'ready', updated_at = datetime('now')
@@ -1360,4 +1391,5 @@ module.exports = {
   PAUSE_PRESETS_MIN,
   RESTAURANT_RESPONSE_WINDOW_SEC,
   AWAITING_PAYMENT_DEDUP_TTL_SEC,
+  PAYMENT_DEADLINE_MINUTES,
 };

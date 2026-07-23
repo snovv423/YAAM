@@ -373,6 +373,14 @@ function hashSecret(value) {
 
 const PROVIDER_NAME = process.env.PAYMENT_PROVIDER || 'mock';
 
+// Stage 11A follow-up (payment deadline HIGH blocker): утверждённый срок
+// оплаты YAAM — 15 минут, серверный и неизменяемый (см.
+// payment_presentations.expires_at). Anchored на payments.created_at —
+// момент начала ИМЕННО ЭТОЙ попытки (до сетевого вызова провайдера), не на
+// момент финализации presentation (иначе длительность сетевого round-trip
+// к провайдеру незаметно "съедала" бы часть срока).
+const PAYMENT_DEADLINE_MINUTES = 15;
+
 // ---------------------------------------------------------------------------
 // Wave 5 (createOrder) — та же граница изоляции, что описана выше для Wave 4:
 // orderAccessService.js/paymentService.js нельзя импортировать (SQLite/
@@ -702,7 +710,7 @@ async function createOrder({
 async function paymentResultFromRow(paymentRow, client = null) {
   if (!paymentRow || !paymentRow.provider_payment_id) return null;
   const rows = await db.query(
-    'SELECT payment_url, qr_payload FROM payment_presentations WHERE payment_id = $1',
+    'SELECT payment_url, qr_payload, expires_at FROM payment_presentations WHERE payment_id = $1',
     [paymentRow.id],
     client
   );
@@ -712,6 +720,9 @@ async function paymentResultFromRow(paymentRow, client = null) {
     providerPaymentId: paymentRow.provider_payment_id,
     paymentUrl: presentation.payment_url || null,
     qrPayload: presentation.qr_payload || null,
+    paymentExpiresAt: presentation.expires_at
+      ? new Date(presentation.expires_at).toISOString()
+      : null,
   };
 }
 
@@ -726,6 +737,19 @@ const LATEST_REFUND_STATUS_SUBQUERY = `(
   ORDER BY rf.id DESC LIMIT 1
 ) AS latest_refund_status`;
 
+// Stage 11A follow-up: тот же принцип корреляции, что и у
+// LATEST_REFUND_STATUS_SUBQUERY выше — читает уже вставленный (не создаёт)
+// expires_at последней по id (= самой свежей) попытки оплаты заказа. Именно
+// "последней", не "первой" — явно утверждённая новая attempt (retry) имеет
+// собственный, отдельный immutable deadline; polling всегда должен видеть
+// дедлайн ТЕКУЩЕЙ активной попытки, не более раннего исчерпанного payment_failed.
+const LATEST_PAYMENT_EXPIRES_AT_SUBQUERY = `(
+  SELECT pp.expires_at FROM payment_presentations pp
+  JOIN payments p ON p.id = pp.payment_id
+  WHERE p.order_id = o.id
+  ORDER BY p.id DESC LIMIT 1
+) AS payment_expires_at`;
+
 // Асинхронный аналог getOrder(idOrCode) из SQLite-версии — только числовой id
 // (единственная форма, нужная трём функциям этой волны; getOrder() в
 // оригинале также принимает public_code, но ни markPaymentFailed, ни
@@ -733,7 +757,8 @@ const LATEST_REFUND_STATUS_SUBQUERY = `(
 // что не нужно вызывающим этой волны).
 async function getOrder(orderId, client = null) {
   const rows = await db.query(
-    `SELECT o.*, r.name AS restaurant_name, r.phone AS restaurant_phone, ${LATEST_REFUND_STATUS_SUBQUERY}
+    `SELECT o.*, r.name AS restaurant_name, r.phone AS restaurant_phone,
+       ${LATEST_REFUND_STATUS_SUBQUERY}, ${LATEST_PAYMENT_EXPIRES_AT_SUBQUERY}
      FROM orders o JOIN restaurants r ON r.id = o.restaurant_id WHERE o.id = $1`,
     [orderId],
     client
@@ -1651,12 +1676,14 @@ async function finalizeInitialAttempt(paymentRowId, payment) {
       throw initialPaymentInvariant('не удалось финализировать первоначальный платёж');
     }
     await db.execute(
-      `INSERT INTO payment_presentations (payment_id, payment_url, qr_payload)
-       VALUES ($1, $2, $3)
+      `INSERT INTO payment_presentations (payment_id, payment_url, qr_payload, expires_at)
+       VALUES ($1, $2, $3, (
+         SELECT created_at + ($4 || ' minutes')::interval FROM payments WHERE id = $1
+       ))
        ON CONFLICT (payment_id) DO UPDATE SET
          payment_url = excluded.payment_url,
          qr_payload = excluded.qr_payload`,
-      [paymentRowId, payment.paymentUrl || null, payment.qrPayload || null],
+      [paymentRowId, payment.paymentUrl || null, payment.qrPayload || null, PAYMENT_DEADLINE_MINUTES],
       client
     );
     const ready = await db.execute(
@@ -1745,12 +1772,14 @@ async function finalizeRetryAttempt(paymentRowId, payment) {
     if (finalized.rowCount !== 1) throw paymentInvariant('не удалось финализировать платёжную попытку');
 
     await db.execute(
-      `INSERT INTO payment_presentations (payment_id, payment_url, qr_payload)
-       VALUES ($1, $2, $3)
+      `INSERT INTO payment_presentations (payment_id, payment_url, qr_payload, expires_at)
+       VALUES ($1, $2, $3, (
+         SELECT created_at + ($4 || ' minutes')::interval FROM payments WHERE id = $1
+       ))
        ON CONFLICT (payment_id) DO UPDATE SET
          payment_url = excluded.payment_url,
          qr_payload = excluded.qr_payload`,
-      [paymentRowId, payment.paymentUrl || null, payment.qrPayload || null],
+      [paymentRowId, payment.paymentUrl || null, payment.qrPayload || null, PAYMENT_DEADLINE_MINUTES],
       client
     );
     const retryReady = await db.execute(
@@ -1827,12 +1856,19 @@ function toPublicOrderDTO(order) {
   const {
     public_code, status, status_updated_at, items_total,
     estimated_ready_minutes, restaurant_phone, fulfillment_type, rating,
-    latest_refund_status,
+    latest_refund_status, payment_expires_at,
   } = order;
   return {
     public_code, status, status_updated_at, items_total,
     estimated_ready_minutes, restaurant_phone, fulfillment_type, rating,
     refund_status: toPublicRefundStatus(latest_refund_status),
+    // Stage 11A follow-up: неизменяемый серверный срок текущей попытки
+    // оплаты (payment_presentations.expires_at, см. LATEST_PAYMENT_
+    // EXPIRES_AT_SUBQUERY) — тот же ISO-timestamp на каждом poll/refresh,
+    // frontend вычисляет обратный отсчёт от него, не создаёт свой заново.
+    payment_expires_at: payment_expires_at
+      ? new Date(payment_expires_at).toISOString()
+      : null,
   };
 }
 
@@ -1841,6 +1877,10 @@ function toPublicPaymentDTO(payment) {
   return {
     paymentUrl: payment.paymentUrl || null,
     qrPayload: payment.qrPayload || null,
+    // Stage 11A follow-up: тот же неизменяемый ISO-timestamp, что и order
+    // DTO's payment_expires_at — присутствует уже в самом первом create/
+    // recover-ответе, до первого poll.
+    paymentExpiresAt: payment.paymentExpiresAt || null,
   };
 }
 
@@ -2645,6 +2685,7 @@ module.exports = {
   ADVANCE_MAP,
   RESTAURANT_RESPONSE_WINDOW_SEC,
   AWAITING_PAYMENT_DEDUP_TTL_SEC,
+  PAYMENT_DEADLINE_MINUTES,
   ActiveOrderConflictError,
   OrderCreationInputError,
   // Stage 1 (routes/postgresql/api.js)

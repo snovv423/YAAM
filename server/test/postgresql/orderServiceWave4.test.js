@@ -390,7 +390,11 @@ test('finalizeInitialAttempt: успешная финализация — paymen
     qrPayload: 'qr-1',
   });
 
-  assert.deepEqual(result, { providerPaymentId, paymentUrl: 'https://pay.example/1', qrPayload: 'qr-1' });
+  const expectedExpiresAt = new Date(new Date(payment.created_at).getTime() + 15 * 60 * 1000).toISOString();
+  assert.deepEqual(result, {
+    providerPaymentId, paymentUrl: 'https://pay.example/1', qrPayload: 'qr-1',
+    paymentExpiresAt: expectedExpiresAt,
+  });
 
   const paymentRows = await db.query('SELECT status, provider_payment_id FROM payments WHERE id = $1', [payment.id]);
   assert.equal(paymentRows[0].status, 'pending');
@@ -535,7 +539,11 @@ test('finalizeRetryAttempt: успешная финализация — payment 
     qrPayload: 'qr-r1',
   });
 
-  assert.deepEqual(result, { providerPaymentId: providerPaymentIdRetry1, paymentUrl: 'https://pay.example/r1', qrPayload: 'qr-r1' });
+  const expectedExpiresAt = new Date(new Date(payment.created_at).getTime() + 15 * 60 * 1000).toISOString();
+  assert.deepEqual(result, {
+    providerPaymentId: providerPaymentIdRetry1, paymentUrl: 'https://pay.example/r1', qrPayload: 'qr-r1',
+    paymentExpiresAt: expectedExpiresAt,
+  });
 
   const paymentRows = await db.query('SELECT status FROM payments WHERE id = $1', [payment.id]);
   assert.equal(paymentRows[0].status, 'pending');
