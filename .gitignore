@@ -2,3 +2,7 @@
 .vercel
 docs/*.pdf
 docs/reports/*.pdf
+.claude/settings.local.json
+.codex/
+output/
+tmp/
