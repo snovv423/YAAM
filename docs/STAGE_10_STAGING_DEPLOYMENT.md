@@ -52,7 +52,9 @@ commit/config/process ownership. PostgreSQL staging **развёрнут кем-
 
 | Component | Status |
 |---|---|
-| Code readiness | PASS |
+| Cross-device frontend deployment | PASS |
+| Real Android verification | PASS |
+| Stage 10 code readiness | PASS |
 | PostgreSQL local readiness | PASS |
 | Staging HTTPS reachability | PASS |
 | Server-side deployment verification | BLOCKED |
@@ -61,3 +63,6 @@ commit/config/process ownership. PostgreSQL staging **развёрнут кем-
 | YooKassa sandbox live smoke test | NOT PERFORMED |
 | Frontend staging API switch | NOT PERFORMED |
 | Production traffic | OFF |
+
+Краткая форма для статусных таблиц: **STAGING REACHABLE — SERVER-SIDE
+VERIFICATION PENDING**.
