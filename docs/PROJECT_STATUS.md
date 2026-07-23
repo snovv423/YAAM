@@ -1,65 +1,88 @@
 # YAAM — статус проекта
 
-Обновлено: 2026-07-11.
+Обновлено: 2026-07-23.
 
-## Последние коммиты
+## Версии и окружения
 
+- Ветка: `claude/yookassa-get-refund`.
+- Application baseline: `c9355173344b581f5958da120626bf62d4622b6f`
+  (`feat(payments): enable safe YooKassa sandbox flow`).
+- Последующие documentation commits не меняют runtime.
+- Frontend: `https://yaam.su` — GitHub Pages demo, `USE_API=false`.
+- Staging backend: `https://api-pg.yaam.su`.
+- Production traffic: **OFF**.
+- Stage 10: не начат.
+
+## Что фактически завершено
+
+### PostgreSQL и application assembly
+
+- PostgreSQL Migration Waves 1–7.
+- Production Switch Stages 1–8.
+- Stage 9 infrastructure и controlled staging acceptance.
+- Nginx/TLS, systemd lifecycle, health/readiness/liveness, trust proxy,
+  firewall, fail2ban и reboot survival.
+- PostgreSQL и backend слушают только loopback; наружу доступны HTTP/HTTPS.
+- Encrypted Timeweb S3 Cold offsite backup, restore drill и внешний monitoring.
+- Age recovery key имеет проверенный escrow вне VPS.
+- Rollback описан в `server/docs/postgresql-deployment-runbook.md`.
+
+### Orders and security
+
+- Capability `access_token` вместо доступа по одному public code.
+- Durable payment attempts и idempotency create/webhook/refund.
+- Concurrent customer cancel исправлен и проверен после staging deploy.
+- Amount/currency validation, canonical provider lookup и повторная доставка
+  webhook без duplicate side effects.
+- Refund states `requested → processing → succeeded | failed`.
+- Active order/cart restore, timers, rating и SQLite compatibility regression.
+
+### YooKassa Sandbox
+
+- Создан отдельный тестовый магазин.
+- Sandbox credentials хранятся только в защищённом staging environment.
+- `PAYMENT_PROVIDER=yookassa` включён только на staging.
+- `YOOKASSA_ENV=sandbox` и `test_` Secret Key проверяются fail-closed.
+- Authoritative webhook:
+  `POST https://api-pg.yaam.su/api/webhooks/payment`.
+- Sandbox API, card confirmation, webhook, idempotency и refund flow прошли
+  controlled technical acceptance.
+- Объекты провайдера проверяются как `test=true`.
+- Production магазин, договор, live credentials и реальные платежи не
+  использовались.
+
+## Что остаётся demo или не проверено
+
+- `https://yaam.su` не настроен на staging API; пользователи видят demo.
+- Production traffic не включён.
+- СБП в Sandbox не проверен и не должен считаться подтверждённым.
+- Требования 54-ФЗ, чеки и production fiscalization не проверены.
+- Production YooKassa onboarding/договор/live credentials не завершены.
+- Реальные рестораны и restaurant Telegram bot не подключены.
+- Юридические документы не проверены профильным юристом.
+- Safari/WebKit quality gate для полного production flow не закрыт.
+- UI no-emoji remediation ещё не выполнен; см.
+  `docs/NO_EMOJI_REMEDIATION.md`.
+
+## Тестирование
+
+В репозитории есть отдельные SQLite, PostgreSQL, concurrency, payment/provider,
+application assembly и frontend regression suites. Точные команды:
+
+```bash
+cd server
+npm test
+npm run test:postgresql
+
+cd ../client
+npm test
 ```
-0b77f2c Security hardening: phone validation, CORS allowlist, rate limiting
-ced7107 Payment screen and cart UX improvements
-d845500 Redesign restaurant/dish cards and payment screen, add automatic hit badge
-5f25435 Harden order validation and status recovery
-562183c Fix cart restore and paid order indicator
-e739ea4 Tune intro title neon and text wrap
-df946a3 Harden restaurant rating vote rules
-09d5f09 Fix active order restore priority
-525567b Harden checkout payment state recovery
-44bdd03 Add YAAM public order codes
-```
 
-Оба верхних коммита (`ced7107`, `0b77f2c`) запушены в `origin/main`, деплой GitHub Pages подтверждён успешным.
+Stage 9 и Sandbox acceptance подтверждают только staging, а не production.
 
-## Что готово
+## Следующий безопасный этап
 
-- **Клиентский флоу целиком**: выбор города/ресторана → меню → корзина → чекаут (доставка/самовывоз) → телефон/согласие на ПДн → оплата (QR + кнопка «Оплата с этого устройства») → статус заказа → рейтинг → голосование за отсутствующий ресторан.
-- **Визуал**: карточки ресторанов и блюд переработаны (компактнее, фото заметнее, единый стеклянный стиль), убрана ручная вкладка «Популярное».
-- **Бейдж «Хит»** — автоматический расчёт на backend (топ-3 блюда ресторана по проданным порциям среди успешно оплаченных заказов, порог 8 шт., пересчитывается на каждый запрос).
-- **Счётчик «уже заказали N раз»** — реальный агрегат по оплаченным заказам, не формула от рейтинга.
-- **Восстановление сессии**: активный заказ переживает refresh/закрытие вкладки, приоритет над корзиной; корзина без заказа — TTL 30 минут неактивности.
-- **Валидация заказа на backend**: `menuItemId`/цена/qty только из БД, телефон нормализуется к `+7XXXXXXXXXX` и валидируется на обеих сторонах.
-- **Rate limiting**: 10 запросов/5мин на создание заказа, 20/мин на оценку, с логированием попыток спама.
-- **CORS**: строгий allowlist (`yaam.su`, `www.yaam.su`), localhost — только вне продакшена.
-- **Rating/voting**: одна оценка на доставленный заказ, источник истины — backend.
-- **Экран оплаты**: пофикшены найденные интеграционным прогоном баги — неверный номер заказа в demo-режиме и неверная (захардкоженная) сумма возврата на экране отказа.
-- **Telegram-бот и внутренняя админка** — написаны и покрывают весь жизненный цикл заказа со стороны ресторана, но ни разу не подключались к реальному живому ресторану/боту.
-
-## Что находится только в demo
-
-Всё, что сейчас реально видно на `yaam.su` — это **чисто статический demo-режим** (`USE_API=false`, данные из `client/js/data.js`):
-- Рестораны, меню, фото — демо-данные, не реальные заведения.
-- Оплата — полностью имитируется в браузере (localStorage), деньги никуда не уходят.
-- Статусы заказа продвигаются кнопкой «Следующий статус →», а не реальным ботом/рестораном.
-- Список «Кого ждём» — статичные 3 записи (KFC, Домино'с Пицца, Пекарня «Хлебный двор»), голоса не сохраняются между сессиями/устройствами.
-
-Backend (`server/`) полностью реализован и протестирован локально, но **нигде не задеплоен** — ни на один реальный сервер, ни с одним реальным доменом кроме localhost при ручном тестировании.
-
-## Найденные ограничения (актуальные, не устранены)
-
-- **ЮKassa не реализована** — `YookassaProvider` явно кидает `not implemented`, есть только контракт и подробный комментарий-инструкция по подключению.
-- **Ни одного реального ресторана и его Telegram-бота не подключено** — механизм привязки (`connect_code`) существует, но не проверен на живых людях.
-- **Юридические документы** (оферта, политика ПДн, оплата/возврат) не проверялись профессиональным юристом.
-- **Нет автотестов** — вся верификация в проекте до сих пор ручная (Playwright по запросу), риск тихой регрессии в непроверенных участках при будущих правках.
-- **SQLite без бэкапов** — единственный файл `server/db/yaam.db`, нет cron/скрипта резервного копирования.
-- **Нет мониторинга/алертинга** production (Sentry и т.п.) — при реальном трафике ошибки будут не видны никому, пока не пожалуется пользователь.
-- **CORS/rate-limit протестированы только локально** — за реальным reverse-proxy (Nginx/Cloudflare) IP-адрес запроса (`req.ip`) может отличаться от реального клиента без `app.set('trust proxy', ...)` — не настроено, так как ещё нет деплоя за прокси.
-
-## Следующие этапы
-
-1. **VPS** — выбрать и поднять хостинг для `server/` (сейчас не выбран).
-2. **PostgreSQL** — архитектура подготовлена и частично реализована параллельно, изолированно от рабочего приложения: целевая схема (DDL) и async db-layer готовы, concurrency-стратегия спроектирована и доказана live-тестами против настоящего PostgreSQL, Wave 1 и Wave 2 переноса `orderService.js` завершены (7 функций перенесены и протестированы). Production-приложение **всё ещё полностью работает на SQLite** — переключение ещё не выполнено, не запланировано в текущих волнах. Точный актуальный статус и следующие шаги — см. `server/docs/postgresql-migration-status.md`.
-3. **internal YooKassa readiness for СБП capture=true** — получить реквизиты, реализовать `YookassaProvider` под утверждённую MVP-модель (только СБП, `capture=true`, см. `YAAM-payment-capture-model-ADR.pdf`; маркетплейс-схема со сплитом 7%/93%, см. комментарий в файле), протестировать реальные платежи и вебхуки. `capture=false`/банковские карты — future, вне текущего этапа.
-4. **Telegram-бот** — подключить первого реального ресторана через `connect_code`, проверить весь цикл управления заказом живыми людьми.
-5. **Cloudflare** (или аналог) — CDN/DDoS-защита перед реальным трафиком, плюс явная настройка `trust proxy` в Express под конкретную конфигурацию прокси.
-6. **Автотесты** — хотя бы базовый набор (backend unit/integration на заказы/оплату/rating, smoke e2e на клиенте), чтобы регрессии ловились без ручного прогона.
-7. **Бэкапы** — регулярный дамп БД (cron + хранение вне сервера).
-8. **Юрист** — финальная проверка оферты, политики ПДн, условий оплаты/возврата перед приёмом реальных денег.
+Закрыть открытые пункты в `docs/PROJECT_BACKLOG.md`: no-emoji remediation,
+production onboarding/СБП/54-ФЗ/legal readiness, первый реальный ресторан и
+отдельное решение о подключении frontend/production traffic. До такого решения
+`yaam.su` остаётся demo, а staging — изолированным.

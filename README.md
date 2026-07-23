@@ -1,42 +1,59 @@
 # YAAM
 
-Локальный агрегатор доставки еды для Чечни (Грозный, Аргун, Гудермес, Шали). Клиентский веб-сайт — без сборщиков и фреймворков, чистый HTML/CSS/JS; бэкенд — Node.js.
+Локальный агрегатор доставки еды для Чечни. Frontend — статический
+HTML/CSS/JS; backend — Node.js/Express с PostgreSQL staging и сохранённым
+SQLite compatibility path.
 
 ## Структура
 
 ```
-client/           клиентское приложение (то, что открывает пользователь), деплоится на GitHub Pages,
-                  сейчас доступен на кастомном домене yaam.su (см. client/CNAME)
+client/           GitHub Pages frontend; yaam.su сейчас работает в demo-режиме
   index.html      разметка экранов
   css/style.css   вся стилистика (Liquid Glass, тёмно-зелёный + янтарный)
   js/data.js      демо-данные: рестораны, меню, кандидаты на голосование
   js/api.js       мост к бэкенду (если window.YAAM_API_BASE_URL не задан — работает на demo-данных)
   js/app.js       логика: корзина (доставка/самовывоз на выбор), чекаут, QR-оплата, статусы заказа, голосование
   legal/          юридические страницы (оферта, политика ПДн, оплата/возврат, доставка и т.д.)
-server/           бэкенд: API, заказы, оплата (mock/ЮKassa), внутренняя админка, Telegram-бот ресторана
-docs/             юридические черновики и исходные PDF с продуктовыми решениями
+server/           API, PostgreSQL/SQLite paths, платежи, admin, bot, deploy
+docs/             актуальный статус, backlog, ADR/runbooks и audit history
 ```
 
 ## Запуск
 
-Клиент — статический сайт, работает без бэкенда (demo-данные из `client/js/data.js`):
+Frontend demo:
 
 ```
 cd client && python3 -m http.server 8080
 ```
 
-Бэкенд (реальные данные/заказы/оплата):
+SQLite/local backend:
 
 ```
 cd server && npm install && npm run seed && npm start
 ```
 
-## Как это соотносится с архивом решений
+Тесты:
 
-`docs/YAAM-polnyy-arhiv-v6.pdf` — источник истины по продуктовым решениям (~180 вопросов-ответов).
+```bash
+cd server
+npm test
+npm run test:postgresql
+```
 
-## Что дальше
+## Текущее состояние
 
-1. Реквизиты ИП, токен Telegram-бота, реальное подключение ЮKassa — см. блокеры в проекте.
-2. Хостинг для бэкенда+бота — не выбран.
-3. План первого трафика клиентов — главный нерешённый риск проекта (см. `docs/YAAM-dlya-otsenki.pdf`).
+- Frontend: `https://yaam.su`, demo, не связан со staging API.
+- PostgreSQL staging: `https://api-pg.yaam.su`.
+- YooKassa: только тестовый магазин/Sandbox на staging.
+- Webhook: `POST /api/webhooks/payment`.
+- Production traffic выключен; production onboarding YooKassa не завершён.
+- СБП и требования 54-ФЗ ещё не проверены.
+
+## Документация
+
+- [Правила Claude и архитектура](CLAUDE.md)
+- [Правила Codex](AGENTS.md)
+- [Актуальный статус](docs/PROJECT_STATUS.md)
+- [Открытый backlog](docs/PROJECT_BACKLOG.md)
+- [PostgreSQL deployment runbook](server/docs/postgresql-deployment-runbook.md)
+- [Payment safety](server/docs/postgresql-payment-safety.md)

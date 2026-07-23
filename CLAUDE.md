@@ -1,163 +1,149 @@
 # CLAUDE.md — YAAM
 
-Инструкции для Claude Code при работе в этом репозитории. Актуально на 2026-07-11.
+Главные проектные и исполнительские правила для Claude Code. Актуально на
+2026-07-23.
 
-## Что такое YAAM
+## Источники истины
 
-Локальный агрегатор доставки еды для Чечни (Грозный, Аргун, Гудермес, Шали). Ресторан платит комиссию 7% с суммы блюд с каждого оплаченного заказа; доставку организует сам ресторан — YAAM принимает оплату только за еду.
+Перед работой читать:
 
-## Архитектура
+1. `CLAUDE.md` — архитектурные и исполнительские правила;
+2. `docs/PROJECT_STATUS.md` — фактическое состояние;
+3. `docs/PROJECT_BACKLOG.md` — только незакрытые задачи;
+4. профильные документы в `server/docs/`.
 
-**Frontend** (`client/`) — статический сайт без сборщиков/фреймворков, чистый HTML/CSS/JS. Деплой на GitHub Pages, кастомный домен `yaam.su` (`client/CNAME`).
-- `index.html` — разметка всех экранов (SPA на классах `.screen`/`.active`, без роутера)
-- `css/style.css` — вся стилистика ("Liquid Glass": тёмно-зелёный + янтарный, backdrop-filter)
-- `js/data.js` — demo-данные (рестораны, меню, кандидаты на голосование)
-- `js/api.js` — мост к бэкенду; если `window.YAAM_API_BASE_URL` не задан — работает на demo-данных
-- `js/app.js` — вся логика: корзина, чекаут, оплата, статусы заказа, рейтинг, голосование
-- `legal/` — юридические страницы (оферта, ПДн, оплата/возврат, доставка, cookies, контакты)
+Исторические отчёты и PDF не заменяют эти документы. Application baseline
+текущего Sandbox-этапа — commit
+`c9355173344b581f5958da120626bf62d4622b6f`; последующие documentation-only
+commits не меняют runtime.
 
-**Backend** (`server/`) — Node.js + Express + `node:sqlite` (`DatabaseSync`, файл `server/db/yaam.db`).
-- `server.js` — точка входа, CORS, rate limiting подключены здесь
-- `config/cors.js` — allowlist origin
-- `routes/api.js` — публичный API + rate limiting
-- `routes/admin.js` — внутренняя админка (Basic Auth, НЕ портал самообслуживания ресторана)
-- `services/orderService.js` — вся бизнес-логика заказов (создание, статусы, рейтинг, таймауты)
-- `services/paymentService.js` + `services/paymentProviders/` — абстракция провайдера оплаты (`mock` сейчас, `yookassa` — заглушка)
-- `bot/` — Telegram-бот для управления заказами со стороны ресторана
-- `db/schema.sql`, `db/seed.js` — схема и демо-наполнение
+## Продукт
 
-## Demo vs real backend
+YAAM — локальный агрегатор доставки еды для Чечни. Ресторан платит комиссию
+7% с суммы блюд оплаченного заказа. Доставку выполняет ресторан; YAAM
+принимает оплату только за еду.
 
-Один и тот же клиентский код работает в двух режимах, переключение — через `window.YAAM_API_BASE_URL`:
-- **не задан** → `USE_API=false` — сайт работает на `data.js`, оплата и статусы имитируются в браузере (localStorage). **Это то, что сейчас реально работает на `yaam.su`** — backend нигде не задеплоен.
-- **задан** → `USE_API=true` — все действия идут через реальный `server/`.
+## Текущая архитектура
 
-При переключении на реальный backend правки на клиенте не нужны — контракт `api.js` уже рассчитан на оба режима.
+### Frontend
 
-## Формат номера заказа
+`client/` — статический HTML/CSS/JS без сборщиков и фреймворков. GitHub Pages,
+домен `https://yaam.su`.
 
-`YAAM-00001` — строится из внутреннего `id` (SQLite AUTOINCREMENT, `formatPublicCode()` в `orderService.js`), не случайное число: `YAAM-${String(id).padStart(5,'0')}`. В demo-режиме — свой счётчик в localStorage (`nextDemoOrderCode()`), поведение то же.
+- `window.YAAM_API_BASE_URL` не задан — demo-режим на `data.js`/localStorage.
+- `window.YAAM_API_BASE_URL` задан — запросы идут в backend.
+- Публичный `yaam.su` сейчас остаётся demo и не связан со staging API.
 
-## Payment flow
+### Backend
 
-Провайдер по умолчанию — `mock` (`PAYMENT_PROVIDER=mock`). Контракт (`paymentProviders/providerInterface.js`): `createPayment()` возвращает `{ providerPaymentId, qrPayload?, paymentUrl? }`.
+`server/` — Node.js + Express. Существуют два изолированных application path:
 
-**MVP-решение (ADR, см. `YAAM-payment-capture-model-ADR.pdf`):** на первом production launch YAAM — только СБП, модель оплаты `capture=true` (деньги списываются сразу; отказ ресторана/таймаут/допустимая отмена клиентом — через уже реализованный refund state machine). `capture=false` и двухстадийные карточные платежи сейчас не реализуются и не входят в MVP — рассматриваются только позже, отдельным ADR.
+- SQLite — legacy/local compatibility path;
+- PostgreSQL — staging/production-oriented path:
+  `server/services/postgresql/app.js` и `server/server.postgresql.js`.
 
-Экран оплаты (`#qr`) показывает:
-1. Основную кнопку **«Оплата с этого устройства»** — всегда видна; если у платежа есть `paymentUrl` — ведёт по ней (`window.location.href`), если нет (сейчас всегда, mock) — выполняет demo-оплату напрямую, с маленьким тегом **DEMO** над кнопкой.
-2. QR-код — второй способ (с другого телефона), декоративный (не настоящий сканируемый QR — в этом нет необходимости, пока нет реального провайдера).
-3. Кнопку «Отменить заказ» — работает и с `awaiting_payment`.
+PostgreSQL staging развёрнут на Timeweb VPS:
+`https://api-pg.yaam.su`. Nginx/TLS, systemd, PostgreSQL, offsite backup,
+restore drill и внешний monitoring проверены в рамках Stage 9. Production
+traffic выключен.
 
-Таймер на оплату — `QR_TIMER_SEC=600` (10 минут). Окно ожидания ответа ресторана — `RESTAURANT_RESPONSE_WINDOW_SEC=180` (3 минуты), после — автосвип (`sweepTimeouts()`, интервал 10 сек) переводит заказ в `timed_out` с реальным возвратом денег.
+### Payments
 
-Статусы заказа: `awaiting_payment → paid → awaiting_restaurant → accepted → preparing → courier → delivered`, терминальные "плохие": `payment_failed | declined | timed_out | cancelled`. У самовывоза нет шага `courier`.
+Провайдер выбирается только server-side через `PAYMENT_PROVIDER`.
 
-## Правила active order / cart restore
+- `mock` сохраняется для local/legacy regression;
+- `yookassa` разрешён только на staging с `YOOKASSA_ENV=sandbox`;
+- live credentials текущий код намеренно отклоняет fail-closed;
+- Secret Key хранится только в защищённом staging environment и никогда не
+  попадает во frontend, Git, PDF или логи.
 
-Приоритет: **активный заказ важнее корзины**. При заходе (`tryRestoreSession()`):
-1. Если есть активный заказ (`yaam_active_order` в localStorage) — восстанавливаем его экран, корзина НЕ трогается (в API-режиме её и не восстанавливаем вообще, пока активный заказ жив).
-2. Иначе — восстанавливаем корзину (если есть) как нижнюю панель «продолжить заказ» на главной, но **не открываем ресторан автоматически** — ручной вход на `yaam.su` без активного заказа всегда ведёт на главную.
+Authoritative webhook:
 
-**Корзина без завершённого заказа — TTL 30 минут** (`CART_TTL_MS`). Отсчёт от последнего изменения корзины (`savedAt`), не с первого добавления — активная сборка заказа не сбрасывается.
-
-Сумма для экранов с уже оформленным заказом (например, экран отказа) берётся из `currentOrderAmount` (источник истины — данные заказа: `order.items_total` с backend или сумма корзины на момент оформления), **никогда** из текущей клиентской корзины — та может быть уже пустой после refresh.
-
-## Правила рейтинга
-
-- Один оплаченный и доставленный заказ = одна оценка звёздами (1–5), один раз.
-- Источник истины — `order.rating` с backend, не локальный флаг (иначе после refresh форма оценки показалась бы повторно).
-- Рейтинг ресторана на карточке показывается только при `RATING_MIN_VOTES=5` и больше оценок.
-- Проверка `payments.status='succeeded'` — defense-in-depth перед тем, как разрешить оценку.
-
-## Правила orange/yellow active order dot
-
-Точка означает **«оплачен и реально в работе»**, не «есть заказ» и не «есть корзина»:
-- **ON**: `awaiting_restaurant`, `accepted`, `preparing`, `courier`.
-- **OFF**: `awaiting_payment`, `delivered`, `cancelled`, `declined`, `timed_out`, `payment_failed`, нет заказа, есть только корзина.
-
-## Что уже реализовано
-
-- Меню/корзина/чекаут (доставка/самовывоз), QR + «Оплата с этого устройства», статусы заказа с реальным polling (API-режим) и demo-эмуляцией.
-- Server-side валидация: `menuItemId`/цена/qty никогда не берутся от клиента напрямую, только из БД по проверенному `menuItemId`.
-- Нормализация и валидация телефона (РФ, `+7XXXXXXXXXX`) на клиенте и сервере, хранится нормализованный.
-- CORS allowlist (`yaam.su`/`www.yaam.su` по умолчанию, localhost только вне `NODE_ENV=production`).
-- Rate limiting: `POST /api/orders` — 10/5мин, `POST /api/orders/:code/rate` — 20/мин, с логированием попыток спама (IP/endpoint/время/UA).
-- Автоматический бейдж «Хит» — backend-расчёт (топ-3 блюда ресторана по проданным порциям среди успешно оплаченных заказов, порог 8 шт.), не ручной флаг.
-- Рейтинг, голосование за отсутствующие рестораны, TTL корзины, восстановление сессии.
-- Telegram-бот и админка написаны, но не подключены к реальному ресторану.
-
-## Что ещё осталось до production
-
-1. Backend нигде не задеплоен — только demo-режим живёт на `yaam.su`.
-2. ЮKassa не реализована (`YookassaProvider` — заглушка, кидает `not implemented`).
-3. Ни одного реального ресторана/бота не подключено.
-4. Юридические документы не проверены юристом.
-5. Нет автотестов (вся проверка — ручная, через Playwright, по требованию).
-6. Нет бэкапов SQLite, нет мониторинга/алертинга.
-
-Подробности и приоритеты — см. `docs/PROJECT_STATUS.md`.
-
-## PostgreSQL-миграция
-
-Приложение сейчас использует **только SQLite** — ничего не переключено, не
-задеплоено, не в production. PostgreSQL-код существует отдельно, изолированным
-набором файлов, не подключённым к рабочему приложению:
-
-- `server/db/postgresql/schema.sql` — целевая PostgreSQL-схема (DDL).
-- `server/db/postgresql/index.js` — PostgreSQL db-layer (`pg`, async
-  `transaction()`/`serializableTransaction()` API).
-- `server/services/postgresql/orderService.js` — поэтапный порт
-  `orderService.js`, волна за волной (Wave 1, Wave 2, ...).
-- `server/test/postgresql/` — live integration-тесты против настоящего
-  embedded PostgreSQL 16.14 (`npm run test:postgresql`, отдельно от `npm test`).
-- `server/docs/postgresql-migration-status.md` — **главный актуальный
-  трекер**: что сделано, что перенесено, какие риски, что дальше. Проверять
-  ЕГО, не эту секцию, для точного текущего состояния.
-- `server/docs/postgresql-concurrency-migration-matrix.md` — карта
-  concurrency-стратегии по каждому месту `db.immediateTransaction()`.
-
-Обязательные правила:
-
-- Никаких `if (process.env.DB === 'postgres')` внутри бизнес-логики —
-  SQLite- и PostgreSQL-реализации держать полностью раздельными файлами до
-  отдельного, явно утверждённого этапа переключения.
-- Никаких внешних network-вызовов (YooKassa и т.п.) внутри открытой
-  PostgreSQL-транзакции.
-- После каждой миграционной волны (`Wave N`) — обновлять
-  `server/docs/postgresql-migration-status.md` **тем же коммитом**, что и
-  код волны, не отдельным последующим.
-- Перед любой production-проверкой PostgreSQL-кода — изменения должны быть
-  закоммичены, запушены и реально задеплоены; не проверять на основе
-  локальных незакоммиченных правок.
-- После каждой coding-задачи по этой миграции — создавать PDF-отчёт (см.
-  общий процесс работы над этим треком, зафиксированный в истории задач).
-
-## Git-дисциплина (обязательно)
-
-**Никогда не коммитить и не пушить без явного подтверждения пользователя.** Делать изменения, тестировать, показывать `git diff`/`git status` — можно свободно. Коммит только по прямому «закоммить», пуш только по прямому «пушь». Не добавлять markdown-отчёты (`docs/reports/*.md`) в коммиты, если явно не попросили.
-
-## Команды запуска и тестирования
-
-```bash
-# Клиент (demo-режим, без бэкенда) — использовать НОВЫЙ порт при каждом тесте,
-# браузер агрессивно кэширует старые index.html/app.js/style.css на том же порту
-cd client && python3 -m http.server <новый_порт>
-
-# Бэкенд (реальные данные)
-cd server && npm install && npm run seed && npm start
-# опционально: DB_PATH=<путь к отдельной тестовой БД> для изолированного тестового прогона
-
-# Переключить клиент на реальный бэкенд (например, в консоли браузера до загрузки api.js,
-# или через page.addInitScript в Playwright):
-window.YAAM_API_BASE_URL = 'http://localhost:3000';
+```text
+POST /api/webhooks/payment
+https://api-pg.yaam.su/api/webhooks/payment
+Content-Type: application/json
 ```
 
-Тестирование — вручную через Playwright MCP (`browser_navigate`/`browser_click`/`browser_evaluate`), viewport 390×844 (iPhone) для мобильной проверки. Проверять: console errors = 0, отсутствие horizontal scroll, реальные клики (не только программные вызовы функций) на критичных кнопках.
+Webhook использует raw body только на этом route, ограничение размера и
+каноническую повторную проверку объекта через API YooKassa. Payment/refund
+transitions, idempotency и payment-attempt binding хранятся в PostgreSQL.
+Sandbox acceptance технически пройден; реальные деньги не принимались.
 
-## Важные ограничения и решения проекта
+СБП и требования 54-ФЗ в текущем Sandbox не проверены. Production YooKassa
+onboarding, договор и live credentials не завершены.
 
-- Никаких сборщиков/фреймворков на клиенте — сознательное решение, чтобы держать деплой предельно простым (просто статика на GitHub Pages).
-- `node:sqlite` вместо внешней БД — упрощение для текущей стадии; PostgreSQL-миграция готовится параллельно, изолированно от рабочего приложения (см. раздел «PostgreSQL-миграция» выше и `server/docs/postgresql-migration-status.md`).
-- Админка (`/admin`) — внутренний инструмент YAAM, не портал самообслуживания для ресторанов.
-- Демо и real-режим должны оставаться поведенчески идентичными для пользователя — расхождения между ними считаются багами (несколько таких уже находили и чинили).
+## Ключевые правила заказов
+
+- Публичный номер `YAAM-xxxxx` не является авторизацией; доступ к заказу
+  требует capability `access_token`.
+- `awaiting_payment` дедуплицируется 15 минут; явная отмена освобождает dedup.
+- Повторные create/cancel/webhook/refund операции должны быть идемпотентны.
+- Active order важнее корзины и восстанавливается после refresh/back/restart.
+- Корзина без заказа имеет TTL 30 минут от последнего изменения.
+- Rating разрешён один раз только для оплаченного и доставленного заказа.
+- SQLite и PostgreSQL paths нельзя незаметно смешивать в одном сервисе.
+
+## Правило: без emoji в UI
+
+YAAM должен выглядеть как современный премиальный продукт:
+
+- цветные emoji запрещены в кнопках, toast, уведомлениях, статусах,
+  placeholder и системных текстах;
+- иконки реализуются единым SVG-набором, CSS или допустимой типографикой;
+- допустимы текстовые символы `←`, `→`, `✓`, `★`, `+`;
+- новые изменения не должны добавлять emoji;
+- текущий remediation ещё не завершён: полная инвентаризация находится в
+  `docs/NO_EMOJI_REMEDIATION.md`.
+
+## Git-дисциплина
+
+- Перед любой задачей проверить branch, HEAD и `git status`.
+- Не менять и не скрывать существующие пользовательские изменения.
+- Нельзя `reset --hard`, `clean`, force-push или массовый `git add -A`.
+- Commit и push выполняются только по прямому разрешению пользователя.
+- Каждый commit focused; перед ним показать staged diff и проверить scope.
+- Payment/refund, schema/migration и deployment changes требуют тестов,
+  rollback и отдельного review.
+- Не коммитить секреты, credentials, cookies, приватные ключи, реальные IP
+  allowlists и персональные machine-local настройки.
+
+## Отчёты и локальные артефакты
+
+- Итоговые PDF сохранять в `output/pdf/` и не коммитить.
+- `output/`, `tmp/`, `.codex/` и `.claude/settings.local.json` — local-only.
+- Markdown audit history коммитится только по явному заданию.
+- Перед публикацией отчёта выполнять secret/PII scan и визуальный render QA.
+
+## Команды
+
+```bash
+# SQLite/local regression
+cd server
+npm test
+
+# PostgreSQL regression
+cd server
+npm run test:postgresql
+
+# Клиентские тесты
+cd client
+npm test
+
+# PostgreSQL staging application локально — только с безопасным env
+cd server
+npm run start:postgresql
+```
+
+Для browser-проверок использовать новый локальный порт и мобильный viewport
+390×844. Критичные действия проверять реальными кликами; console errors и
+horizontal overflow должны отсутствовать.
+
+## Production guardrails
+
+- `https://yaam.su` остаётся demo до отдельного решения о переключении.
+- Не включать production traffic и live YooKassa без отдельного этапа.
+- Не менять DNS, frontend API base или production env заодно с иной задачей.
+- Не удалять SQLite path/data до утверждённой миграции и rollback.
+- Юридические документы требуют профессиональной проверки до реальных денег.
+- Точные открытые блокеры перечислены только в `docs/PROJECT_BACKLOG.md`.
