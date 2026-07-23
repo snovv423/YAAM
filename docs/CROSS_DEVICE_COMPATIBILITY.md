@@ -3,6 +3,21 @@
 Обновлено: 2026-07-23. Дополняет `docs/PROJECT_STATUS.md`/`docs/PROJECT_BACKLOG.md`,
 не дублирует их.
 
+## REAL ANDROID USER VERIFICATION
+
+**Status: PASS**
+
+Ручная проверка опубликованного `https://yaam.su` выполнена владельцем проекта
+на реальном Android-устройстве после публикации фикса. Наблюдаемый результат:
+
+- logo glow отображается корректно;
+- layout корректен;
+- регрессий рендеринга не замечено;
+- сайт работает нормально.
+
+Это закрывает последний открытый пункт по Android из этого документа (см.
+историю расследования и фикс ниже — неизменны).
+
 ## Повод
 
 Реальный пользователь на Android-телефоне сообщил, что неоновое свечение
@@ -60,10 +75,10 @@ Desktop-based Chromium с mobile viewport не эмулирует реальны
 
 - **Полностью проверено** (реальные движки, не эмуляция): Chromium, WebKit,
   Firefox — desktop и mobile viewport/UA/device-scale-factor.
-- **Real-device verification**: реальный iPhone не проверялся напрямую в этой
-  задаче (WebKit engine — близкий, но не идентичный прокси для iOS Safari:
-  отличаются font rendering и GPU driver). Реальный Android — см. чек-лист
-  ниже.
+- **Real-device verification**: реальный Android подтверждён вручную (см.
+  "REAL ANDROID USER VERIFICATION" выше) — PASS. Реальный iPhone не
+  проверялся напрямую (WebKit engine — близкий, но не идентичный прокси для
+  iOS Safari: отличаются font rendering и GPU driver) — остаётся открытым.
 
 ## Fallback policy
 
@@ -79,15 +94,15 @@ Desktop-based Chromium с mobile viewport не эмулирует реальны
 
 - Chromium mobile-viewport-эмуляция и WebKit iPhone-viewport-эмуляция — это
   реальные движки рендеринга, но не реальные мобильные GPU/OS. Итоговое
-  подтверждение дефекта логотипа и его исправления на реальном Android —
-  отдельный шаг, см. чек-лист ниже.
+  подтверждение фикса логотипа на реальном Android получено (см. выше) —
+  этот пункт закрыт для Android.
 - Real iPhone/Safari verification вне Chromium/WebKit desktop-движков не
   проводилась в этой задаче — открытый пункт `docs/PROJECT_BACKLOG.md`
   ("Полный WebKit/iOS Safari прогон") этим не закрывается полностью.
 
-## Real-device verification checklist (для пользователя)
+## Real-device verification checklist (для пользователя) — выполнено для Android
 
-Если возможно, для подтверждения на реальном Android-устройстве нужно:
+Чек-лист использовался для подтверждения на реальном Android-устройстве:
 
 1. Модель устройства.
 2. Версия Android.
@@ -99,5 +114,6 @@ Desktop-based Chromium с mobile viewport не эмулирует реальны
 8. Открывался ли сайт в обычном браузере или во встроенном browser'е
    Telegram/WhatsApp.
 
-До получения такого подтверждения статус дефекта — **ANDROID CHROMIUM
-EMULATION PASS, REAL ANDROID USER VERIFICATION PENDING**.
+Итоговый статус: **ANDROID CHROMIUM EMULATION PASS, REAL ANDROID USER
+VERIFICATION PASS** (см. "REAL ANDROID USER VERIFICATION" в начале документа).
+Открытым остаётся только реальный iPhone (см. "Known limitations" выше).

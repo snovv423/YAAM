@@ -51,6 +51,17 @@
 - Production магазин, договор, live credentials и реальные платежи не
   использовались.
 
+### Frontend cross-device compatibility
+
+- Логотип: glow переведён с `filter:blur()` на `text-shadow` (устойчивее к
+  реальным мобильным GPU) по репорту пользователя об отсутствии свечения на
+  Android; visual parity подтверждён на Chromium/WebKit/Firefox
+  desktop+mobile-viewport.
+- **REAL ANDROID USER VERIFICATION: PASS.** Ручная проверка опубликованного
+  `https://yaam.su` владельцем проекта на реальном Android-устройстве —
+  glow, layout и работа сайта подтверждены без регрессий. Трассировка:
+  `docs/CROSS_DEVICE_COMPATIBILITY.md`.
+
 ## Что остаётся demo или не проверено
 
 - `https://yaam.su` не настроен на staging API; пользователи видят demo.
@@ -64,11 +75,9 @@
 - UI no-emoji remediation завершён; user-facing source scan и mutation proof
   защищают правило от регрессии. Трассировка:
   `docs/NO_EMOJI_REMEDIATION.md`.
-- Логотип: glow переведён с `filter:blur()` на `text-shadow` (устойчивее к
-  реальным мобильным GPU) по репорту пользователя об отсутствии свечения на
-  Android; visual parity подтверждён на Chromium/WebKit/Firefox
-  desktop+mobile-viewport. Real-device подтверждение на самом Android —
-  открыто. Трассировка и checklist: `docs/CROSS_DEVICE_COMPATIBILITY.md`.
+- Real iPhone/Safari verification (не через WebKit-движок desktop) —
+  отдельный открытый пункт, логотип на Android этим не затронут (см.
+  `docs/CROSS_DEVICE_COMPATIBILITY.md`).
 
 ## Тестирование
 
