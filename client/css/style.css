@@ -27,7 +27,17 @@
   .top{position:sticky;top:0;z-index:40;padding:24px 18px 14px;background:linear-gradient(180deg,rgba(8,36,23,.82),rgba(8,36,23,.10));backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px)}
   .hero-brand{text-align:center;position:relative}
   .wm{position:relative;display:inline-block;font-family:'Cormorant Garamond',serif;font-weight:500;font-size:60px;line-height:1;letter-spacing:4px;color:transparent}
-  .wm::before{content:"YAAM";position:absolute;left:0;top:0;width:100%;color:#fff;opacity:.5;filter:blur(7px);pointer-events:none;letter-spacing:inherit;font-weight:inherit}
+  /* Глоу раньше держался на filter:blur() внутри position:sticky-родителя
+     (.top), у которого есть свой backdrop-filter — та же категория хрупкой
+     вложенной filter/backdrop-filter-композиции, что уже один раз ломала
+     анимацию .partners в реальном Safari (см. комментарий у .partners ниже)
+     и не воспроизводится в десктопном/эмулируемом Chromium. На реальном
+     Android-телефоне пользователь зафиксировал отсутствие свечения при
+     рабочем iPhone — соответствует именно этому классу дефекта. Глоу
+     переведён на text-shadow: тот же приём уже безотказно работает в этом
+     файле для .wm.neon и .intro-title, не зависит от GPU-filter-compositing
+     и не участвует в вложенном stacking/backdrop-filter конфликте. */
+  .wm::before{content:"YAAM";position:absolute;left:0;top:0;width:100%;color:rgba(255,255,255,.16);text-shadow:0 0 6px rgba(255,255,255,.55),0 0 16px rgba(255,255,255,.4),0 0 34px rgba(255,255,255,.22);pointer-events:none;letter-spacing:inherit;font-weight:inherit}
   .wm::after{content:"YAAM";position:absolute;left:0;top:0;width:100%;color:rgba(255,255,255,.45);-webkit-text-stroke:.4px rgba(255,255,255,.2);pointer-events:none;letter-spacing:inherit;font-weight:inherit}
   .wm{cursor:pointer;-webkit-user-select:none;user-select:none}
   .wm.neon{color:#0a3a1c;animation:neon 2.4s linear}
@@ -239,14 +249,19 @@
   .kc span{font-size:10.5px;font-weight:700;color:var(--txt2);text-transform:uppercase;letter-spacing:.4px;margin-top:3px;display:block}
   .blockh{font-weight:800;font-size:15px;margin:20px 0 8px}
   .sostav{color:var(--txt2);font-weight:600;font-size:13.5px;line-height:1.5}
-  .dish-add{display:none;position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:480px;padding:12px 16px 22px;z-index:50}
+  /* viewport-fit=cover (index.html) включает safe-area — без учёта
+     env(safe-area-inset-bottom) эти fixed-bottom блоки утыкаются в home
+     indicator iPhone и жест-навигацию Android. calc()+env() как второе
+     объявление — на устройствах/браузерах без поддержки env() строка целиком
+     невалидна и браузер оставляет предыдущий padding-bottom без изменений. */
+  .dish-add{display:none;position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:480px;padding:12px 16px 22px;padding-bottom:calc(22px + env(safe-area-inset-bottom));z-index:50}
   .dish-add .row{display:flex;gap:11px;align-items:stretch}
   .dq{display:flex;align-items:center;gap:6px;border-radius:19px;padding:0 6px;background:var(--glass2);border:1px solid var(--gbord);box-shadow:var(--spec);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px)}
   .dq button{width:38px;height:100%;border:none;background:none;color:#fff;font-size:22px;font-weight:800;cursor:pointer}
   .dq span{min-width:22px;text-align:center;font-weight:800;font-size:16px;color:#fff}
   .dish-add .addbtn{flex:1;background:var(--amber);color:#3a1c00;border:none;border-radius:19px;padding:17px 19px;font-family:inherit;font-weight:800;font-size:15px;display:flex;align-items:center;justify-content:center;gap:8px;cursor:pointer;box-shadow:0 14px 34px rgba(255,154,46,.5)}
   .dish-add .addbtn:active{transform:scale(.98)}
-  .cartbar{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:480px;padding:12px 16px 22px;z-index:50;pointer-events:none}
+  .cartbar{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:480px;padding:12px 16px 22px;padding-bottom:calc(22px + env(safe-area-inset-bottom));z-index:50;pointer-events:none}
   .cartbtn{pointer-events:auto;width:100%;background:var(--amber);color:#3a1c00;border:none;border-radius:19px;padding:17px 19px;font-family:inherit;font-weight:800;font-size:15px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;box-shadow:0 14px 34px rgba(255,154,46,.5)}
   .cartbtn small{font-weight:600;font-size:13px;opacity:.8}
   /* checkout */
@@ -454,7 +469,7 @@
      динамически меняет видимую высоту экрана (layout viewport больше
      фактического), и ровно 100% иногда не хватает, чтобы спрятать штору
      полностью — край на пару пикселей вылезает из-под адресной строки. */
-  .sheet{position:fixed;bottom:0;left:50%;transform:translateX(-50%) translateY(calc(100% + 60px));width:100%;max-width:480px;z-index:61;border-radius:26px 26px 0 0;background:linear-gradient(180deg,rgba(14,38,24,.97),rgba(8,28,18,.99));border-top:1px solid var(--gbord);box-shadow:0 -20px 60px rgba(0,0,0,.5);transition:transform .52s cubic-bezier(.25,1,.2,1);max-height:85vh;overflow-y:auto;padding-bottom:28px}
+  .sheet{position:fixed;bottom:0;left:50%;transform:translateX(-50%) translateY(calc(100% + 60px));width:100%;max-width:480px;z-index:61;border-radius:26px 26px 0 0;background:linear-gradient(180deg,rgba(14,38,24,.97),rgba(8,28,18,.99));border-top:1px solid var(--gbord);box-shadow:0 -20px 60px rgba(0,0,0,.5);transition:transform .52s cubic-bezier(.25,1,.2,1);max-height:85vh;overflow-y:auto;padding-bottom:28px;padding-bottom:calc(28px + env(safe-area-inset-bottom))}
   .sheet.on{transform:translateX(-50%) translateY(0)}
   .sheet-handle{width:42px;height:4px;border-radius:999px;background:rgba(255,255,255,.25);margin:14px auto 18px}
   .sheet-title{font-weight:800;font-size:18px;padding:0 18px 14px;border-bottom:1px solid var(--gbord)}
@@ -485,7 +500,7 @@
   .qr-timer span{color:var(--amber);font-weight:800}
   /* дыхание логотипа */
   .wm::before{animation:wmBreath 5s ease-in-out infinite}
-  @keyframes wmBreath{0%,100%{opacity:.4;filter:blur(7px)}50%{opacity:.62;filter:blur(9px)}}
+  @keyframes wmBreath{0%,100%{opacity:.72}50%{opacity:1}}
   /* живой перелив фона */
   html::before{content:"";position:fixed;inset:-20%;z-index:-1;pointer-events:none;opacity:.5;
     background:radial-gradient(620px circle at 30% 20%,rgba(40,140,90,.18),transparent 60%),radial-gradient(560px circle at 75% 75%,rgba(20,120,80,.16),transparent 60%);

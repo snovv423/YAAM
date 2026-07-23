@@ -64,6 +64,11 @@
 - UI no-emoji remediation завершён; user-facing source scan и mutation proof
   защищают правило от регрессии. Трассировка:
   `docs/NO_EMOJI_REMEDIATION.md`.
+- Логотип: glow переведён с `filter:blur()` на `text-shadow` (устойчивее к
+  реальным мобильным GPU) по репорту пользователя об отсутствии свечения на
+  Android; visual parity подтверждён на Chromium/WebKit/Firefox
+  desktop+mobile-viewport. Real-device подтверждение на самом Android —
+  открыто. Трассировка и checklist: `docs/CROSS_DEVICE_COMPATIBILITY.md`.
 
 ## Тестирование
 

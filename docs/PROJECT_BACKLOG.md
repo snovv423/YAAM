@@ -60,6 +60,9 @@ demo. Stage 10, production onboarding и реальные платежи не н
 - Полный WebKit/iOS Safari прогон checkout, redirect/return, refresh/back,
   bfcache, polling и restore active order.
 - Не считать Chromium-only acceptance достаточным production gate.
+- Реальное Android-подтверждение логотипа (glow-фикс, `text-shadow` вместо
+  `filter:blur()`) — REAL ANDROID USER VERIFICATION PENDING, см.
+  `docs/CROSS_DEVICE_COMPATIBILITY.md`.
 
 ### Operational drills
 
