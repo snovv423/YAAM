@@ -11,7 +11,13 @@
 - Frontend: `https://yaam.su` — GitHub Pages demo, `USE_API=false`.
 - Staging backend: `https://api-pg.yaam.su`.
 - Production traffic: **OFF**.
-- Stage 10: не начат.
+- Stage 10: **PREFLIGHT PASSED — EXISTING STAGING DEPLOYMENT REQUIRES
+  SERVER-SIDE VERIFICATION.** Код/тесты/архитектура проверены и готовы;
+  staging на `api-pg.yaam.su` уже развёрнут отдельным независимым треком
+  (внешняя HTTPS-доступность подтверждена), но серверная конфигурация и
+  задеплоенный commit из этого окружения не подтверждены — доступный
+  здесь SSH-ключ не прошёл аутентификацию для проверенных имён
+  пользователя. Детали: `docs/STAGE_10_STAGING_DEPLOYMENT.md`.
 
 ## Что фактически завершено
 
