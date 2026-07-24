@@ -9,6 +9,7 @@
     "dev": "node --watch server.js",
     "start:postgresql": "node server.postgresql.js",
     "seed": "node db/seed.js",
+    "seed:postgresql": "node db/postgresql/seed.js",
     "backup": "node scripts/backup-db.js",
     "restore": "node scripts/restore-db.js",
     "test": "node --test test/*.test.js",
