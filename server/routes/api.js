@@ -127,13 +127,31 @@ function hitMenuItemIds(restaurantId) {
   return new Set(rows.map((r) => r.id));
 }
 
+// Публичный контракт ресторана — явный allowlist, а не SELECT *-спред (см.
+// зеркальный комментарий в routes/postgresql/api.js за полным обоснованием:
+// connect_code/telegram_chat_id — внутренние поля привязки Telegram-бота,
+// phone раскрывается клиенту только через order DTO ПОСЛЕ оформления заказа,
+// не на карточке ресторана заранее).
+const PUBLIC_RESTAURANT_FIELDS = [
+  'id', 'name', 'cuisine', 'photo_url', 'cities', 'address', 'hours',
+  'delivery_price', 'min_order', 'is_open', 'is_new', 'rating',
+  'rating_count', 'default_cook_minutes', 'orders_count',
+];
+
+function toPublicRestaurantDTO(row) {
+  const dto = {};
+  for (const field of PUBLIC_RESTAURANT_FIELDS) {
+    dto[field] = field === 'cities' ? JSON.parse(row.cities || '[]') : row[field];
+  }
+  return dto;
+}
+
 function restaurantWithMenu(restaurant) {
   const categories = db.prepare('SELECT * FROM categories WHERE restaurant_id = ? ORDER BY sort_order').all(restaurant.id);
   const items = db.prepare('SELECT * FROM menu_items WHERE restaurant_id = ? ORDER BY sort_order').all(restaurant.id);
   const hits = hitMenuItemIds(restaurant.id);
   return {
-    ...restaurant,
-    cities: JSON.parse(restaurant.cities || '[]'),
+    ...toPublicRestaurantDTO(restaurant),
     menu: categories.map((c) => ({
       id: c.id,
       name: c.name,
@@ -162,8 +180,8 @@ router.get('/restaurants', (req, res) => {
     ${ORDERS_COUNT_JOIN}
     GROUP BY r.id
   `).all()
-    .map((r) => ({ ...r, cities: JSON.parse(r.cities || '[]') }))
-    .filter((r) => !city || r.cities.includes(city));
+    .filter((r) => !city || JSON.parse(r.cities || '[]').includes(city))
+    .map(toPublicRestaurantDTO);
   res.json(all);
 });
 

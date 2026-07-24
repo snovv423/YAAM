@@ -174,6 +174,34 @@ async function hitMenuItemIds(restaurantId) {
   return new Set(rows.map((r) => r.id));
 }
 
+// Публичный контракт ресторана — явный allowlist, а не SELECT *-спред.
+// restaurants хранит и внутренние поля (connect_code — одноразовый код
+// привязки Telegram-бота, telegram_chat_id — внутренний chat id бота), у
+// которых нет причин когда-либо попадать неавторизованному клиенту; phone
+// сюда намеренно НЕ входит — он раскрывается клиенту только через order DTO
+// ПОСЛЕ оформления заказа (см. orderService.js: restaurant_phone в
+// getOrder()/toPublicOrderDTO), не на карточке/странице ресторана заранее
+// (см. client/js/app.js, комментарий над showRestaurantPhone()). Список
+// сверен с normalizeRestaurant() в client/js/app.js — все поля ниже реально
+// потребляются фронтендом (кроме default_cook_minutes, который клиенту пока
+// не нужен, но безвреден и явно допущен продуктовым решением этой задачи).
+// Allowlist специально предпочтён подходу "удалить одно поле после SELECT *"
+// — так любая новая внутренняя колонка в будущем по умолчанию НЕ уходит
+// наружу, пока её явно не добавят в этот список.
+const PUBLIC_RESTAURANT_FIELDS = [
+  'id', 'name', 'cuisine', 'photo_url', 'cities', 'address', 'hours',
+  'delivery_price', 'min_order', 'is_open', 'is_new', 'rating',
+  'rating_count', 'default_cook_minutes', 'orders_count',
+];
+
+function toPublicRestaurantDTO(row) {
+  const dto = {};
+  for (const field of PUBLIC_RESTAURANT_FIELDS) {
+    dto[field] = field === 'cities' ? JSON.parse(row.cities || '[]') : row[field];
+  }
+  return dto;
+}
+
 async function restaurantWithMenu(restaurant) {
   const categories = await db.query(
     'SELECT * FROM categories WHERE restaurant_id = $1 ORDER BY sort_order',
@@ -185,8 +213,7 @@ async function restaurantWithMenu(restaurant) {
   );
   const hits = await hitMenuItemIds(restaurant.id);
   return {
-    ...restaurant,
-    cities: JSON.parse(restaurant.cities || '[]'),
+    ...toPublicRestaurantDTO(restaurant),
     menu: categories.map((c) => ({
       id: c.id,
       name: c.name,
@@ -211,8 +238,8 @@ router.get('/restaurants', async (req, res) => {
       GROUP BY r.id
     `);
     const all = rows
-      .map((r) => ({ ...r, cities: JSON.parse(r.cities || '[]') }))
-      .filter((r) => !city || r.cities.includes(city));
+      .filter((r) => !city || JSON.parse(r.cities || '[]').includes(city))
+      .map(toPublicRestaurantDTO);
     res.json(all);
   } catch (err) {
     console.error('[api-postgresql] GET /restaurants failed:', err.message);
