@@ -160,15 +160,26 @@ function restaurantWithMenu(restaurant) {
   };
 }
 
-// orders_count — источник истины для "уже заказали N раз" на карточке ресторана
-// (см. .ordcnt в client/js/app.js). Считаются только заказы с реально успешной
-// оплатой (payments.status='succeeded') и статусом не из терминального "плохого"
-// списка — т.е. paid/awaiting_restaurant/accepted/preparing/courier/delivered.
-// Корзина и awaiting_payment сюда никогда не попадают: это агрегат по таблице
-// orders, а не что-то, что клиент может увеличить сам.
+// orders_count — источник истины для публичного счётчика заказов на карточке
+// ресторана (см. formatOrdersCount/.ordcnt в client/js/app.js).
+//
+// YAAM HQ Stage 1: считаются только реально завершённые заказы —
+// status='delivered' с оплатой, всё ещё succeeded на момент запроса
+// (payments.status переходит в 'refunded' при полном возврате — поэтому
+// доставленный, но затем полностью возвращённый заказ уже не проходит этот
+// EXISTS сам по себе, отдельного исключения не требуется). Корзина и
+// awaiting_payment сюда никогда не попадают: это агрегат по таблице orders,
+// а не что-то, что клиент может увеличить сам.
+//
+// Раньше здесь стоял NOT IN(...) — считал и ещё не доставленные, но уже
+// оплаченные заказы (awaiting_restaurant/accepted/preparing/courier). Это
+// было осознанным более ранним решением, но конфликтует с требованием "не
+// увеличивать счётчик на этапе принятия/приготовления" — изменено на строгое
+// status='delivered' по этому требованию (parity с PostgreSQL-путём,
+// routes/postgresql/api.js).
 const ORDERS_COUNT_JOIN = `
   LEFT JOIN orders o ON o.restaurant_id = r.id
-    AND o.status NOT IN ('cancelled','declined','timed_out','payment_failed','awaiting_payment')
+    AND o.status = 'delivered'
     AND EXISTS (SELECT 1 FROM payments p WHERE p.order_id = o.id AND p.status = 'succeeded')
 `;
 

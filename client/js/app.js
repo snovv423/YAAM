@@ -3,6 +3,10 @@ const SOLD_OUT={'2_0':true}; // демо: блюдо в стоп-листе (а�
 
 // Именованные тайминги/пороги — вместо магических чисел по всему файлу.
 const RATING_MIN_VOTES=5;       // рейтинг на карточке показываем только от стольки оценок
+// YAAM HQ Stage 1: бейдж NEW показываем, пока у ресторана меньше этого числа
+// реально завершённых (delivered) заказов; начиная с этого числа — вместо
+// NEW показываем счётчик заказов (см. formatOrdersCount ниже).
+const NEW_BADGE_MAX_ORDERS=10;
 const POLL_INTERVAL_MS=4000;    // как часто опрашиваем реальный статус заказа
 const QR_TIMER_SEC=600;         // на сколько даём времени на оплату по QR
 const CART_TTL_MS=30*60*1000;   // корзина без оформления заказа считается устаревшей через столько простоя
@@ -194,6 +198,27 @@ function selectCity(c){
   },200);
 }
 
+// Русское склонение слова "заказ" по числу — 1 заказ, 2 заказа, 5 заказов,
+// 11 заказов, 21 заказ, 24 заказа, 25 заказов (стандартное правило: последняя
+// цифра решает, ЕСЛИ предпоследние две не попадают в исключение 11-14).
+function pluralOrders(n){
+  const mod10=n%10, mod100=n%100;
+  if(mod100>=11&&mod100<=14)return'заказов';
+  if(mod10===1)return'заказ';
+  if(mod10>=2&&mod10<=4)return'заказа';
+  return'заказов';
+}
+// Компактное ru-RU форматирование счётчика заказов на публичной карточке.
+// До 1000 — точное число со склонением ("219 заказов"). От 1000 — округление
+// до тысяч с максимум одним знаком после запятой, и только если он не нулевой
+// ("12,4 тыс. заказов", но "100 тыс. заказов", не "100,0 тыс. заказов") —
+// осознанно не показываем бессмысленную точность вида "12,43 тыс.".
+function formatOrdersCount(n){
+  if(n<1000)return`${n} ${pluralOrders(n)}`;
+  const thousands=Math.round(n/100)/10;
+  const str=Number.isInteger(thousands)?String(thousands):String(thousands).replace('.',',');
+  return`${str} тыс. заказов`;
+}
 function cardHTML(r){
   const hasSrc=!!(r.photoUrl||r.im);
   const photo=hasSrc?`<img src="${r.photoUrl||U(r.im,900)}" loading="lazy" onerror="this.closest('.photo').classList.add('nophoto');this.remove()">`:'';
@@ -203,7 +228,7 @@ function cardHTML(r){
       ${photo}
       <div class="chip st ${r.open?'open':'shut'}"><span class="bdot"></span>${r.open?'Открыто':'Закрыто'}</div>
       ${r.votes>=RATING_MIN_VOTES?`<div class="chip rt">★ ${r.rate} · ${r.votes}</div>`:''}
-      <div class="info"><div class="itop"><div class="cname">${r.name}${r.open&&r.isNew?' <span class="newtag">NEW</span>':''}</div>${r.ordersCount?`<div class="ordcnt">уже заказали ${r.ordersCount} раз</div>`:''}</div><div class="ccui">${r.cui}</div>
+      <div class="info"><div class="itop"><div class="cname">${r.name}${r.open&&(r.ordersCount||0)<NEW_BADGE_MAX_ORDERS?' <span class="newtag">NEW</span>':''}</div>${(r.ordersCount||0)>=NEW_BADGE_MAX_ORDERS?`<div class="ordcnt">${formatOrdersCount(r.ordersCount)}</div>`:''}</div><div class="ccui">${r.cui}</div>
         <div class="cmeta"><span><b>мин.</b> ${r.min} ₽</span><span>${r.hours}</span></div></div>
     </div></div>`;
 }

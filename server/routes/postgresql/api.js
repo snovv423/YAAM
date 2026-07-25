@@ -222,9 +222,20 @@ async function restaurantWithMenu(restaurant) {
   };
 }
 
+// YAAM HQ Stage 1: публичный счётчик "N заказов" на карточке ресторана считает
+// только реально завершённые заказы — status='delivered' с оплатой, всё ещё
+// succeeded на момент запроса (payments.status переходит в 'refunded' при
+// полном возврате — см. orderService.js finalizeRefundSucceeded — поэтому
+// доставленный, но затем полностью возвращённый заказ уже не проходит этот
+// EXISTS сам по себе, отдельного исключения не требуется).
+// Раньше здесь стоял NOT IN(...) — считал и ещё не доставленные, но уже
+// оплаченные заказы (awaiting_restaurant/accepted/preparing/courier). Это
+// было осознанным более ранним решением (см. историю), но конфликтует с
+// требованием "не увеличивать счётчик на этапе принятия/приготовления" —
+// изменено на строгое status='delivered' по этому требованию.
 const ORDERS_COUNT_JOIN = `
   LEFT JOIN orders o ON o.restaurant_id = r.id
-    AND o.status NOT IN ('cancelled','declined','timed_out','payment_failed','awaiting_payment')
+    AND o.status = 'delivered'
     AND EXISTS (SELECT 1 FROM payments p WHERE p.order_id = o.id AND p.status = 'succeeded')
 `;
 
