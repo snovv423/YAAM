@@ -24,6 +24,7 @@ const crypto = require('node:crypto');
 
 const apiRoutes = require('../../routes/postgresql/api');
 const adminRoutes = require('../../routes/postgresql/admin');
+const { createHqRouter } = require('../../routes/hq');
 const { buildCorsOptions } = require('../../config/cors');
 const { createPauseExpiryScheduler, createOrderTimeoutScheduler, createRefundReconciliationScheduler } = require('./scheduler');
 const { createHealthCheck } = require('./health');
@@ -116,6 +117,21 @@ function validateAppEnv(env) {
 
   if (Boolean(env.ADMIN_USER) !== Boolean(env.ADMIN_PASS)) {
     errors.push('ADMIN_USER и ADMIN_PASS должны быть заданы вместе (сейчас задан только один из двух).');
+  }
+
+  // HQ Stage 2 — тот же fail-closed принцип, что у ADMIN_USER/ADMIN_PASS
+  // (см. выше): HQ_ADMIN_USER без HQ_ADMIN_PASSWORD_HASH (и наоборот) —
+  // явная ошибка конфигурации, а не "наполовину включённая" панель.
+  if (Boolean(env.HQ_ADMIN_USER) !== Boolean(env.HQ_ADMIN_PASSWORD_HASH)) {
+    errors.push('HQ_ADMIN_USER и HQ_ADMIN_PASSWORD_HASH должны быть заданы вместе (сейчас задан только один из двух).');
+  }
+  // Если владелец в принципе намерен включить HQ (задан HQ_ADMIN_USER) —
+  // HQ_SESSION_SECRET обязателен и не может быть коротким/пустым. Это не
+  // "функция выключена" (тогда просто не монтируем роутер, см. ниже) — это
+  // "включена наполовину", то есть небезопасно, поэтому здесь именно
+  // fail-closed отказ запуска, а не тихий пропуск.
+  if (env.HQ_ADMIN_USER && (typeof env.HQ_SESSION_SECRET !== 'string' || env.HQ_SESSION_SECRET.length < 32)) {
+    errors.push('При заданном HQ_ADMIN_USER переменная HQ_SESSION_SECRET обязательна и должна быть не короче 32 символов.');
   }
 
   // Production Switch — Stage 9: дословно тот же принцип, что уже
@@ -281,6 +297,9 @@ function createPostgresqlApp({
   corsOptions,
   adminUser,
   adminPass,
+  hqAdminUser,
+  hqAdminPasswordHash,
+  hqSessionSecret,
   botToken,
   botClient,
   onSignal,
@@ -290,6 +309,9 @@ function createPostgresqlApp({
 
   const resolvedAdminUser = adminUser !== undefined ? adminUser : env.ADMIN_USER;
   const resolvedAdminPass = adminPass !== undefined ? adminPass : env.ADMIN_PASS;
+  const resolvedHqAdminUser = hqAdminUser !== undefined ? hqAdminUser : env.HQ_ADMIN_USER;
+  const resolvedHqAdminPasswordHash = hqAdminPasswordHash !== undefined ? hqAdminPasswordHash : env.HQ_ADMIN_PASSWORD_HASH;
+  const resolvedHqSessionSecret = hqSessionSecret !== undefined ? hqSessionSecret : env.HQ_SESSION_SECRET;
   const resolvedBotToken = botToken !== undefined ? botToken : env.TELEGRAM_BOT_TOKEN;
   const resolvedPort = port !== undefined ? port : (Number(env.PG_HEALTH_PORT) || 3001);
   const resolvedHost = host !== undefined ? host : (env.PG_HEALTH_HOST || '127.0.0.1');
@@ -403,6 +425,22 @@ function createPostgresqlApp({
     }), adminRoutes);
   } else {
     console.warn('[app-postgresql] ADMIN_USER/ADMIN_PASS не заданы — админка недоступна, пока их не задать в .env');
+  }
+
+  // 8b. HQ — закрытая панель владельца (Stage 2). Fail-closed по точке
+  // монтирования, тем же принципом, что и /admin выше: без всех трёх
+  // переменных HQ вообще не существует в приложении (не 404 "по умолчанию",
+  // а маршрут физически не зарегистрирован). Собственный auth-слой внутри
+  // (express-session + scrypt), НЕ Basic Auth — см. services/hq/*.
+  if (resolvedHqAdminUser && resolvedHqAdminPasswordHash && resolvedHqSessionSecret) {
+    app.use('/hq', createHqRouter({
+      adminUser: resolvedHqAdminUser,
+      adminPasswordHash: resolvedHqAdminPasswordHash,
+      sessionSecret: resolvedHqSessionSecret,
+      isProduction: env.APP_ENV === 'production',
+    }));
+  } else {
+    console.warn('[app-postgresql] HQ_ADMIN_USER/HQ_ADMIN_PASSWORD_HASH/HQ_SESSION_SECRET не заданы — YAAM HQ недоступен, пока их не задать в .env');
   }
 
   // 9. dev/test-маршруты — единственный существующий (dev-confirm-payment)

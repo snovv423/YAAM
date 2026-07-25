@@ -1,5 +1,6 @@
 import path from 'node:path';
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import type { FullConfig } from '@playwright/test';
 import { startStaticServer } from './fixtures/static-server';
@@ -79,9 +80,25 @@ async function globalSetup(_config: FullConfig) {
 
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { createPostgresqlApp } = require(path.join(SERVER_DIR, 'services/postgresql/app.js'));
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { hashPassword } = require(path.join(SERVER_DIR, 'services/hq/passwordHash.js'));
+
+  // HQ Stage 2 — тестовый admin-аккаунт только для этого эфемерного прогона
+  // (пароль нигде не хранится и не используется повторно — генерируется
+  // заново на каждый запуск e2e; см. tests/hq-login-flow.spec.ts).
+  const hqAdminUser = 'owner';
+  const hqAdminPassword = `E2E-${crypto.randomBytes(9).toString('base64url')}`;
+  const hqAdminPasswordHash = await hashPassword(hqAdminPassword);
+  const hqSessionSecret = crypto.randomBytes(32).toString('hex');
 
   const appPort = await getFreePort();
-  const appInstance = createPostgresqlApp({ port: appPort, host: '127.0.0.1' });
+  const appInstance = createPostgresqlApp({
+    port: appPort,
+    host: '127.0.0.1',
+    hqAdminUser,
+    hqAdminPasswordHash,
+    hqSessionSecret,
+  });
   await appInstance.start(); // резолвится только после lifecycle.start() — бизнес-маршруты уже ready
 
   const apiBaseUrl = `http://127.0.0.1:${appPort}`;
@@ -96,6 +113,10 @@ async function globalSetup(_config: FullConfig) {
   // происходит уже после globalSetup).
   process.env.YAAM_E2E_API_BASE_URL = apiBaseUrl;
   process.env.YAAM_E2E_CLIENT_BASE_URL = clientBaseUrl;
+  // HQ Stage 2 (server-rendered, отдаётся тем же backend'ом, что и /api —
+  // не через client static-server) — см. tests/hq-login-flow.spec.ts.
+  process.env.YAAM_E2E_HQ_ADMIN_USER = hqAdminUser;
+  process.env.YAAM_E2E_HQ_ADMIN_PASSWORD = hqAdminPassword;
   // Только для DB-уровневого доказательства "не создано два заказа" в
   // tests/critical-order-smoke.spec.ts — публичный GET /api/restaurants
   // намеренно считает orders_count только по оплаченным заказам
