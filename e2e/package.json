@@ -1,0 +1,12 @@
+{
+  "name": "yaam-e2e",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Real browser E2E for YAAM (Playwright). Isolated from client/ (no bundler) and server/ (no browser deps in backend runtime tree). Runs entirely against a local, ephemeral embedded PostgreSQL + mock payment provider — never against staging/production.",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.48.0"
+  }
+}
