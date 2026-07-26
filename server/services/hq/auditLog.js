@@ -14,6 +14,9 @@ const ACTIONS = [
   'restaurant_resumed',
   'restaurant_archived',
   'restaurant_restored',
+  // Stage 4.1
+  'restaurant_published',
+  'restaurant_unpublished',
 ];
 
 // Единственные поля ресторана, которые вообще могут попасть в текст лога —

@@ -40,7 +40,9 @@ test('resolveSort: известные значения проходят как �
   assert.equal(resolveSort(''), 'name');
 });
 
-test('resolveStatusFilter: только 4 известных значения, иначе null (значит "без фильтра")', () => {
+test('resolveStatusFilter: только 6 известных значений (Stage 4.1: + draft/published), иначе null (значит "без фильтра")', () => {
+  assert.equal(resolveStatusFilter('draft'), 'draft');
+  assert.equal(resolveStatusFilter('published'), 'published');
   assert.equal(resolveStatusFilter('open'), 'open');
   assert.equal(resolveStatusFilter('closed'), 'closed');
   assert.equal(resolveStatusFilter('paused'), 'paused');

@@ -16,13 +16,16 @@ const db = require('../../db/postgresql');
 const crypto = require('node:crypto');
 const orderService = require('../postgresql/orderService');
 const { todayRangeUtc, PROJECT_TIMEZONE_OFFSET_MINUTES } = require('./dashboardMetrics');
+const lifecycle = require('./restaurantLifecycle');
 
-class ValidationError extends Error {
-  constructor(message) {
-    super(message);
-    this.statusCode = 400;
-  }
-}
+// ValidationError живёт в restaurantLifecycle.js (Stage 4.1) — переиспользуется
+// здесь же, а не дублируется второй копией класса, чтобы `err instanceof
+// ValidationError` работал одинаково независимо от того, откуда брошена
+// ошибка (guard из restaurantLifecycle или валидация формы ниже в этом
+// файле). Реэкспортируется под тем же именем — вызывающий код (routes/hq/
+// restaurants.js, тесты) продолжает импортировать ValidationError отсюда,
+// как и до Stage 4.1.
+const { ValidationError } = lifecycle;
 
 const PAGE_SIZE = 20;
 const ACTIVE_STATUSES = ['awaiting_payment', 'awaiting_restaurant', 'accepted', 'preparing', 'courier'];
@@ -42,7 +45,11 @@ const SORT_COLUMNS = {
   created: 'r.created_at DESC',
 };
 const DEFAULT_SORT = 'name';
-const STATUS_FILTERS = ['open', 'closed', 'paused', 'archived'];
+// Stage 4.1 — 'draft'/'published' добавлены к прежним 4 (задание, раздел 6:
+// "все; черновики; опубликованные; открытые; закрытые; на паузе;
+// архивированные" — ровно этот список, один статус-фильтр, без отдельных
+// чекбоксов публикации/операционного статуса).
+const STATUS_FILTERS = ['draft', 'published', 'open', 'closed', 'paused', 'archived'];
 
 function resolveSort(value) {
   return Object.prototype.hasOwnProperty.call(SORT_COLUMNS, value) ? value : DEFAULT_SORT;
@@ -60,7 +67,11 @@ function parsePage(value) {
 
 // Внутренний helper — единые условия WHERE + параметры, переиспользуются и
 // счётчиком total, и самой выборкой страницы (одна и та же логика фильтров,
-// не два места, которые могут разойтись).
+// не два места, которые могут разойтись). Условия ниже — та же таблица
+// состояний, что и services/hq/restaurantLifecycle.js:resolveLifecycleStatus,
+// но выраженная в SQL (нужна для фильтрации на уровне БД, не JS) — оба места
+// сверены тестами на согласованность (см. test/postgresql/
+// hqRestaurantLifecycleStage41.test.js).
 function buildListFilter({ search, city, status }) {
   const conditions = [];
   const params = [];
@@ -70,9 +81,11 @@ function buildListFilter({ search, city, status }) {
     conditions.push('r.archived_at IS NOT NULL');
   } else {
     conditions.push('r.archived_at IS NULL');
-    if (resolvedStatus === 'open') conditions.push('r.is_open = 1');
-    else if (resolvedStatus === 'paused') conditions.push('r.is_open = 0 AND r.paused_until IS NOT NULL');
-    else if (resolvedStatus === 'closed') conditions.push('r.is_open = 0 AND r.paused_until IS NULL');
+    if (resolvedStatus === 'draft') conditions.push('r.published_at IS NULL');
+    else if (resolvedStatus === 'published') conditions.push('r.published_at IS NOT NULL');
+    else if (resolvedStatus === 'open') conditions.push('r.published_at IS NOT NULL AND r.is_open = 1');
+    else if (resolvedStatus === 'paused') conditions.push('r.published_at IS NOT NULL AND r.is_open = 0 AND r.paused_until IS NOT NULL AND r.paused_until > NOW()');
+    else if (resolvedStatus === 'closed') conditions.push("r.published_at IS NOT NULL AND r.is_open = 0 AND (r.paused_until IS NULL OR r.paused_until <= NOW())");
   }
 
   const trimmedSearch = typeof search === 'string' ? search.trim() : '';
@@ -207,15 +220,88 @@ async function updateRestaurant(id, body) {
 }
 
 // ---------------------------------------------------------------------------
+// Публикация / снятие с публикации (Stage 4.1)
+// ---------------------------------------------------------------------------
+
+async function countMenuItems(restaurantId) {
+  const rows = await db.query('SELECT COUNT(*)::int AS n FROM menu_items WHERE restaurant_id = $1', [restaurantId]);
+  return rows[0].n;
+}
+
+// Публикация НЕ открывает ресторан автоматически (задание, раздел 8: "не
+// обязана автоматически открывать") — is_open не трогается, поэтому только
+// что опубликованный черновик (всегда is_open=0, см. createRestaurant)
+// становится видимым клиентам именно закрытым (состояние C), а не открытым.
+async function publishRestaurant(id) {
+  const restaurant = await getRestaurantById(id);
+  if (!restaurant) return null;
+  lifecycle.assertCanPublish(restaurant);
+  const updated = await db.execute(
+    'UPDATE restaurants SET published_at = NOW() WHERE id = $1 AND archived_at IS NULL AND published_at IS NULL RETURNING *',
+    [id],
+  );
+  return updated.rows[0] || null;
+}
+
+// Снятие с публикации ВСЕГДА закрывает и снимает паузу (задание, раздел 8:
+// "автоматически делает is_open=0; очищает активную паузу") — снятый с
+// публикации ресторан не может остаться формально "открытым и на паузе" для
+// клиентов, которые его уже не видят.
+async function unpublishRestaurant(id) {
+  const restaurant = await getRestaurantById(id);
+  if (!restaurant) return null;
+  lifecycle.assertCanUnpublish(restaurant);
+  const updated = await db.execute(
+    'UPDATE restaurants SET published_at = NULL, is_open = 0, paused_until = NULL WHERE id = $1 RETURNING *',
+    [id],
+  );
+  return updated.rows[0] || null;
+}
+
+// ---------------------------------------------------------------------------
+// Открытие / закрытие — вручную, бессрочно, ОТДЕЛЬНО от таймированной паузы
+// ниже (задание, раздел 9: "Открыть ресторан можно только если: он
+// опубликован; не архивирован; не на паузе").
+// ---------------------------------------------------------------------------
+
+async function openRestaurant(id) {
+  const restaurant = await getRestaurantById(id);
+  if (!restaurant) return null;
+  lifecycle.assertCanOpen(restaurant);
+  const updated = await db.execute('UPDATE restaurants SET is_open = 1 WHERE id = $1 RETURNING *', [id]);
+  return updated.rows[0] || null;
+}
+
+async function closeRestaurant(id) {
+  const restaurant = await getRestaurantById(id);
+  if (!restaurant) return null;
+  lifecycle.assertCanClose(restaurant);
+  const updated = await db.execute('UPDATE restaurants SET is_open = 0 WHERE id = $1 RETURNING *', [id]);
+  return updated.rows[0] || null;
+}
+
+// ---------------------------------------------------------------------------
 // Пауза / возобновление — переиспользует orderService напрямую, не
-// переопределяет его логику.
+// переопределяет его логику; здесь только guard'ы Stage 4.1 (публикация),
+// которых orderService.pauseRestaurant/resumeRestaurant не знают и знать не
+// должны — та же функция вызывается и Telegram-ботом (server/bot/postgresql/
+// index.js), для которого понятия "публикация" не существует вовсе.
 // ---------------------------------------------------------------------------
 
 async function pauseRestaurant(id, presetKey) {
+  const restaurant = await getRestaurantById(id);
+  if (!restaurant) throw new ValidationError('Ресторан не найден.');
+  lifecycle.assertCanPause(restaurant);
   return orderService.pauseRestaurant(id, presetKey);
 }
 
+// Resume — ТОЛЬКО снятие реальной паузы (см. restaurantLifecycle.
+// assertCanResume) — не открывает вручную закрытый (не на паузе) ресторан;
+// для этого openRestaurant() выше.
 async function resumeRestaurant(id) {
+  const restaurant = await getRestaurantById(id);
+  if (!restaurant) throw new ValidationError('Ресторан не найден.');
+  lifecycle.assertCanResume(restaurant);
   return orderService.resumeRestaurant(id);
 }
 
@@ -229,7 +315,14 @@ async function resumeRestaurant(id) {
 // is_open=0 здесь — дополнительный, не единственный барьер, тот же
 // defense-in-depth принцип, что уже используется в этой кодовой базе (см.
 // orderService.rateOrder, комментарий "быстрый, но не единственный барьер").
+// published_at СОХРАНЯЕТСЯ как есть (не обнуляется) — задание (раздел 10)
+// прямо разрешает любой из двух вариантов; здесь выбрано "сохранить для
+// истории", так как видимость архивированного ресторана и без этого
+// независимо и полностью закрыта archived_at — обнулять нечего защищать.
 async function archiveRestaurant(id) {
+  const restaurant = await getRestaurantById(id);
+  if (!restaurant) return null;
+  lifecycle.assertCanArchive(restaurant);
   const updated = await db.execute(
     `UPDATE restaurants SET archived_at = NOW(), is_open = 0, paused_until = NULL WHERE id = $1 AND archived_at IS NULL RETURNING *`,
     [id],
@@ -237,12 +330,16 @@ async function archiveRestaurant(id) {
   return updated.rows[0] || null;
 }
 
+// Восстановление ВСЕГДА возвращает в черновик (задание, раздел 10, дословно:
+// "published_at = NULL; is_open = 0; итоговый статус: черновик") — безопаснее
+// автоматического возврата клиентам: владелец должен осознанно опубликовать
+// восстановленный ресторан заново, проверив данные.
 async function restoreRestaurant(id) {
-  // Восстановленный ресторан возвращается ЗАКРЫТЫМ (is_open остаётся 0,
-  // как и было выставлено при архивировании) — владелец открывает вручную,
-  // тот же принцип, что и у только что созданного ресторана.
+  const restaurant = await getRestaurantById(id);
+  if (!restaurant) return null;
+  lifecycle.assertCanRestore(restaurant);
   const updated = await db.execute(
-    `UPDATE restaurants SET archived_at = NULL WHERE id = $1 AND archived_at IS NOT NULL RETURNING *`,
+    `UPDATE restaurants SET archived_at = NULL, published_at = NULL, is_open = 0, paused_until = NULL WHERE id = $1 RETURNING *`,
     [id],
   );
   return updated.rows[0] || null;
@@ -254,6 +351,11 @@ module.exports = {
   ACTIVE_STATUSES,
   listRestaurants,
   getRestaurantById,
+  countMenuItems,
+  publishRestaurant,
+  unpublishRestaurant,
+  openRestaurant,
+  closeRestaurant,
   createRestaurant,
   updateRestaurant,
   pauseRestaurant,

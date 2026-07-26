@@ -49,8 +49,12 @@ before(async () => {
   baseUrl = `http://127.0.0.1:${server.address().port}`;
 
   const rRows = await db.query(
-    `INSERT INTO restaurants (name, cuisine, cities, is_open, min_order, phone, rating, rating_count)
-     VALUES ('Test Restaurant', 'test', $1, 1, 0, '+79280000099', 4.5, 10) RETURNING id`,
+    // published_at — Stage 4.1: этот файл проверяет публичный API, который
+    // теперь требует published_at IS NOT NULL, чтобы ресторан вообще был
+    // виден (server/routes/postgresql/api.js) — без этого поля /api/
+    // restaurants/:id отвечал бы 404 независимо от заказов.
+    `INSERT INTO restaurants (name, cuisine, cities, is_open, min_order, phone, rating, rating_count, published_at)
+     VALUES ('Test Restaurant', 'test', $1, 1, 0, '+79280000099', 4.5, 10, NOW()) RETURNING id`,
     [JSON.stringify(['Грозный'])],
   );
   restaurantId = rRows[0].id;

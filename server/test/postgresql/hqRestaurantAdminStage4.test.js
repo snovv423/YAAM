@@ -150,6 +150,13 @@ test('A: список ресторанов — search/city/status/sort/paginatio
   const grozny1 = await svc.createRestaurant({ name: 'Альфа Кафе', cities: 'Грозный' });
   const grozny2 = await svc.createRestaurant({ name: 'Бета Ресторан', cities: 'Грозный, Аргун' });
   const argun1 = await svc.createRestaurant({ name: 'Гамма Шашлычная', cities: 'Аргун' });
+  // Stage 4.1: фильтры open/closed требуют published_at IS NOT NULL (иначе
+  // это черновик, отдельная категория) — эти три фикстуры тестируют
+  // операционный статус (open/closed/paused), не публикацию саму по себе,
+  // поэтому публикуются сразу через svc.publishRestaurant().
+  await svc.publishRestaurant(grozny1.id);
+  await svc.publishRestaurant(grozny2.id);
+  await svc.publishRestaurant(argun1.id);
   await db.execute('UPDATE restaurants SET is_open = 1 WHERE id = $1', [grozny2.id]);
   await db.execute('UPDATE restaurants SET rating = 4.5, rating_count = 10 WHERE id = $1', [grozny1.id]);
 
@@ -282,8 +289,23 @@ test('B: полный HTTP-цикл управления рестораном + 
     assert.equal(auditAfterUpdate.length, 1);
     assert.match(auditAfterUpdate[0].details, /name:.*Интеграционное Кафе.*Интеграционное Кафе 2/);
 
-    // --- Пауза ---
+    // --- Публикация и открытие (Stage 4.1: пауза разрешена только
+    // опубликованному открытому ресторану — свежесозданный всё ещё черновик
+    // и закрыт) ---
     page = await getPage(base, cookie, restaurantPath);
+    assert.match(page.html, /Черновик/, 'свежесозданный ресторан — черновик');
+    res = await postForm(base, cookie, `${restaurantPath}/publish`, { _csrf: page.csrf });
+    assert.equal(res.status, 302);
+    const auditAfterPublish = await db.query("SELECT action FROM hq_audit_log WHERE action = 'restaurant_published'");
+    assert.equal(auditAfterPublish.length, 1);
+    page = await getPage(base, cookie, restaurantPath);
+    assert.match(page.html, /Закрыт/, 'публикация не открывает автоматически (задание, раздел 8)');
+    res = await postForm(base, cookie, `${restaurantPath}/open`, { _csrf: page.csrf });
+    assert.equal(res.status, 302);
+    page = await getPage(base, cookie, restaurantPath);
+    assert.match(page.html, />Открыт</);
+
+    // --- Пауза ---
     res = await postForm(base, cookie, `${restaurantPath}/pause`, { _csrf: page.csrf, preset: 'short' });
     assert.equal(res.status, 302);
     page = await getPage(base, cookie, restaurantPath);
@@ -323,6 +345,10 @@ test('B: полный HTTP-цикл управления рестораном + 
     assert.match(page.html, /Интеграционное Кафе 2/);
     const auditAfterRestore = await db.query("SELECT action FROM hq_audit_log WHERE action = 'restaurant_restored'");
     assert.equal(auditAfterRestore.length, 1);
+    // Задание, раздел 10: восстановление ВСЕГДА возвращает в черновик, не
+    // публикует автоматически.
+    page = await getPage(base, cookie, restaurantPath);
+    assert.match(page.html, /Черновик/);
   } finally {
     await stopApp(instance);
   }
@@ -423,8 +449,17 @@ test('D: connect_code/telegram_chat_id не появляются ни в одн�
     const overviewJson = await (await fetch(`${base}${restaurantPath}/overview.json`, { headers: { Cookie: cookie } })).text();
     assert.ok(!overviewJson.includes(secretConnectCode) && !overviewJson.includes(secretChatId));
 
-    // Публичный API: виден, пока не архивирован.
+    // Stage 4.1: свежесозданный ресторан — черновик, публично НЕ виден, пока
+    // не опубликован явно (задание Stage 4.1, раздел 11).
     let publicList = await (await fetch(`${base}/api/restaurants`)).json();
+    assert.ok(!publicList.some((r) => r.id === restaurantId), 'черновик не должен быть в публичном списке');
+    let publicOneDraft = await fetch(`${base}/api/restaurants/${restaurantId}`);
+    assert.equal(publicOneDraft.status, 404, 'черновик по прямому id должен отвечать 404 на публичном API');
+
+    // Публикуем — виден, пока не архивирован.
+    const overviewPage = await getPage(base, cookie, restaurantPath);
+    await postForm(base, cookie, `${restaurantPath}/publish`, { _csrf: overviewPage.csrf });
+    publicList = await (await fetch(`${base}/api/restaurants`)).json();
     assert.ok(publicList.some((r) => r.id === restaurantId));
     let publicOne = await (await fetch(`${base}/api/restaurants/${restaurantId}`)).json();
     assert.equal(publicOne.id, restaurantId);

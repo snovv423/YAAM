@@ -93,6 +93,69 @@ ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
 -- ускоряет фильтр "Архивированные" в HQ, не раздувается на общий случай.
 CREATE INDEX IF NOT EXISTS ix_restaurants_archived_at ON restaurants (archived_at) WHERE archived_at IS NOT NULL;
 
+-- YAAM HQ Stage 4.1 — публикация как понятие, ОТДЕЛЬНОЕ от is_open
+-- (задание, раздел 0): is_open отвечает только на вопрос "принимает ли
+-- ресторан заказы ПРЯМО СЕЙЧАС", published_at — виден ли он вообще клиентам.
+-- NULL = черновик (виден только в HQ), не-NULL = опубликован (когда).
+--
+-- Backfill — намеренно НЕ отдельный `UPDATE ... WHERE published_at IS NULL`
+-- (это было бы НЕидемпотентно в опасную сторону: schema.sql применяется
+-- псql'ом на каждом деплое поверх уже существующей БД — см.
+-- server/docs/postgresql-deployment-runbook.md, `--file=db/postgresql/
+-- schema.sql` — безусловный UPDATE тихо "публиковал" бы КАЖДЫЙ новый
+-- черновик, созданный между деплоями). Вместо этого — ADD COLUMN ... DEFAULT
+-- NOW(), затем немедленный DROP DEFAULT: `ADD COLUMN IF NOT EXISTS`
+-- выполняется РОВНО ОДИН РАЗ за всю историю базы (на всех последующих
+-- прогонах schema.sql колонка уже существует, и вся конструкция — no-op,
+-- включая DROP DEFAULT на колонке без default — это тоже безопасный no-op в
+-- PostgreSQL). В тот единственный момент, когда колонка реально создаётся,
+-- DEFAULT NOW() заполняет published_at ВСЕМ уже существующим на тот момент
+-- строкам (включая уже архивированные — их видимость и так независимо
+-- закрыта archived_at, отдельно очищать им published_at смысла не имеет, см.
+-- раздел 10 отчёта). Любой ресторан, созданный ПОСЛЕ этого момента, получает
+-- published_at исключительно через явный INSERT/UPDATE прикладного кода
+-- (services/hq/restaurantAdminService.js: createRestaurant — не указывает
+-- эту колонку вовсе, значит NULL, то есть черновик), а не через отвалившийся
+-- default. На свежей базе (тесты) таблица в момент ADD COLUMN всегда пуста —
+-- backfill затрагивает 0 строк, поведение то же самое.
+ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS published_at TIMESTAMPTZ DEFAULT NOW();
+ALTER TABLE restaurants ALTER COLUMN published_at DROP DEFAULT;
+
+-- Защитная нормализация ПЕРЕД добавлением CHECK ниже — на случай, если на
+-- какой-то БД архивирование когда-либо было выполнено в обход
+-- archiveRestaurant() (сама функция всегда пишет is_open=0/paused_until=NULL
+-- атомарно с archived_at, так что в норме это no-op). Идемпотентна за счёт
+-- WHERE.
+UPDATE restaurants SET is_open = 0, paused_until = NULL
+  WHERE archived_at IS NOT NULL AND (is_open = 1 OR paused_until IS NOT NULL);
+
+-- Только ДВА CHECK'а — "архивирован -> закрыт" и "архивирован -> не на
+-- паузе". Симметричные "черновик -> закрыт"/"черновик -> не на паузе" НЕ
+-- добавлены как DB CHECK: is_open по умолчанию = 1 (см. CREATE TABLE выше),
+-- и порядка 20 существующих тестов/бот/seed.js вставляют строки в
+-- restaurants напрямую через SQL для сценариев, вообще не связанных с
+-- публикацией (заказы, платежи, concurrency) — они не заполняют published_at
+-- и НЕ ДОЛЖНЫ ломаться из-за понятия, которое для них не существует. Правило
+-- "черновик всегда закрыт" вместо этого закреплено сервисным слоем
+-- (services/hq/restaurantLifecycle.js: assertCanOpen/assertCanPause,
+-- createRestaurant всегда пишет is_open=0) и тестами — задание (раздел 4)
+-- прямо разрешает это: "DB CHECK допустим только если не ломает upgrade
+-- существующих данных". archived_at, наоборot, — понятие, введённое ЦЕЛИКОМ
+-- в Stage 4 и нигде, кроме archiveRestaurant()/тестов этого раздела, не
+-- используемое напрямую — для него DB CHECK безопасен и добавлен как
+-- дополнительный барьер (defense-in-depth), не только сервисная проверка.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_restaurants_archived_closed') THEN
+    ALTER TABLE restaurants ADD CONSTRAINT chk_restaurants_archived_closed
+      CHECK (archived_at IS NULL OR is_open = 0);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_restaurants_archived_not_paused') THEN
+    ALTER TABLE restaurants ADD CONSTRAINT chk_restaurants_archived_not_paused
+      CHECK (archived_at IS NULL OR paused_until IS NULL);
+  END IF;
+END $$;
+
 -- =========================================================================
 -- categories
 -- =========================================================================
@@ -500,7 +563,8 @@ CREATE TABLE IF NOT EXISTS hq_audit_log (
   id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   action TEXT NOT NULL CHECK (action IN (
     'restaurant_created', 'restaurant_updated', 'restaurant_paused',
-    'restaurant_resumed', 'restaurant_archived', 'restaurant_restored'
+    'restaurant_resumed', 'restaurant_archived', 'restaurant_restored',
+    'restaurant_published', 'restaurant_unpublished'
   )),
   restaurant_id INTEGER REFERENCES restaurants(id),
   details TEXT,
@@ -509,5 +573,22 @@ CREATE TABLE IF NOT EXISTS hq_audit_log (
 );
 CREATE INDEX IF NOT EXISTS ix_hq_audit_log_restaurant_id ON hq_audit_log (restaurant_id);
 CREATE INDEX IF NOT EXISTS ix_hq_audit_log_created_at ON hq_audit_log (created_at);
+
+-- YAAM HQ Stage 4.1 — 'restaurant_published'/'restaurant_unpublished'
+-- добавлены в allowlist выше. Таблица уже существует на любой БД, где
+-- применялся Stage 4 (`CREATE TABLE IF NOT EXISTS` тогда — no-op), поэтому
+-- CHECK нужно расширить отдельно, идемпотентно: DROP старого constraint'а
+-- (стандартное имя Postgres для inline column CHECK —
+-- "<таблица>_<колонка>_check") и ADD нового с уже расширенным списком.
+-- DROP CONSTRAINT IF EXISTS безопасен и на СВЕЖЕЙ базе, где CREATE TABLE
+-- выше уже создал constraint сразу с полным списком под тем же именем — в
+-- этом случае DROP+ADD просто пересоздают идентичный constraint, без потери
+-- данных (это DDL, не удаляет строки).
+ALTER TABLE hq_audit_log DROP CONSTRAINT IF EXISTS hq_audit_log_action_check;
+ALTER TABLE hq_audit_log ADD CONSTRAINT hq_audit_log_action_check CHECK (action IN (
+  'restaurant_created', 'restaurant_updated', 'restaurant_paused',
+  'restaurant_resumed', 'restaurant_archived', 'restaurant_restored',
+  'restaurant_published', 'restaurant_unpublished'
+));
 
 COMMIT;

@@ -49,8 +49,8 @@ async function main() {
       `INSERT INTO restaurants (
          name, cuisine, photo_url, cities, address, hours,
          delivery_price, min_order, is_open, is_new, rating, rating_count,
-         phone, default_cook_minutes, connect_code
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+         phone, default_cook_minutes, connect_code, published_at
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
        ON CONFLICT (connect_code) DO NOTHING
        RETURNING id`,
       [
@@ -69,6 +69,10 @@ async function main() {
         '+7 900 000-00-00',
         30, // default_cook_minutes
         SEED_MARKER,
+        new Date(), // published_at — Stage 4.1: без этого поля seed-ресторан стал бы
+        // невидимым черновиком в публичном каталоге (server/routes/postgresql/
+        // api.js теперь требует published_at IS NOT NULL), а весь смысл этого
+        // seed'а — быть видимым сразу для ручной/QA staging-проверки.
       ],
       client
     );

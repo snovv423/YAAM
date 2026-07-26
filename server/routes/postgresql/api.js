@@ -247,11 +247,19 @@ router.get('/restaurants', async (req, res) => {
     // фильтруется здесь же, на уровне единственного публичного списка, а не
     // где-то ещё. История заказов/оценок архивированного ресторана не
     // затронута — фильтр только скрывает его из ЭТОГО списка.
+    //
+    // Stage 4.1: published_at IS NOT NULL — второе, независимое условие
+    // (задание, раздел 11): черновик (никогда не публиковался) и ресторан,
+    // снятый с публикации, скрыты точно так же, как архивированный, хотя
+    // archived_at у них остаётся NULL. is_open здесь НЕ участвует в фильтре
+    // вовсе — открытый и закрытый (но опубликованный) ресторан оба видны
+    // клиенту, is_open только меняет то, что видит клиент (может ли сейчас
+    // заказать), а не видит ли он ресторан вообще (задание, раздел 0).
     const rows = await db.query(`
       SELECT r.*, COUNT(o.id)::int AS orders_count
       FROM restaurants r
       ${ORDERS_COUNT_JOIN}
-      WHERE r.archived_at IS NULL
+      WHERE r.archived_at IS NULL AND r.published_at IS NOT NULL
       GROUP BY r.id
     `);
     const all = rows
@@ -266,14 +274,15 @@ router.get('/restaurants', async (req, res) => {
 
 router.get('/restaurants/:id', async (req, res) => {
   try {
-    // Тот же фильтр, что и в списке выше — прямой запрос архивированного
-    // ресторана по id тоже должен вести себя как "не найден", а не тихо
-    // отдавать данные ресторана, скрытого владельцем.
+    // Тот же фильтр, что и в списке выше (включая published_at IS NOT NULL,
+    // Stage 4.1) — прямой запрос черновика/снятого с публикации/
+    // архивированного ресторана по id тоже должен вести себя как "не
+    // найден", а не тихо отдавать данные ресторана, скрытого владельцем.
     const rows = await db.query(`
       SELECT r.*, COUNT(o.id)::int AS orders_count
       FROM restaurants r
       ${ORDERS_COUNT_JOIN}
-      WHERE r.id = $1 AND r.archived_at IS NULL GROUP BY r.id
+      WHERE r.id = $1 AND r.archived_at IS NULL AND r.published_at IS NOT NULL GROUP BY r.id
     `, [req.params.id]);
     const r = rows[0];
     if (!r) return res.status(404).json({ error: 'ресторан не найден' });

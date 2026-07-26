@@ -176,8 +176,10 @@ function uniquePhone() {
 
 async function pgCreateRestaurant() {
   const rows = await db.query(
-    `INSERT INTO restaurants (name, cuisine, cities, is_open, min_order, phone, rating, rating_count)
-     VALUES ('Stage8 Test Restaurant', 'test', '["Грозный"]', 1, 0, '+79280000099', 4.5, 10) RETURNING id`
+    // published_at — Stage 4.1: публичный API теперь требует published_at IS
+    // NOT NULL для видимости (см. GET /api/restaurants в этом файле).
+    `INSERT INTO restaurants (name, cuisine, cities, is_open, min_order, phone, rating, rating_count, published_at)
+     VALUES ('Stage8 Test Restaurant', 'test', '["Грозный"]', 1, 0, '+79280000099', 4.5, 10, NOW()) RETURNING id`
   );
   return rows[0].id;
 }

@@ -101,10 +101,33 @@ function createRestaurantsRouter({ linkBasePath }) {
     }
   });
 
-  function pageShell({ restaurant, active, csrfToken, tabBody }) {
-    return views.renderRestaurantHeader({ restaurant, csrfToken, linkBasePath })
+  async function pageShell({ restaurant, active, csrfToken, tabBody, req }) {
+    const menuItemsCount = active === 'overview' || active === 'settings' ? await svc.countMenuItems(restaurant.id) : 0;
+    const banner = views.renderActionBanner({ error: req?.query?.error, notice: req?.query?.notice });
+    return banner
+      + views.renderRestaurantHeader({ restaurant, csrfToken, linkBasePath, menuItemsCount })
       + views.renderTabs({ restaurantId: restaurant.id, active, linkBasePath })
       + tabBody;
+  }
+
+  // Lifecycle-действия (публикация/открытие/закрытие/пауза/возобновление)
+  // возвращают ValidationError на ожидаемых, не исключительных отказах
+  // (например: "Сначала опубликуйте ресторан.", двойной клик по уже
+  // обработанному действию) — это не 500 и не молчаливый редирект, а
+  // понятный error-баннер на той же странице (задание, раздел 7: "понятный
+  // success/error state"), тем же PRG-паттерном, что и вся остальная форма.
+  function handleLifecycleAction(action) {
+    return async (req, res, next) => {
+      try {
+        await action(req);
+        res.redirect(`${linkBasePath}/restaurants/${req.restaurant.id}`);
+      } catch (err) {
+        if (err instanceof svc.ValidationError) {
+          return res.redirect(`${linkBasePath}/restaurants/${req.restaurant.id}?error=${encodeURIComponent(err.message)}`);
+        }
+        next(err);
+      }
+    };
   }
 
   // --- Обзор ---
@@ -112,8 +135,8 @@ function createRestaurantsRouter({ linkBasePath }) {
     try {
       const overview = await statsService.getOverview(req.restaurant.id);
       const csrfToken = ensureCsrfToken(req);
-      const body = pageShell({
-        restaurant: req.restaurant, active: 'overview', csrfToken,
+      const body = await pageShell({
+        restaurant: req.restaurant, active: 'overview', csrfToken, req,
         tabBody: views.renderOverviewTab({ restaurant: req.restaurant, overview, linkBasePath }),
       });
       res.send(layout({ title: req.restaurant.name, active: 'restaurants', csrfToken, linkBasePath, body }));
@@ -143,8 +166,8 @@ function createRestaurantsRouter({ linkBasePath }) {
       };
       const result = await statsService.listRestaurantOrders(req.restaurant.id, { ...filters, page: req.query.page });
       const csrfToken = ensureCsrfToken(req);
-      const body = pageShell({
-        restaurant: req.restaurant, active: 'orders', csrfToken,
+      const body = await pageShell({
+        restaurant: req.restaurant, active: 'orders', csrfToken, req,
         tabBody: views.renderOrdersTab({ restaurant: req.restaurant, ...result, filters, linkBasePath }),
       });
       res.send(layout({ title: `Заказы — ${req.restaurant.name}`, active: 'restaurants', csrfToken, linkBasePath, body }));
@@ -180,8 +203,8 @@ function createRestaurantsRouter({ linkBasePath }) {
       const distribution = await statsService.getRatingsDistribution(req.restaurant.id);
       const ratingsResult = await statsService.listRestaurantRatings(req.restaurant.id, { page: req.query.page });
       const csrfToken = ensureCsrfToken(req);
-      const body = pageShell({
-        restaurant: req.restaurant, active: 'ratings', csrfToken,
+      const body = await pageShell({
+        restaurant: req.restaurant, active: 'ratings', csrfToken, req,
         tabBody: views.renderRatingsTab({ restaurant: req.restaurant, distribution, ...ratingsResult, linkBasePath }),
       });
       res.send(layout({ title: `Оценки — ${req.restaurant.name}`, active: 'restaurants', csrfToken, linkBasePath, body }));
@@ -205,8 +228,8 @@ function createRestaurantsRouter({ linkBasePath }) {
         statistics = await statsService.getStatistics(req.restaurant.id, { period: 'today' });
       }
       const csrfToken = ensureCsrfToken(req);
-      const body = pageShell({
-        restaurant: req.restaurant, active: 'statistics', csrfToken,
+      const body = await pageShell({
+        restaurant: req.restaurant, active: 'statistics', csrfToken, req,
         tabBody: views.renderStatisticsTab({ restaurant: req.restaurant, statistics, periodOptions, linkBasePath, error: periodError }),
       });
       res.send(layout({ title: `Статистика — ${req.restaurant.name}`, active: 'restaurants', csrfToken, linkBasePath, body }));
@@ -216,13 +239,17 @@ function createRestaurantsRouter({ linkBasePath }) {
   });
 
   // --- Настройки ---
-  router.get('/:id/settings', (req, res) => {
-    const csrfToken = ensureCsrfToken(req);
-    const body = pageShell({
-      restaurant: req.restaurant, active: 'settings', csrfToken,
-      tabBody: views.renderRestaurantSettingsTab({ restaurant: req.restaurant, linkBasePath, csrfToken }),
-    });
-    res.send(layout({ title: `Настройки — ${req.restaurant.name}`, active: 'restaurants', csrfToken, linkBasePath, body }));
+  router.get('/:id/settings', async (req, res, next) => {
+    try {
+      const csrfToken = ensureCsrfToken(req);
+      const body = await pageShell({
+        restaurant: req.restaurant, active: 'settings', csrfToken, req,
+        tabBody: views.renderRestaurantSettingsTab({ restaurant: req.restaurant, linkBasePath, csrfToken }),
+      });
+      res.send(layout({ title: `Настройки — ${req.restaurant.name}`, active: 'restaurants', csrfToken, linkBasePath, body }));
+    } catch (err) {
+      next(err);
+    }
   });
 
   router.post('/:id/settings', requireCsrf, async (req, res, next) => {
@@ -232,8 +259,8 @@ function createRestaurantsRouter({ linkBasePath }) {
       const details = summarizeRestaurantDiff(before, updated);
       await logAuditEvent({ action: 'restaurant_updated', restaurantId: updated.id, details, ip: req.ip });
       const csrfToken = ensureCsrfToken(req);
-      const body = pageShell({
-        restaurant: updated, active: 'settings', csrfToken,
+      const body = await pageShell({
+        restaurant: updated, active: 'settings', csrfToken, req,
         tabBody: views.renderRestaurantSettingsTab({ restaurant: updated, linkBasePath, csrfToken, notice: 'Изменения сохранены.' }),
       });
       res.send(layout({ title: `Настройки — ${updated.name}`, active: 'restaurants', csrfToken, linkBasePath, body }));
@@ -254,8 +281,8 @@ function createRestaurantsRouter({ linkBasePath }) {
           min_order: req.body.min_order,
         };
         const csrfToken = ensureCsrfToken(req);
-        const body = pageShell({
-          restaurant: attempted, active: 'settings', csrfToken,
+        const body = await pageShell({
+          restaurant: attempted, active: 'settings', csrfToken, req,
           tabBody: views.renderRestaurantSettingsTab({ restaurant: attempted, linkBasePath, csrfToken, error: err.message }),
         });
         return res.status(400).send(layout({ title: `Настройки — ${req.restaurant.name}`, active: 'restaurants', csrfToken, linkBasePath, body }));
@@ -264,30 +291,48 @@ function createRestaurantsRouter({ linkBasePath }) {
     }
   });
 
-  // --- Пауза / возобновление / архивирование / восстановление ---
-  router.post('/:id/pause', requireCsrf, async (req, res, next) => {
-    try {
-      const until = await svc.pauseRestaurant(req.restaurant.id, req.body.preset);
-      await logAuditEvent({
-        action: 'restaurant_paused', restaurantId: req.restaurant.id,
-        details: `preset: ${req.body.preset}, until: ${until instanceof Date ? until.toISOString() : until}`,
-        ip: req.ip,
-      });
-      res.redirect(`${linkBasePath}/restaurants/${req.restaurant.id}`);
-    } catch (err) {
-      next(err);
-    }
-  });
+  // --- Публикация / снятие с публикации (Stage 4.1) ---
+  router.post('/:id/publish', requireCsrf, handleLifecycleAction(async (req) => {
+    await svc.publishRestaurant(req.restaurant.id);
+    await logAuditEvent({
+      action: 'restaurant_published', restaurantId: req.restaurant.id,
+      details: 'publication: draft -> published', ip: req.ip,
+    });
+  }));
 
-  router.post('/:id/resume', requireCsrf, async (req, res, next) => {
-    try {
-      await svc.resumeRestaurant(req.restaurant.id);
-      await logAuditEvent({ action: 'restaurant_resumed', restaurantId: req.restaurant.id, ip: req.ip });
-      res.redirect(`${linkBasePath}/restaurants/${req.restaurant.id}`);
-    } catch (err) {
-      next(err);
-    }
-  });
+  router.post('/:id/unpublish', requireCsrf, handleLifecycleAction(async (req) => {
+    await svc.unpublishRestaurant(req.restaurant.id);
+    await logAuditEvent({
+      action: 'restaurant_unpublished', restaurantId: req.restaurant.id,
+      details: 'publication: published -> draft', ip: req.ip,
+    });
+  }));
+
+  // --- Открытие / закрытие — вручную, отдельно от паузы (Stage 4.1) ---
+  router.post('/:id/open', requireCsrf, handleLifecycleAction(async (req) => {
+    await svc.openRestaurant(req.restaurant.id);
+    await logAuditEvent({ action: 'restaurant_updated', restaurantId: req.restaurant.id, details: 'is_open: 0 -> 1', ip: req.ip });
+  }));
+
+  router.post('/:id/close', requireCsrf, handleLifecycleAction(async (req) => {
+    await svc.closeRestaurant(req.restaurant.id);
+    await logAuditEvent({ action: 'restaurant_updated', restaurantId: req.restaurant.id, details: 'is_open: 1 -> 0', ip: req.ip });
+  }));
+
+  // --- Пауза / возобновление / архивирование / восстановление ---
+  router.post('/:id/pause', requireCsrf, handleLifecycleAction(async (req) => {
+    const until = await svc.pauseRestaurant(req.restaurant.id, req.body.preset);
+    await logAuditEvent({
+      action: 'restaurant_paused', restaurantId: req.restaurant.id,
+      details: `preset: ${req.body.preset}, until: ${until instanceof Date ? until.toISOString() : until}`,
+      ip: req.ip,
+    });
+  }));
+
+  router.post('/:id/resume', requireCsrf, handleLifecycleAction(async (req) => {
+    await svc.resumeRestaurant(req.restaurant.id);
+    await logAuditEvent({ action: 'restaurant_resumed', restaurantId: req.restaurant.id, ip: req.ip });
+  }));
 
   router.post('/:id/archive', requireCsrf, async (req, res, next) => {
     try {
@@ -297,6 +342,9 @@ function createRestaurantsRouter({ linkBasePath }) {
       }
       res.redirect(`${linkBasePath}/restaurants/${req.restaurant.id}/settings`);
     } catch (err) {
+      if (err instanceof svc.ValidationError) {
+        return res.redirect(`${linkBasePath}/restaurants/${req.restaurant.id}/settings?error=${encodeURIComponent(err.message)}`);
+      }
       next(err);
     }
   });
@@ -309,6 +357,9 @@ function createRestaurantsRouter({ linkBasePath }) {
       }
       res.redirect(`${linkBasePath}/restaurants/${req.restaurant.id}/settings`);
     } catch (err) {
+      if (err instanceof svc.ValidationError) {
+        return res.redirect(`${linkBasePath}/restaurants/${req.restaurant.id}/settings?error=${encodeURIComponent(err.message)}`);
+      }
       next(err);
     }
   });

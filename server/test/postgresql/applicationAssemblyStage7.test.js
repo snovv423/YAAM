@@ -148,8 +148,11 @@ function uniquePhone() {
 
 async function pgCreateRestaurant(overrides = {}) {
   const rows = await db.query(
-    `INSERT INTO restaurants (name, cuisine, cities, is_open, min_order, phone, rating, rating_count)
-     VALUES ('Stage7 Test Restaurant', 'test', $1, $2, $3, '+79280000099', 4.5, 10) RETURNING id`,
+    // published_at — Stage 4.1: этот файл проверяет GET /api/restaurants
+    // напрямую ("D1: содержит созданный ресторан"), который теперь требует
+    // published_at IS NOT NULL для видимости.
+    `INSERT INTO restaurants (name, cuisine, cities, is_open, min_order, phone, rating, rating_count, published_at)
+     VALUES ('Stage7 Test Restaurant', 'test', $1, $2, $3, '+79280000099', 4.5, 10, NOW()) RETURNING id`,
     [JSON.stringify(overrides.cities || ['Грозный']), overrides.isOpen === false ? 0 : 1, overrides.minOrder || 0],
   );
   return rows[0].id;

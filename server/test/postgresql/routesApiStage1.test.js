@@ -91,16 +91,22 @@ function retryKeyGen() {
   return `yaam_retry_v1_${crypto.randomBytes(32).toString('base64url')}`;
 }
 
+// published — Stage 4.1: этот файл тестирует публичный API, который теперь
+// требует published_at IS NOT NULL (server/routes/postgresql/api.js) —
+// по умолчанию фикстура публикуется сразу (тот же смысл, что и раньше, для
+// файла, который не занимается проверкой самой публикации), с явным
+// opt-out (`overrides.published === false`) для тестов видимости черновика.
 async function pgCreateRestaurant(overrides = {}) {
   const rows = await db.query(
-    `INSERT INTO restaurants (name, cuisine, cities, is_open, min_order, phone, rating, rating_count, connect_code, telegram_chat_id)
-     VALUES ('Test Restaurant', 'test', $1, $2, $3, '+79280000099', 4.5, 10, $4, $5) RETURNING id`,
+    `INSERT INTO restaurants (name, cuisine, cities, is_open, min_order, phone, rating, rating_count, connect_code, telegram_chat_id, published_at)
+     VALUES ('Test Restaurant', 'test', $1, $2, $3, '+79280000099', 4.5, 10, $4, $5, $6) RETURNING id`,
     [
       JSON.stringify(overrides.cities || ['Грозный']),
       overrides.isOpen === false ? 0 : 1,
       overrides.minOrder || 0,
       overrides.connectCode || null,
       overrides.telegramChatId || null,
+      overrides.published === false ? null : new Date(),
     ],
   );
   return rows[0].id;

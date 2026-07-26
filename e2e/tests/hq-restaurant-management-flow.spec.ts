@@ -100,10 +100,14 @@ test('YAAM HQ: полный цикл управления рестораном �
   await expect(page.locator('[data-metric="ordersToday"]')).toHaveText('0');
   await expect(page.getByText('Активных заказов нет.')).toBeVisible();
 
-  // 7. Реальные заказы через orderService — ресторан нужно открыть и дать
-  // ему меню (управление меню — Stage 5, здесь напрямую через SQL, как и в
-  // server/test/postgresql/hqRestaurantAdminStage4.test.js).
-  await db.execute('UPDATE restaurants SET is_open = 1 WHERE id = $1', [restaurantId]);
+  // 7. Реальные заказы через orderService — ресторан нужно опубликовать и
+  // открыть, дать ему меню (управление меню — Stage 5, здесь напрямую через
+  // SQL, как и в server/test/postgresql/hqRestaurantAdminStage4.test.js).
+  // published_at обязателен (Stage 4.1) — новый ресторан создаётся
+  // черновиком, а schema.sql (chk_restaurants_archived_*) хоть и не
+  // блокирует черновик+is_open=1 на уровне БД, публичный API всё равно не
+  // покажет его без публикации (см. шаг 17 ниже).
+  await db.execute('UPDATE restaurants SET is_open = 1, published_at = NOW() WHERE id = $1', [restaurantId]);
   const catRows = await db.query('INSERT INTO categories (restaurant_id, name) VALUES ($1,$2) RETURNING id', [restaurantId, 'Cat']);
   const itemRows = await db.query(
     'INSERT INTO menu_items (restaurant_id, category_id, name, price, is_available) VALUES ($1,$2,$3,$4,1) RETURNING id',
@@ -169,8 +173,9 @@ test('YAAM HQ: полный цикл управления рестораном �
   await page.getByRole('button', { name: /Пауза: 33 мин/ }).click();
   await expect(page.getByText(/Пауза до/)).toBeVisible();
 
-  // 15. Вернуть из паузы.
-  await page.getByRole('button', { name: 'Открыть сейчас' }).click();
+  // 15. Вернуть из паузы (Stage 4.1: кнопка «Возобновить» — снятие паузы,
+  // отдельно от «Открыть», см. services/hq/restaurantLifecycle.js).
+  await page.getByRole('button', { name: 'Возобновить' }).click();
   await expect(page.getByText('Открыт', { exact: true })).toBeVisible();
 
   // 16. Проверить audit log в БД.

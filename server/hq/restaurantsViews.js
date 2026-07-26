@@ -4,6 +4,7 @@
 // принцип, что и весь остальной HQ (server/hq/layout.js, routes/hq/*):
 // шаблонные функции без движка/фреймворка, esc() на каждое значение из БД.
 const { esc } = require('./layout');
+const lifecycle = require('../services/hq/restaurantLifecycle');
 
 const ORDER_STATUS_LABELS = {
   awaiting_payment: 'Ожидает оплаты',
@@ -28,10 +29,17 @@ const REFUND_STATUS_LABELS = {
 
 const PAUSE_PRESET_LABELS = { short: '33 мин', medium: '3 часа', long: '11 часов' };
 
+// Stage 4.1 — единая компактная метка lifecycle-статуса (задание, раздел 6,
+// вариант "компактная итоговая метка" — выбран вместо двух раздельных строк
+// "Публикация: X / Приём заказов: Y", чтобы не перегружать интерфейс, тот же
+// минимализм, что и остальной HQ). Источник истины — resolveLifecycleStatus
+// (services/hq/restaurantLifecycle.js), не повторный inline-расчёт здесь.
 function statusBadge(r) {
-  if (r.archived_at) return '<span class="badge closed">В архиве</span>';
-  if (r.is_open) return '<span class="badge open">Открыт</span>';
-  if (r.paused_until) {
+  const status = lifecycle.resolveLifecycleStatus(r);
+  if (status === 'draft') return '<span class="badge paused">Черновик</span>';
+  if (status === 'archived') return '<span class="badge closed">В архиве</span>';
+  if (status === 'open') return '<span class="badge open">Открыт</span>';
+  if (status === 'paused') {
     const until = r.paused_until instanceof Date ? r.paused_until : new Date(r.paused_until);
     const hh = String(until.getHours()).padStart(2, '0');
     const mm = String(until.getMinutes()).padStart(2, '0');
@@ -135,6 +143,8 @@ function renderRestaurantsList({ restaurants, page, totalPages, total, filters, 
         <label for="lf-status">Статус</label>
         <select id="lf-status" name="status">
           <option value="">Все</option>
+          <option value="draft" ${filters.status === 'draft' ? 'selected' : ''}>Черновики</option>
+          <option value="published" ${filters.status === 'published' ? 'selected' : ''}>Опубликованные</option>
           <option value="open" ${filters.status === 'open' ? 'selected' : ''}>Открыт</option>
           <option value="closed" ${filters.status === 'closed' ? 'selected' : ''}>Закрыт</option>
           <option value="paused" ${filters.status === 'paused' ? 'selected' : ''}>Пауза</option>
@@ -195,7 +205,7 @@ function renderCreateForm({ values, error, linkBasePath, csrfToken }) {
         <button type="submit" id="rf-submit">Создать</button>
         ${error ? `<div class="error">${esc(error)}</div>` : ''}
       </form>
-      <div class="empty-state" style="margin-top:14px">Ресторан будет создан закрытым — откройте его вручную на странице ресторана, когда меню будет готово (управление меню появится на следующем этапе).</div>
+      <div class="empty-state" style="margin-top:14px">Ресторан будет создан как черновик — клиентам не виден. Опубликуйте его на странице ресторана, когда данные будут готовы, затем откройте вручную для приёма заказов (управление меню появится на следующем этапе).</div>
     </div>
   `;
 }
@@ -204,21 +214,50 @@ function renderCreateForm({ values, error, linkBasePath, csrfToken }) {
 // Шапка страницы ресторана + вкладки
 // ===========================================================================
 
-function renderRestaurantHeader({ restaurant: r, csrfToken, linkBasePath }) {
-  const pauseButtons = !r.archived_at && r.is_open
-    ? Object.entries(PAUSE_PRESET_LABELS).map(([key, label]) => `
-        <form method="post" action="${linkBasePath}/restaurants/${r.id}/pause" onsubmit="return confirm('Поставить «${esc(r.name)}» на паузу на ${label}?')" style="display:inline">
+function simpleActionForm({ action, csrfToken, label, cls, confirm: confirmMsg }) {
+  const onsubmit = confirmMsg ? ` onsubmit="return confirm('${esc(confirmMsg)}')"` : '';
+  return `<form method="post" action="${action}"${onsubmit} style="display:inline">
+      <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
+      <button type="submit"${cls ? ` class="${cls}"` : ''}>${esc(label)}</button>
+    </form>`;
+}
+
+// Stage 4.1 — набор действий строго зависит от lifecycle-статуса (задание,
+// раздел 7): у черновика — только "Опубликовать"; у опубликованного —
+// "Снять с публикации" плюс операционные действия (открыть/закрыть/пауза);
+// у архивированного — ничего здесь (восстановление живёт на вкладке
+// «Настройки», рядом с остальным архивированием, как и было в Stage 4).
+// menuItemsCount — только для текста предупреждения при публикации ресторана
+// без единого блюда (задание, раздел 12) — предупреждение целиком в
+// client-side confirm(), тем же паттерном, что уже используют пауза/архив в
+// этом же файле (никакого отдельного server-rendered экрана подтверждения —
+// задание прямо просит не раздувать workflow).
+function renderRestaurantHeader({ restaurant: r, csrfToken, linkBasePath, menuItemsCount = 0 }) {
+  const status = lifecycle.resolveLifecycleStatus(r);
+  const base = `${linkBasePath}/restaurants/${r.id}`;
+  const actions = [];
+
+  if (status === 'draft') {
+    const publishConfirm = menuItemsCount === 0
+      ? `У ресторана «${r.name}» пока нет блюд. Опубликовать всё равно?`
+      : `Опубликовать «${r.name}»? Ресторан станет виден клиентам.`;
+    actions.push(simpleActionForm({ action: `${base}/publish`, csrfToken, label: 'Опубликовать', confirm: publishConfirm }));
+  } else if (status !== 'archived') {
+    if (status === 'closed') {
+      actions.push(simpleActionForm({ action: `${base}/open`, csrfToken, label: 'Открыть' }));
+    } else if (status === 'open') {
+      actions.push(simpleActionForm({ action: `${base}/close`, csrfToken, label: 'Закрыть', cls: 'ghost', confirm: `Закрыть «${r.name}» для новых заказов?` }));
+      actions.push(...Object.entries(PAUSE_PRESET_LABELS).map(([key, label]) => `
+        <form method="post" action="${base}/pause" onsubmit="return confirm('Поставить «${esc(r.name)}» на паузу на ${label}?')" style="display:inline">
           <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
           <input type="hidden" name="preset" value="${key}">
           <button type="submit" class="ghost">Пауза: ${label}</button>
-        </form>`).join(' ')
-    : '';
-  const resumeButton = !r.archived_at && !r.is_open
-    ? `<form method="post" action="${linkBasePath}/restaurants/${r.id}/resume" style="display:inline">
-        <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
-        <button type="submit">Открыть сейчас</button>
-      </form>`
-    : '';
+        </form>`));
+    } else if (status === 'paused') {
+      actions.push(simpleActionForm({ action: `${base}/resume`, csrfToken, label: 'Возобновить' }));
+    }
+    actions.push(simpleActionForm({ action: `${base}/unpublish`, csrfToken, label: 'Снять с публикации', cls: 'ghost', confirm: `Снять «${r.name}» с публикации? Ресторан исчезнет из публичного каталога.` }));
+  }
 
   return `
     <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:14px;margin-bottom:16px">
@@ -226,9 +265,19 @@ function renderRestaurantHeader({ restaurant: r, csrfToken, linkBasePath }) {
         <h1 style="margin-bottom:6px">${esc(r.name)}</h1>
         <div style="color:var(--txt2);font-size:13px">${esc(parseCities(r.cities).join(', '))} · ${statusBadge(r)} · ${r.rating_count > 0 ? `${stars(Number(r.rating).toFixed(1))} (${r.rating_count})` : 'Оценок нет'} · Telegram: ${r.telegram_chat_id ? 'подключён' : 'не подключён'}</div>
       </div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap">${resumeButton}${pauseButtons}</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">${actions.join(' ')}</div>
     </div>
   `;
+}
+
+// Баннер ошибок/уведомлений после lifecycle-действий (публикация/открытие/
+// закрытие/пауза/возобновление) — те же CSS-классы .error/.notice, что и в
+// формах настроек, отображается на самой странице ресторана после
+// PRG-редиректа (задание, раздел 7: "понятный success/error state").
+function renderActionBanner({ error, notice }) {
+  if (error) return `<div class="error" style="margin-bottom:14px">${esc(error)}</div>`;
+  if (notice) return `<div class="notice" style="margin-bottom:14px">${esc(notice)}</div>`;
+  return '';
 }
 
 function renderTabs({ restaurantId, active, linkBasePath }) {
@@ -595,6 +644,7 @@ module.exports = {
   renderRestaurantsList,
   renderCreateForm,
   renderRestaurantHeader,
+  renderActionBanner,
   renderTabs,
   renderOverviewTab,
   renderOrdersTab,
