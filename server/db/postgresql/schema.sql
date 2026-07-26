@@ -64,6 +64,35 @@ CREATE TABLE IF NOT EXISTS restaurants (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- YAAM HQ Stage 4 — аддитивные колонки для рабочего раздела «Рестораны»
+-- (server/routes/hq/restaurants.js). ALTER TABLE ... ADD COLUMN IF NOT
+-- EXISTS — тот же приём, что уже применялся для payment_presentations.
+-- expires_at (Stage 11A): безопасен и на свежей базе (CREATE TABLE выше уже
+-- их не содержит только в самой первой миграции, здесь применяется сразу),
+-- и на уже существующей staging-БД без потери данных/истории.
+--
+-- description — краткое описание карточки ресторана, обоснованно добавлено
+-- (задание Stage 4, раздел 4: "если поле уже есть или обоснованно
+-- добавляется"). Пустая строка по умолчанию — не NULL, тот же стиль, что и
+-- у cuisine/address/hours выше.
+ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';
+
+-- archived_at — единственный механизм архивирования (задание, раздел 11):
+-- NULL = активен, не-NULL = архивирован (когда именно). Сознательно НЕ
+-- отдельная колонка status с перечислением состояний — nullable timestamp
+-- одновременно даёт и boolean-флаг ("архивирован ли"), и "когда" бесплатно,
+-- без второй колонки. Архивирование ВСЕГДА переводит is_open=0 (см.
+-- restaurantAdminService.archiveRestaurant) — публичная формула "активные
+-- рестораны" (server/services/hq/dashboardMetrics.js, Stage 2, is_open=1)
+-- поэтому автоматически исключает архивированные без единой правки той
+-- формулы. DELETE ресторана по-прежнему запрещён (задание, раздел 11) — эта
+-- колонка существует именно чтобы не понадобился DELETE.
+ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
+
+-- Партиальный индекс — только по архивированным (их всегда меньшинство),
+-- ускоряет фильтр "Архивированные" в HQ, не раздувается на общий случай.
+CREATE INDEX IF NOT EXISTS ix_restaurants_archived_at ON restaurants (archived_at) WHERE archived_at IS NOT NULL;
+
 -- =========================================================================
 -- categories
 -- =========================================================================
@@ -441,5 +470,44 @@ CREATE TABLE IF NOT EXISTS hq_security_log (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS ix_hq_security_log_created_at ON hq_security_log (created_at);
+
+-- =========================================================================
+-- hq_audit_log
+-- =========================================================================
+-- YAAM HQ Stage 4 — журнал административных изменений (задание, раздел 10),
+-- отдельный от hq_security_log (Stage 3, раздел 6 того задания): тот
+-- посвящён исключительно событиям аутентификации/сессии (вход/выход/смена
+-- логина или пароля) с закрытым узким enum'ом ровно под них.
+-- Административные изменения бизнес-данных (создание/правка/пауза/
+-- архивирование ресторана) — другой по природе класс событий: у них есть
+-- предметная ссылка (restaurant_id) и осмысленно короткое текстовое
+-- описание ИЗМЕНЕНИЯ, а не просто факта входа. Смешивать оба класса в одном
+-- узком CHECK-enum'е означало бы либо раздувать его совсем разнородными
+-- значениями, либо терять structure (restaurant_id) — отдельная таблица тем
+-- же db-backstop принципом (закрытый список action) яснее и безопаснее.
+--
+-- restaurant_id БЕЗ ON DELETE (как и orders.restaurant_id выше) — то же
+-- самое намерение, усиленное фактом, что DELETE ресторана вообще запрещён
+-- продуктовым правилом этого этапа (см. restaurants.archived_at выше):
+-- FOREIGN KEY здесь дополнительно физически не даёт снести ресторан, пока
+-- на него ссылается хотя бя одна запись аудита, то есть всегда.
+--
+-- details — короткий человекочитаемый summary ТОЛЬКО из allowlist безопасных
+-- полей (см. services/hq/auditLog.js SAFE_DIFF_FIELDS) — никогда не
+-- connect_code/telegram_chat_id/пароль/токен. Nullable — не для всех
+-- событий (пауза/пуск/архивирование) есть что добавить сверх самого факта.
+CREATE TABLE IF NOT EXISTS hq_audit_log (
+  id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  action TEXT NOT NULL CHECK (action IN (
+    'restaurant_created', 'restaurant_updated', 'restaurant_paused',
+    'restaurant_resumed', 'restaurant_archived', 'restaurant_restored'
+  )),
+  restaurant_id INTEGER REFERENCES restaurants(id),
+  details TEXT,
+  ip TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS ix_hq_audit_log_restaurant_id ON hq_audit_log (restaurant_id);
+CREATE INDEX IF NOT EXISTS ix_hq_audit_log_created_at ON hq_audit_log (created_at);
 
 COMMIT;

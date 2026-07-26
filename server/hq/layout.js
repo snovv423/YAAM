@@ -94,6 +94,57 @@ function layout({ title, active, body, csrfToken, linkBasePath = '/hq' }) {
   .attention-item{color:var(--danger);font-weight:600}
   .mobile-nav{display:none}
   .mobile-top{display:none}
+
+  /* Формы — общие для всего HQ (создание/правка ресторана, фильтры,
+     настройки безопасности из Stage 3) — раньше жили только инлайново на
+     странице логина; вынесено сюда один раз, чтобы не дублировать в каждом
+     новом экране Stage 4. */
+  label{display:block;font-size:12px;color:var(--txt2);font-weight:700;margin:14px 0 6px;text-transform:uppercase}
+  label:first-child{margin-top:0}
+  input,select,textarea{width:100%;padding:11px 13px;border-radius:10px;border:1px solid var(--bord);background:rgba(255,255,255,.05);color:var(--txt);font-size:15px;font-family:inherit}
+  textarea{resize:vertical;min-height:70px}
+  input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid var(--amber);outline-offset:1px}
+  button{background:var(--amber);color:#3a1c00;border:none;border-radius:10px;padding:11px 18px;font-weight:800;cursor:pointer;font-size:14px}
+  button.ghost{background:rgba(255,255,255,.08);color:var(--txt)}
+  button.danger{background:#c0303c;color:#fff}
+  button:disabled{opacity:.6;cursor:default}
+  a.btn{display:inline-block;background:var(--amber);color:#3a1c00;padding:10px 16px;border-radius:10px;text-decoration:none;font-weight:700;font-size:14px}
+  a.btn.ghost{background:rgba(255,255,255,.08);color:var(--txt)}
+  .row{display:flex;gap:12px;flex-wrap:wrap}
+  .row>*{flex:1;min-width:160px}
+  .error{margin-top:12px;color:var(--danger);font-size:13px}
+  .notice{margin-top:12px;color:var(--ok);font-size:13px}
+
+  /* Вкладки страницы ресторана (Обзор/Заказы/Оценки/Статистика/Настройки). */
+  .tabs{display:flex;gap:4px;border-bottom:1px solid var(--bord);margin-bottom:20px;overflow-x:auto}
+  .tabs a{padding:10px 14px;color:var(--txt2);text-decoration:none;font-weight:600;font-size:14px;white-space:nowrap;border-bottom:2px solid transparent;min-height:44px;display:flex;align-items:center}
+  .tabs a.on{color:var(--amber);border-bottom-color:var(--amber)}
+
+  /* Пагинация — простая, без произвольного page size. */
+  .pagination{display:flex;gap:8px;align-items:center;justify-content:center;margin-top:16px;flex-wrap:wrap}
+  .pagination a,.pagination span{padding:8px 12px;border-radius:8px;font-size:13px;text-decoration:none;color:var(--txt2);min-height:36px;display:flex;align-items:center}
+  .pagination a{border:1px solid var(--bord)}
+  .pagination .current{background:var(--amber);color:#3a1c00;font-weight:700}
+
+  /* Простой CSS-столбчатый график распределения заказов по дням —
+     без библиотек, без декоративных случайных данных (задание, раздел 9). */
+  .chart{display:flex;align-items:flex-end;gap:3px;height:110px;margin:26px 0 10px;padding:0 2px}
+  .chart-bar{flex:1;background:var(--amber);border-radius:3px 3px 0 0;min-height:2px;position:relative}
+  .chart-bar.zero{background:var(--bord)}
+  .chart-bar .chart-label{position:absolute;bottom:-20px;left:0;right:0;text-align:center;font-size:9px;color:var(--txt2);white-space:nowrap}
+  .chart-bar .chart-value{position:absolute;top:-18px;left:0;right:0;text-align:center;font-size:10px;color:var(--txt2)}
+
+  /* Фильтры/поиск над списками. */
+  .filters{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px;align-items:flex-end}
+  .filters .field{display:flex;flex-direction:column;gap:4px;min-width:140px}
+  .filters label{margin:0;font-size:11px}
+  .filters input,.filters select{padding:9px 10px;font-size:13px}
+  .filters button{padding:9px 16px;font-size:13px}
+
+  /* Мобильный responsive-table: превращает строки в компактные карточки без
+     дублирования разметки (задание, раздел 14 — "на mobile строки заказов
+     превращать в компактные карточки"). Каждый <td> несёт data-label,
+     показанный через ::before только в узком viewport. */
   @media (max-width: 760px){
     .side{display:none}
     main{padding:76px 16px 90px}
@@ -104,6 +155,12 @@ function layout({ title, active, body, csrfToken, linkBasePath = '/hq' }) {
     .mobile-nav{display:flex;position:fixed;left:0;right:0;bottom:0;background:var(--panel);border-top:1px solid var(--bord);justify-content:space-around;padding:6px 4px calc(6px + env(safe-area-inset-bottom));z-index:2}
     .mobile-nav a{flex:1;text-align:center;padding:8px 4px;color:var(--txt2);text-decoration:none;font-size:12px;font-weight:600;border-radius:10px;min-height:44px;display:flex;align-items:center;justify-content:center}
     .mobile-nav a.on{color:var(--amber)}
+
+    table.responsive{border:0}
+    table.responsive thead{display:none}
+    table.responsive tr{display:block;background:var(--panel);border:1px solid var(--bord);border-radius:12px;margin-bottom:10px;padding:10px 12px}
+    table.responsive td{display:flex;justify-content:space-between;align-items:center;gap:10px;border:0;padding:7px 0;font-size:13px;text-align:right}
+    table.responsive td::before{content:attr(data-label);color:var(--txt2);font-weight:600;font-size:11px;text-transform:uppercase;text-align:left}
   }
 </style>
 </head>
@@ -131,6 +188,7 @@ function layout({ title, active, body, csrfToken, linkBasePath = '/hq' }) {
 <nav class="mobile-nav">
   ${mobileNavHtml}
 </nav>
+<script src="${linkBasePath}/static/hq.js" defer></script>
 </body>
 </html>`;
 }

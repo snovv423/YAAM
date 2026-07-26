@@ -90,7 +90,7 @@ function renderLoginPage({ csrfToken, error, linkBasePath, changed }) {
   <input id="username" name="username" type="text" autocomplete="username" required autofocus>
   <label for="password">Пароль</label>
   <input id="password" name="password" type="password" autocomplete="current-password" required>
-  <button type="submit" id="hq-login-submit">Войти</button>
+  <button type="submit" id="hq-login-submit" data-busy-text="Вход…">Войти</button>
   ${error ? `<div class="error">${esc(error)}</div>` : ''}
   ${!error && notice ? `<div class="notice">${esc(notice)}</div>` : ''}
 </form>

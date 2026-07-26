@@ -22,6 +22,8 @@ const EXPECTED_TABLES = [
   // YAAM HQ Stage 3 (владелец HQ в PostgreSQL вместо .env) — см.
   // db/postgresql/schema.sql.
   'hq_owner', 'hq_security_log',
+  // YAAM HQ Stage 4 (журнал административных изменений раздела «Рестораны»).
+  'hq_audit_log',
 ];
 
 const EXPECTED_INDEXES = {
@@ -39,7 +41,7 @@ const TABLES_WITH_CREATED_AT = [
   'restaurants', 'orders', 'order_access_credentials', 'payments',
   'payment_retry_attempts', 'payment_retry_keys', 'payment_presentations',
   'payment_initial_attempts', 'refunds',
-  'hq_owner', 'hq_security_log',
+  'hq_owner', 'hq_security_log', 'hq_audit_log',
 ];
 
 const EXPECTED_FUNCTIONS = [
@@ -57,7 +59,7 @@ const EXPECTED_TRIGGERS = {
 // hq_owner НЕ входит: его id — фиксированная константа (DEFAULT 1 CHECK
 // id=1), не GENERATED ALWAYS AS IDENTITY (единственная строка никогда не
 // "автоинкрементируется" — см. db/postgresql/schema.sql).
-const IDENTITY_TABLES = ['restaurants', 'categories', 'menu_items', 'orders', 'order_items', 'payments', 'refunds', 'hq_security_log'];
+const IDENTITY_TABLES = ['restaurants', 'categories', 'menu_items', 'orders', 'order_items', 'payments', 'refunds', 'hq_security_log', 'hq_audit_log'];
 
 let cluster;
 
@@ -81,7 +83,7 @@ async function runSchemaAndInspect(t, databaseName) {
       await client.query(SCHEMA_SQL);
     });
 
-    await t.test('создаются все 14 таблиц', async () => {
+    await t.test('создаются все 15 таблиц', async () => {
       const { rows } = await client.query(
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename`
       );
@@ -89,13 +91,13 @@ async function runSchemaAndInspect(t, databaseName) {
       assert.deepEqual(names, [...EXPECTED_TABLES].sort());
     });
 
-    await t.test('создаются все 13 внешних ключей', async () => {
+    await t.test('создаются все 14 внешних ключей', async () => {
       const { rows } = await client.query(`
         SELECT count(*)::int AS n
         FROM information_schema.table_constraints
         WHERE constraint_schema = 'public' AND constraint_type = 'FOREIGN KEY'
       `);
-      assert.equal(rows[0].n, 13);
+      assert.equal(rows[0].n, 14);
     });
 
     await t.test('CHECK-ограничения присутствуют (>=12, включая новый на payments.status)', async () => {
@@ -172,7 +174,7 @@ async function runSchemaAndInspect(t, databaseName) {
       }
     });
 
-    await t.test('IDENTITY корректна на всех 8 автоинкрементных таблицах', async () => {
+    await t.test('IDENTITY корректна на всех 9 автоинкрементных таблицах', async () => {
       for (const table of IDENTITY_TABLES) {
         const { rows } = await client.query(`
           SELECT is_identity, identity_generation
@@ -204,7 +206,7 @@ async function runSchemaAndInspect(t, databaseName) {
       assert.equal(rows[0].data_type, 'bytea');
     });
 
-    await t.test('DEFAULT NOW() присутствует на всех 11 датовых колонках created_at', async () => {
+    await t.test('DEFAULT NOW() присутствует на всех 12 датовых колонках created_at', async () => {
       const { rows } = await client.query(`
         SELECT table_name, column_default
         FROM information_schema.columns

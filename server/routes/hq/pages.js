@@ -101,10 +101,6 @@ function renderOverview({ top, active, restaurants, finance, attentionItems, csr
   `;
 }
 
-function renderStub({ title, message }) {
-  return `<h1>${esc(title)}</h1><div class="panel"><div class="empty-state">${esc(message)}</div></div>`;
-}
-
 function renderFinanceStub({ finance }) {
   return `
     <h1>Финансы</h1>
@@ -198,16 +194,9 @@ function createPagesRouter({ linkBasePath }) {
     }
   });
 
-  router.get('/restaurants', (req, res) => {
-    const csrfToken = ensureCsrfToken(req);
-    res.send(layout({
-      title: 'Рестораны',
-      active: 'restaurants',
-      csrfToken,
-      linkBasePath,
-      body: renderStub({ title: 'Рестораны', message: 'Управление ресторанами будет реализовано на следующем этапе.' }),
-    }));
-  });
+  // Stage 4: заглушка "Рестораны" заменена полноценным разделом —
+  // server/routes/hq/restaurants.js, смонтирован ОТДЕЛЬНО в routes/hq/
+  // index.js под /restaurants (раньше /hq/restaurants).
 
   router.get('/finance', async (req, res, next) => {
     try {

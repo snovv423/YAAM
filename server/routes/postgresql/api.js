@@ -242,10 +242,16 @@ const ORDERS_COUNT_JOIN = `
 router.get('/restaurants', async (req, res) => {
   try {
     const city = req.query.city;
+    // YAAM HQ Stage 4: архивированный ресторан не должен появляться на
+    // публичном сайте (задание, раздел 11) — archived_at IS NOT NULL
+    // фильтруется здесь же, на уровне единственного публичного списка, а не
+    // где-то ещё. История заказов/оценок архивированного ресторана не
+    // затронута — фильтр только скрывает его из ЭТОГО списка.
     const rows = await db.query(`
       SELECT r.*, COUNT(o.id)::int AS orders_count
       FROM restaurants r
       ${ORDERS_COUNT_JOIN}
+      WHERE r.archived_at IS NULL
       GROUP BY r.id
     `);
     const all = rows
@@ -260,11 +266,14 @@ router.get('/restaurants', async (req, res) => {
 
 router.get('/restaurants/:id', async (req, res) => {
   try {
+    // Тот же фильтр, что и в списке выше — прямой запрос архивированного
+    // ресторана по id тоже должен вести себя как "не найден", а не тихо
+    // отдавать данные ресторана, скрытого владельцем.
     const rows = await db.query(`
       SELECT r.*, COUNT(o.id)::int AS orders_count
       FROM restaurants r
       ${ORDERS_COUNT_JOIN}
-      WHERE r.id = $1 GROUP BY r.id
+      WHERE r.id = $1 AND r.archived_at IS NULL GROUP BY r.id
     `, [req.params.id]);
     const r = rows[0];
     if (!r) return res.status(404).json({ error: 'ресторан не найден' });

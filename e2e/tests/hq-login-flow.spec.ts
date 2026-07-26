@@ -49,10 +49,14 @@ test('YAAM HQ: вход, «Обзор» с реальными метриками
   await expect(page.getByText('Банковские выплаты будут доступны после подключения финансового модуля.')).toBeVisible();
 
   // 7. Переходы по Рестораны / Финансы / Настройки — общий layout, рабочие
-  // пустые состояния (не 404, не пустая страница).
+  // состояния (не 404, не пустая страница). Раздел «Рестораны» — Stage 4,
+  // полноценный рабочий раздел (не заглушка, см. hq-restaurant-management-
+  // flow.spec.ts за полным сценарием) — здесь достаточно подтвердить, что
+  // список открывается и показывает честное пустое состояние или
+  // добавленные другими тестами рестораны, не конкретный текст-заглушку.
   await page.getByRole('link', { name: 'Рестораны' }).click();
   await expect(page).toHaveURL(`${API_BASE_URL}/hq/restaurants`);
-  await expect(page.getByText('Управление ресторанами будет реализовано на следующем этапе.')).toBeVisible();
+  await expect(page.getByRole('link', { name: '+ Добавить ресторан' })).toBeVisible();
 
   await page.getByRole('link', { name: 'Финансы' }).click();
   await expect(page).toHaveURL(`${API_BASE_URL}/hq/finance`);

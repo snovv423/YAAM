@@ -20,6 +20,7 @@ const { hqSecurityHeaders } = require('../../services/hq/securityHeaders');
 const { normalizeHqLinkBasePath, hqRootPath } = require('../../services/hq/basePath');
 const { createAuthRouter } = require('./auth');
 const { createPagesRouter } = require('./pages');
+const { createRestaurantsRouter } = require('./restaurants');
 const { createRequireHqAuth } = require('./middleware');
 
 // linkBasePath — Stage 2.1 clean-root routing (см. services/hq/basePath.js):
@@ -58,6 +59,10 @@ function createHqRouter({ sessionSecret, isProduction, linkBasePath }) {
   }));
 
   router.use('/', createAuthRouter({ linkBasePath: resolvedLinkBasePath }));
+  // Stage 4: /restaurants — отдельный роутер (server/routes/hq/restaurants.js),
+  // смонтирован ДО общего pagesRouter (тот ниже больше не содержит заглушки
+  // "Рестораны" — заменена этим полноценным разделом целиком).
+  router.use('/restaurants', createRequireHqAuth(resolvedLinkBasePath), createRestaurantsRouter({ linkBasePath: resolvedLinkBasePath }));
   router.use('/', createRequireHqAuth(resolvedLinkBasePath), createPagesRouter({ linkBasePath: resolvedLinkBasePath }));
 
   return router;
