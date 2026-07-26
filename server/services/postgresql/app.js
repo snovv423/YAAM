@@ -133,6 +133,16 @@ function validateAppEnv(env) {
   if (env.HQ_ADMIN_USER && (typeof env.HQ_SESSION_SECRET !== 'string' || env.HQ_SESSION_SECRET.length < 32)) {
     errors.push('При заданном HQ_ADMIN_USER переменная HQ_SESSION_SECRET обязательна и должна быть не короче 32 символов.');
   }
+  // Stage 2.1 — clean-root routing для hq.yaam.su: HQ_LINK_BASE_PATH решает,
+  // какой префикс роутер сам пишет в свои же ссылки/redirect'ы/form action/
+  // cookie path — '/hq' (по умолчанию, локально) или '' (за отдельным
+  // поддоменом-прокси, см. services/hq/basePath.js). Проверяется здесь ЕЩЁ
+  // РАЗ (тем же правилом, что и в normalizeHqLinkBasePath) — ошибка в этой
+  // переменной должна останавливать старт приложения понятным сообщением
+  // ДО того, как до неё вообще дойдёт createHqRouter().
+  if (env.HQ_LINK_BASE_PATH !== undefined && env.HQ_LINK_BASE_PATH !== '' && !/^\/[a-zA-Z0-9_-]+$/.test(env.HQ_LINK_BASE_PATH)) {
+    errors.push('HQ_LINK_BASE_PATH допускает только пустую строку ("") для clean-root или один сегмент вида "/hq".');
+  }
 
   // Production Switch — Stage 9: дословно тот же принцип, что уже
   // применяется в SQLite server.js (TRUST_PROXY поддерживает ТОЛЬКО
@@ -300,6 +310,7 @@ function createPostgresqlApp({
   hqAdminUser,
   hqAdminPasswordHash,
   hqSessionSecret,
+  hqLinkBasePath,
   botToken,
   botClient,
   onSignal,
@@ -312,6 +323,7 @@ function createPostgresqlApp({
   const resolvedHqAdminUser = hqAdminUser !== undefined ? hqAdminUser : env.HQ_ADMIN_USER;
   const resolvedHqAdminPasswordHash = hqAdminPasswordHash !== undefined ? hqAdminPasswordHash : env.HQ_ADMIN_PASSWORD_HASH;
   const resolvedHqSessionSecret = hqSessionSecret !== undefined ? hqSessionSecret : env.HQ_SESSION_SECRET;
+  const resolvedHqLinkBasePath = hqLinkBasePath !== undefined ? hqLinkBasePath : env.HQ_LINK_BASE_PATH;
   const resolvedBotToken = botToken !== undefined ? botToken : env.TELEGRAM_BOT_TOKEN;
   const resolvedPort = port !== undefined ? port : (Number(env.PG_HEALTH_PORT) || 3001);
   const resolvedHost = host !== undefined ? host : (env.PG_HEALTH_HOST || '127.0.0.1');
@@ -432,12 +444,20 @@ function createPostgresqlApp({
   // переменных HQ вообще не существует в приложении (не 404 "по умолчанию",
   // а маршрут физически не зарегистрирован). Собственный auth-слой внутри
   // (express-session + scrypt), НЕ Basic Auth — см. services/hq/*.
+  //
+  // Stage 2.1: внутренняя точка монтирования ВСЕГДА '/hq' — публичный
+  // clean-root на hq.yaam.su достигается только тем, что resolvedHqLinkBasePath
+  // (см. HQ_LINK_BASE_PATH выше) заставляет сам роутер писать другие ссылки
+  // в свои ответы; Nginx на VPS добавляет '/hq' обратно на пути к backend'у
+  // (см. docs/deploy-инструкцию в финальном отчёте Stage 2.1) — эта строка
+  // не меняется в обоих режимах.
   if (resolvedHqAdminUser && resolvedHqAdminPasswordHash && resolvedHqSessionSecret) {
     app.use('/hq', createHqRouter({
       adminUser: resolvedHqAdminUser,
       adminPasswordHash: resolvedHqAdminPasswordHash,
       sessionSecret: resolvedHqSessionSecret,
       isProduction: env.APP_ENV === 'production',
+      linkBasePath: resolvedHqLinkBasePath,
     }));
   } else {
     console.warn('[app-postgresql] HQ_ADMIN_USER/HQ_ADMIN_PASSWORD_HASH/HQ_SESSION_SECRET не заданы — YAAM HQ недоступен, пока их не задать в .env');

@@ -126,7 +126,7 @@ function renderSettings({ hqUser }) {
   `;
 }
 
-function createPagesRouter() {
+function createPagesRouter({ linkBasePath }) {
   const router = express.Router();
 
   router.get('/', async (req, res, next) => {
@@ -143,6 +143,7 @@ function createPagesRouter() {
         title: 'Обзор',
         active: 'overview',
         csrfToken,
+        linkBasePath,
         body: renderOverview({ top, active, restaurants, finance, attentionItems, csrfToken }),
       }));
     } catch (err) {
@@ -156,6 +157,7 @@ function createPagesRouter() {
       title: 'Рестораны',
       active: 'restaurants',
       csrfToken,
+      linkBasePath,
       body: renderStub({ title: 'Рестораны', message: 'Управление ресторанами будет реализовано на следующем этапе.' }),
     }));
   });
@@ -168,6 +170,7 @@ function createPagesRouter() {
         title: 'Финансы',
         active: 'finance',
         csrfToken,
+        linkBasePath,
         body: renderFinanceStub({ finance }),
       }));
     } catch (err) {
@@ -181,6 +184,7 @@ function createPagesRouter() {
       title: 'Настройки',
       active: 'settings',
       csrfToken,
+      linkBasePath,
       body: renderSettings({ hqUser: req.session.hqUser || '' }),
     }));
   });

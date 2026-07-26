@@ -8,6 +8,7 @@
 // HQ — рабочий инструмент, а не публичная страница: сознательно НЕ копируем
 // маркетинговую вёрстку client/ (шрифты/декор/анимации), только чистая
 // структура с минимумом визуального шума (п.8 задания).
+const { hqRootPath } = require('../services/hq/basePath');
 
 function esc(value) {
   if (value === null || value === undefined) return '';
@@ -19,23 +20,35 @@ function esc(value) {
     .replace(/'/g, '&#39;');
 }
 
-const NAV_ITEMS = [
-  { key: 'overview', href: '/hq', label: 'Обзор' },
-  { key: 'restaurants', href: '/hq/restaurants', label: 'Рестораны' },
-  { key: 'finance', href: '/hq/finance', label: 'Финансы' },
-  { key: 'settings', href: '/hq/settings', label: 'Настройки' },
-];
+// Stage 2.1 — clean-root routing: ссылки строятся из linkBasePath ('/hq'
+// локально, '' за отдельным поддоменом hq.yaam.su) — см.
+// services/hq/basePath.js. Пункт «Обзор» — особый случай (корень раздела,
+// без суффикса): '/hq' + '' = '/hq' локально, но '' + '' = '' было бы
+// невалидным href (означало бы "текущий документ", не "корень") — поэтому
+// использует hqRootPath(), а не голую конкатенацию.
+function buildNavItems(linkBasePath) {
+  return [
+    { key: 'overview', href: hqRootPath(linkBasePath), label: 'Обзор' },
+    { key: 'restaurants', href: `${linkBasePath}/restaurants`, label: 'Рестораны' },
+    { key: 'finance', href: `${linkBasePath}/finance`, label: 'Финансы' },
+    { key: 'settings', href: `${linkBasePath}/settings`, label: 'Настройки' },
+  ];
+}
 
 // active — ключ текущего раздела (для подсветки и aria-current).
 // csrfToken — нужен форме логаута (POST-запрос, требует CSRF, см.
 // server/services/hq/csrf.js).
-function layout({ title, active, body, csrfToken }) {
-  const navHtml = NAV_ITEMS.map((item) => {
+// linkBasePath — см. services/hq/basePath.js; по умолчанию '/hq'
+// (сохраняет локальное поведение Stage 2 без единой правки вызывающего кода).
+function layout({ title, active, body, csrfToken, linkBasePath = '/hq' }) {
+  const navItems = buildNavItems(linkBasePath);
+  const logoutAction = `${linkBasePath}/logout`;
+  const navHtml = navItems.map((item) => {
     const isActive = item.key === active;
     return `<a href="${item.href}" class="${isActive ? 'on' : ''}"${isActive ? ' aria-current="page"' : ''}>${esc(item.label)}</a>`;
   }).join('\n  ');
 
-  const mobileNavHtml = NAV_ITEMS.map((item) => {
+  const mobileNavHtml = navItems.map((item) => {
     const isActive = item.key === active;
     return `<a href="${item.href}" class="${isActive ? 'on' : ''}"${isActive ? ' aria-current="page"' : ''}>${esc(item.label)}</a>`;
   }).join('\n  ');
@@ -101,7 +114,7 @@ function layout({ title, active, body, csrfToken }) {
     <nav>
       ${navHtml}
     </nav>
-    <form class="logout-form" method="post" action="/hq/logout">
+    <form class="logout-form" method="post" action="${logoutAction}">
       <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
       <button type="submit" class="logout-btn">Выйти</button>
     </form>
@@ -110,7 +123,7 @@ function layout({ title, active, body, csrfToken }) {
 </div>
 <div class="mobile-top">
   <span class="brand">YAAM HQ</span>
-  <form class="logout-form" method="post" action="/hq/logout">
+  <form class="logout-form" method="post" action="${logoutAction}">
     <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
     <button type="submit" class="logout-btn">Выйти</button>
   </form>
@@ -122,4 +135,4 @@ function layout({ title, active, body, csrfToken }) {
 </html>`;
 }
 
-module.exports = { layout, esc, NAV_ITEMS };
+module.exports = { layout, esc, buildNavItems };

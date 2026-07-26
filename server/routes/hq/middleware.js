@@ -6,12 +6,17 @@
 // про одинаковую внешнюю ошибку и для входа).
 const rateLimit = require('express-rate-limit');
 
-function requireHqAuth(req, res, next) {
-  if (req.session && req.session.hqAuthenticated === true) return next();
-  if (req.accepts(['html', 'json']) === 'json') {
-    return res.status(401).json({ error: 'Требуется вход в YAAM HQ' });
-  }
-  return res.redirect('/hq/login');
+// Stage 2.1: редирект-таргет зависит от linkBasePath ('/hq/login' локально,
+// '/login' за clean-root reverse-proxy) — см. services/hq/basePath.js.
+function createRequireHqAuth(linkBasePath) {
+  const loginPath = `${linkBasePath}/login`;
+  return function requireHqAuth(req, res, next) {
+    if (req.session && req.session.hqAuthenticated === true) return next();
+    if (req.accepts(['html', 'json']) === 'json') {
+      return res.status(401).json({ error: 'Требуется вход в YAAM HQ' });
+    }
+    return res.redirect(loginPath);
+  };
 }
 
 function hqLoginRateLimitHandler(req, res) {
@@ -37,4 +42,4 @@ const loginRateLimiter = rateLimit({
   handler: hqLoginRateLimitHandler,
 });
 
-module.exports = { requireHqAuth, loginRateLimiter };
+module.exports = { createRequireHqAuth, loginRateLimiter };

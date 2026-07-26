@@ -9,8 +9,9 @@ const crypto = require('node:crypto');
 const { verifyPassword } = require('../../services/hq/passwordHash');
 const { ensureCsrfToken, requireCsrf } = require('../../services/hq/csrf');
 const { SESSION_COOKIE_NAME } = require('../../services/hq/session');
+const { hqRootPath } = require('../../services/hq/basePath');
 const { esc } = require('../../hq/layout');
-const { requireHqAuth, loginRateLimiter } = require('./middleware');
+const { createRequireHqAuth, loginRateLimiter } = require('./middleware');
 
 // Сравнение логина в постоянное время — не потому что логин секретный сам
 // по себе, а чтобы код ответа/тайминг никогда не давали два разных сигнала
@@ -27,7 +28,9 @@ function timingSafeStringEqual(a, b) {
   return crypto.timingSafeEqual(bufA, bufB);
 }
 
-function renderLoginPage({ csrfToken, error }) {
+function renderLoginPage({ csrfToken, error, linkBasePath }) {
+  const loginAction = `${linkBasePath}/login`;
+  const staticScriptSrc = `${linkBasePath}/static/hq.js`;
   return `<!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -50,7 +53,7 @@ function renderLoginPage({ csrfToken, error }) {
 </style>
 </head>
 <body>
-<form class="card" method="post" action="/hq/login" id="hq-login-form">
+<form class="card" method="post" action="${loginAction}" id="hq-login-form">
   <h1>YAAM HQ</h1>
   <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
   <label for="username">Логин</label>
@@ -60,20 +63,27 @@ function renderLoginPage({ csrfToken, error }) {
   <button type="submit" id="hq-login-submit">Войти</button>
   ${error ? `<div class="error">${esc(error)}</div>` : ''}
 </form>
-<script src="/hq/static/hq.js" defer></script>
+<script src="${staticScriptSrc}" defer></script>
 </body>
 </html>`;
 }
 
-function createAuthRouter({ adminUser, adminPasswordHash }) {
+function createAuthRouter({ adminUser, adminPasswordHash, linkBasePath }) {
   const router = express.Router();
+  const requireHqAuth = createRequireHqAuth(linkBasePath);
+  const rootPath = hqRootPath(linkBasePath);
+  const loginPath = `${linkBasePath}/login`;
+  // ДОЛЖЕН побайтово совпадать с cookie.path в services/hq/session.js
+  // (там тот же hqRootPath(linkBasePath)) — иначе clearCookie ниже не
+  // сотрёт cookie, выставленную при логине, и logout не будет настоящим.
+  const cookiePath = rootPath;
 
   router.get('/login', (req, res) => {
     if (req.session && req.session.hqAuthenticated === true) {
-      return res.redirect('/hq');
+      return res.redirect(rootPath);
     }
     const csrfToken = ensureCsrfToken(req);
-    res.send(renderLoginPage({ csrfToken }));
+    res.send(renderLoginPage({ csrfToken, linkBasePath }));
   });
 
   router.post('/login', loginRateLimiter, requireCsrf, async (req, res, next) => {
@@ -87,7 +97,7 @@ function createAuthRouter({ adminUser, adminPasswordHash }) {
       const usernameOk = timingSafeStringEqual(username, adminUser);
       if (!passwordOk || !usernameOk) {
         const csrfToken = ensureCsrfToken(req);
-        return res.status(401).send(renderLoginPage({ csrfToken, error: 'Неверный логин или пароль.' }));
+        return res.status(401).send(renderLoginPage({ csrfToken, error: 'Неверный логин или пароль.', linkBasePath }));
       }
       // Ротация session ID при успешном входе — защита от session fixation
       // (атакующий не может подсунуть жертве заранее известный ID сессии,
@@ -98,7 +108,7 @@ function createAuthRouter({ adminUser, adminPasswordHash }) {
         req.session.hqUser = username;
         req.session.save((saveErr) => {
           if (saveErr) return next(saveErr);
-          res.redirect('/hq');
+          res.redirect(rootPath);
         });
       });
     } catch (err) {
@@ -109,11 +119,8 @@ function createAuthRouter({ adminUser, adminPasswordHash }) {
   router.post('/logout', requireHqAuth, requireCsrf, (req, res, next) => {
     req.session.destroy((err) => {
       if (err) return next(err);
-      // path должен буквально совпадать с тем, с которым cookie была
-      // выставлена (session.js: cookie.path='/hq') — иначе браузер не
-      // применит истечение и старая cookie переживёт "выход".
-      res.clearCookie(SESSION_COOKIE_NAME, { path: '/hq' });
-      res.redirect('/hq/login');
+      res.clearCookie(SESSION_COOKIE_NAME, { path: cookiePath });
+      res.redirect(loginPath);
     });
   });
 

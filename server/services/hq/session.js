@@ -16,9 +16,19 @@ const session = require('express-session');
 const SESSION_COOKIE_NAME = 'yaam.hq.sid';
 const SESSION_MAX_AGE_MS = 12 * 60 * 60 * 1000; // 12 часов, продлевается активностью (rolling)
 
-function createHqSessionMiddleware({ secret, isProduction }) {
+// cookiePath — Stage 2.1: '/hq' локально (не отправляется на /api, /admin,
+// публичный сайт), '/' за отдельным поддоменом hq.yaam.su в clean-root
+// режиме (там HQ и есть весь сайт этого хоста — сузить путь дальше уже
+// некуда, а host-only природа cookie и так не даёт ей уйти на другой домен).
+// Значение ДОЛЖНО совпадать с тем, что рендерят routes/hq/auth.js
+// (logout clearCookie) и services/hq/basePath.js (hqRootPath) — иначе
+// logout не сможет корректно стереть cookie, выставленную при логине.
+function createHqSessionMiddleware({ secret, isProduction, cookiePath }) {
   if (typeof secret !== 'string' || secret.length < 32) {
     throw new Error('HQ_SESSION_SECRET обязателен и должен быть длиной не меньше 32 символов');
+  }
+  if (typeof cookiePath !== 'string' || !cookiePath.startsWith('/')) {
+    throw new Error('createHqSessionMiddleware требует валидный cookiePath (например, "/hq" или "/")');
   }
   return session({
     name: SESSION_COOKIE_NAME,
@@ -35,10 +45,7 @@ function createHqSessionMiddleware({ secret, isProduction }) {
       secure: isProduction,
       sameSite: 'lax',
       maxAge: SESSION_MAX_AGE_MS,
-      // Cookie ограничена путём /hq — браузер не отправляет её ни на
-      // публичный сайт, ни на /api, ни на /admin (отдельная поверхность,
-      // отдельная cookie, минимум лишних данных в каждом запросе).
-      path: '/hq',
+      path: cookiePath,
     },
   });
 }
