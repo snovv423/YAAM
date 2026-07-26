@@ -25,6 +25,7 @@ const crypto = require('node:crypto');
 const apiRoutes = require('../../routes/postgresql/api');
 const adminRoutes = require('../../routes/postgresql/admin');
 const { createHqRouter } = require('../../routes/hq');
+const hqOwnerService = require('../hq/ownerService');
 const { buildCorsOptions } = require('../../config/cors');
 const { createPauseExpiryScheduler, createOrderTimeoutScheduler, createRefundReconciliationScheduler } = require('./scheduler');
 const { createHealthCheck } = require('./health');
@@ -121,17 +122,22 @@ function validateAppEnv(env) {
 
   // HQ Stage 2 — тот же fail-closed принцип, что у ADMIN_USER/ADMIN_PASS
   // (см. выше): HQ_ADMIN_USER без HQ_ADMIN_PASSWORD_HASH (и наоборот) —
-  // явная ошибка конфигурации, а не "наполовину включённая" панель.
+  // явная ошибка конфигурации. Stage 3: эта пара больше НЕ обязательна для
+  // работы HQ вообще — владелец хранится в PostgreSQL (hq_owner), .env
+  // нужен только один раз, для самого первого bootstrap пустой таблицы (см.
+  // hqOwnerService.bootstrapOwnerFromEnv() ниже). Правило "заданы либо обе,
+  // либо ни одной" остаётся: наполовину заданная пара — конфигурационная
+  // ошибка (опечатка), а не "бутстрап просто не произойдёт".
   if (Boolean(env.HQ_ADMIN_USER) !== Boolean(env.HQ_ADMIN_PASSWORD_HASH)) {
     errors.push('HQ_ADMIN_USER и HQ_ADMIN_PASSWORD_HASH должны быть заданы вместе (сейчас задан только один из двух).');
   }
-  // Если владелец в принципе намерен включить HQ (задан HQ_ADMIN_USER) —
-  // HQ_SESSION_SECRET обязателен и не может быть коротким/пустым. Это не
-  // "функция выключена" (тогда просто не монтируем роутер, см. ниже) — это
-  // "включена наполовину", то есть небезопасно, поэтому здесь именно
-  // fail-closed отказ запуска, а не тихий пропуск.
-  if (env.HQ_ADMIN_USER && (typeof env.HQ_SESSION_SECRET !== 'string' || env.HQ_SESSION_SECRET.length < 32)) {
-    errors.push('При заданном HQ_ADMIN_USER переменная HQ_SESSION_SECRET обязательна и должна быть не короче 32 символов.');
+  // Stage 3: HQ_SESSION_SECRET — теперь ЕДИНСТВЕННАЯ переменная, реально
+  // обязательная для существования HQ (владелец больше не обязан жить в
+  // .env — см. выше). Проверяется её собственная валидность БЕЗУСЛОВНО
+  // (не только "если задан HQ_ADMIN_USER", как было в Stage 2) — короткий
+  // секрет опасен сам по себе, независимо от того, откуда берётся владелец.
+  if (env.HQ_SESSION_SECRET !== undefined && env.HQ_SESSION_SECRET !== '' && env.HQ_SESSION_SECRET.length < 32) {
+    errors.push('HQ_SESSION_SECRET должен быть не короче 32 символов.');
   }
   // Stage 2.1 — clean-root routing для hq.yaam.su: HQ_LINK_BASE_PATH решает,
   // какой префикс роутер сам пишет в свои же ссылки/redirect'ы/form action/
@@ -439,28 +445,34 @@ function createPostgresqlApp({
     console.warn('[app-postgresql] ADMIN_USER/ADMIN_PASS не заданы — админка недоступна, пока их не задать в .env');
   }
 
-  // 8b. HQ — закрытая панель владельца (Stage 2). Fail-closed по точке
-  // монтирования, тем же принципом, что и /admin выше: без всех трёх
-  // переменных HQ вообще не существует в приложении (не 404 "по умолчанию",
-  // а маршрут физически не зарегистрирован). Собственный auth-слой внутри
-  // (express-session + scrypt), НЕ Basic Auth — см. services/hq/*.
+  // 8b. HQ — закрытая панель владельца. Fail-closed по точке монтирования,
+  // тем же принципом, что и /admin выше: без HQ_SESSION_SECRET HQ вообще не
+  // существует в приложении (не 404 "по умолчанию", а маршрут физически не
+  // зарегистрирован). Собственный auth-слой внутри (express-session +
+  // scrypt), НЕ Basic Auth — см. services/hq/*.
+  //
+  // Stage 3: HQ_ADMIN_USER/HQ_ADMIN_PASSWORD_HASH БОЛЬШЕ НЕ входят в это
+  // условие — владелец хранится в PostgreSQL (hq_owner), а не в .env;
+  // единственное, без чего HQ не может существовать в принципе — секрет
+  // сессии. Если ADMIN_USER/HASH заданы — они используются НИЖЕ ровно один
+  // раз, для bootstrap пустой таблицы hq_owner (см. hqOwnerService), но их
+  // отсутствие само по себе НЕ выключает HQ — если владелец уже был создан
+  // раньше (этим же bootstrap'ом на прошлом запуске, или через
+  // scripts/reset-hq-owner.js), .env для входа больше не требуется вовсе.
   //
   // Stage 2.1: внутренняя точка монтирования ВСЕГДА '/hq' — публичный
   // clean-root на hq.yaam.su достигается только тем, что resolvedHqLinkBasePath
   // (см. HQ_LINK_BASE_PATH выше) заставляет сам роутер писать другие ссылки
   // в свои ответы; Nginx на VPS добавляет '/hq' обратно на пути к backend'у
-  // (см. docs/deploy-инструкцию в финальном отчёте Stage 2.1) — эта строка
-  // не меняется в обоих режимах.
-  if (resolvedHqAdminUser && resolvedHqAdminPasswordHash && resolvedHqSessionSecret) {
+  // (см. докс в финальном отчёте Stage 2.1) — эта строка не меняется.
+  if (resolvedHqSessionSecret) {
     app.use('/hq', createHqRouter({
-      adminUser: resolvedHqAdminUser,
-      adminPasswordHash: resolvedHqAdminPasswordHash,
       sessionSecret: resolvedHqSessionSecret,
       isProduction: env.APP_ENV === 'production',
       linkBasePath: resolvedHqLinkBasePath,
     }));
   } else {
-    console.warn('[app-postgresql] HQ_ADMIN_USER/HQ_ADMIN_PASSWORD_HASH/HQ_SESSION_SECRET не заданы — YAAM HQ недоступен, пока их не задать в .env');
+    console.warn('[app-postgresql] HQ_SESSION_SECRET не задан — YAAM HQ недоступен, пока его не задать в .env');
   }
 
   // 9. dev/test-маршруты — единственный существующий (dev-confirm-payment)
@@ -500,6 +512,27 @@ function createPostgresqlApp({
 
     try {
       await lifecycle.start({ bootstrap: bootstrapOptions });
+
+      // Stage 3 — единственное место, где .env вообще участвует во
+      // владельце HQ: заполняет ПУСТУЮ таблицу hq_owner РОВНО один раз (сам
+      // bootstrapOwnerFromEnv() — ON CONFLICT DO NOTHING, идемпотентен на
+      // каждом следующем перезапуске процесса). Выполняется здесь (после
+      // успешного db-bootstrap, до ready=true), а не лениво при первом
+      // логине — совпадает с буквальной формулировкой задания "при первом
+      // запуске проекта". Если ADMIN_USER/HASH не заданы — просто ничего не
+      // делает (не ошибка: значит, владелец либо уже есть в БД, либо HQ пока
+      // не сконфигурирован для входа вообще, что уже отражено предупреждением
+      // в консоли выше).
+      if (resolvedHqSessionSecret && resolvedHqAdminUser && resolvedHqAdminPasswordHash) {
+        const { created } = await hqOwnerService.bootstrapOwnerFromEnv({
+          login: resolvedHqAdminUser,
+          passwordHash: resolvedHqAdminPasswordHash,
+        });
+        if (created) {
+          console.log('[app-postgresql] HQ owner создан из .env (первая инициализация hq_owner)');
+        }
+      }
+
       ready = true;
     } catch (err) {
       ready = false;

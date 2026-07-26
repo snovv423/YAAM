@@ -351,15 +351,24 @@ test('B11b: HQ_ADMIN_USER задан один, без HQ_ADMIN_PASSWORD_HASH —
   }, /HQ_ADMIN_USER и HQ_ADMIN_PASSWORD_HASH должны быть заданы вместе/);
 });
 
-test('B11c: HQ_ADMIN_USER+HQ_ADMIN_PASSWORD_HASH заданы, но без HQ_SESSION_SECRET — приложение отказывается стартовать', () => {
-  const appModule = reloadHqAppModule();
-  assert.throws(() => {
-    appModule.createPostgresqlApp({
-      port: 0,
-      env: { ...process.env, HQ_ADMIN_USER: 'owner', HQ_ADMIN_PASSWORD_HASH: TEST_HQ_PASSWORD_HASH },
-    });
-  }, /HQ_SESSION_SECRET обязательна/);
-});
+test('B11c (обновлено Stage 3): HQ_ADMIN_USER+HQ_ADMIN_PASSWORD_HASH заданы, но без HQ_SESSION_SECRET — приложение НЕ отказывается стартовать, HQ просто не смонтирован', withHqApp({
+  hqAdminUser: 'owner', hqAdminPasswordHash: TEST_HQ_PASSWORD_HASH, hqSessionSecret: undefined,
+}, async ({ port }) => {
+  // Stage 2: HQ_SESSION_SECRET был обязателен, ТОЛЬКО когда задан
+  // HQ_ADMIN_USER (владелец жил в .env, "наполовину настроенный" вход был
+  // бы небезопасен) — createPostgresqlApp() бросал на старте.
+  //
+  // Stage 3: владелец хранится в PostgreSQL (hq_owner), а HQ_ADMIN_USER/
+  // HQ_ADMIN_PASSWORD_HASH используются ТОЛЬКО для одноразового bootstrap
+  // пустой таблицы — сами по себе они больше не делают HQ "наполовину
+  // настроенным". Единственное, без чего HQ не может существовать в
+  // принципе — HQ_SESSION_SECRET (без него невозможны сессии вообще,
+  // независимо от того, где живёт владелец). Поэтому теперь это НЕ ошибка
+  // конфигурации, а прежний fail-closed сценарий "HQ выключен" (как B11a) —
+  // приложение стартует нормально, роутер просто не монтируется (404).
+  const res = await fetch(`http://127.0.0.1:${port}/hq/login`);
+  assert.equal(res.status, 404, 'без HQ_SESSION_SECRET роутер не должен монтироваться, даже если заданы ADMIN_USER/HASH');
+}));
 
 test('B11d: HQ_SESSION_SECRET короче 32 символов — приложение отказывается стартовать', () => {
   const appModule = reloadHqAppModule();

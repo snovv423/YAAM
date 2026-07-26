@@ -381,4 +381,65 @@ BEFORE UPDATE ON refunds
 FOR EACH ROW
 EXECUTE FUNCTION fn_refunds_immutable_fields();
 
+-- =========================================================================
+-- hq_owner
+-- =========================================================================
+-- YAAM HQ Stage 3: единственный владелец закрытой панели HQ, хранится в
+-- PostgreSQL вместо .env. `id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1)` —
+-- тот же db-backstop принцип, что и триггеры refunds выше (см. заголовок
+-- файла): единственная строка гарантирована самой БД (PRIMARY KEY не даст
+-- вставить вторую строку с id=1; CHECK не даст обойти это, вставив строку с
+-- ЛЮБЫМ другим id) — не только "приложение не создаёт второго владельца",
+-- а невозможность этого на уровне схемы. Никаких email/role/recovery-полей —
+-- HQ намеренно остаётся панелью ровно одного владельца без ролей и
+-- восстановления по почте (задание, раздел "Запретить").
+--
+-- Если строка отсутствует — HQ работает fail-closed: логин отвечает
+-- "неверный логин или пароль" для любых введённых данных (некого сравнивать),
+-- а не тихо разрешает вход/не откатывается на .env. Заполняется один раз, при
+-- первом старте, из HQ_ADMIN_USER/HQ_ADMIN_PASSWORD_HASH (см.
+-- server/services/hq/ownerService.js bootstrapOwnerFromEnv — INSERT ... ON
+-- CONFLICT (id) DO NOTHING, идемпотентно: повторный bootstrap на уже
+-- заполненную таблицу — гарантированный no-op, не перезаписывает и не
+-- сбрасывает существующего владельца).
+--
+-- credentials_version — единственный механизм "разлогинить все сессии" в
+-- этой архитектуре (сессии хранятся в process-memory MemoryStore, см.
+-- server/services/hq/session.js — ни отдельного стора, ни возможности
+-- перечислить/удалить чужие сессии по ID нет и не требуется): при логине
+-- текущее значение записывается в саму сессию, а на каждый защищённый запрос
+-- requireHqAuth сверяет его с актуальным значением из этой таблицы — смена
+-- логина/пароля увеличивает счётчик, и ЛЮБАЯ сессия с более старым
+-- credentials_version (включая ту, из которой сделана сама смена) на
+-- следующий же запрос считается недействительной и принудительно
+-- разлогинивается — без необходимости знать, сколько было открыто сессий
+-- и где именно они хранятся.
+CREATE TABLE IF NOT EXISTS hq_owner (
+  id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+  login TEXT NOT NULL,
+  password_hash TEXT NOT NULL,
+  credentials_version INTEGER NOT NULL DEFAULT 1,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- =========================================================================
+-- hq_security_log
+-- =========================================================================
+-- Журнал событий безопасности HQ (задание, раздел 6). Намеренно НЕ хранит
+-- пароли/хеши/токены/содержимое сессии — только тип события, время, IP.
+-- event_type — закрытый список (CHECK), не свободный текст: тот же принцип,
+-- что и у orders.status/payments.status выше — набор реально
+-- различаемых кодом событий, а не произвольная строка из вызывающего места.
+CREATE TABLE IF NOT EXISTS hq_security_log (
+  id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  event_type TEXT NOT NULL CHECK (event_type IN (
+    'login_success', 'login_failed', 'login_rate_limited',
+    'login_change', 'password_change', 'emergency_reset', 'logout'
+  )),
+  ip TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS ix_hq_security_log_created_at ON hq_security_log (created_at);
+
 COMMIT;

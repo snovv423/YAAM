@@ -2,6 +2,24 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { test, expect } from '@playwright/test';
 
+// YAAM HQ Stage 3 — владелец HQ теперь хранится в PostgreSQL (hq_owner,
+// db/postgresql/schema.sql), ОДНА строка на всю БД. Этот файл делит ту же
+// embedded PostgreSQL, что и главный instance из global-setup.ts (см. ниже,
+// YAAM_E2E_DATABASE_URL) — значит делит и того же самого владельца. До
+// Stage 3 у каждого созданного здесь createPostgresqlApp()-instance были
+// СВОИ, независимые в памяти учётные данные (hqAdminUser/hqAdminPasswordHash
+// передавались напрямую, БД не участвовала) — можно было сгенерировать
+// собственный случайный пароль для этого файла, не заботясь о конфликте с
+// hq-login-flow.spec.ts. Начиная со Stage 3 bootstrap владельца ИДЕМПОТЕНТЕН
+// НА УРОВНЕ БД (ON CONFLICT DO NOTHING) — тот, кто бутстрапится первым
+// (всегда главный instance из global-setup.ts), "побеждает"; повторная
+// попытка бутстрапа здесь была бы молчаливым no-op, а собственный случайный
+// пароль этого файла просто не совпадал бы с реальным паролем владельца в
+// БД. Поэтому здесь используются ТЕ ЖЕ YAAM_E2E_HQ_ADMIN_USER/
+// YAAM_E2E_HQ_ADMIN_PASSWORD, что и в hq-login-flow.spec.ts, а не
+// собственные сгенерированные — единственно корректный подход при
+// синглтон-владельце в общей БД.
+
 // YAAM HQ Stage 2.1 — clean-root browser E2E, запускается ИМЕННО против
 // origin тестового reverse-proxy (server/test/postgresql/helpers/
 // hqReverseProxy.js), который воспроизводит точное поведение реального
@@ -35,14 +53,14 @@ let hqAdminPassword: string;
 
 test.beforeAll(async () => {
   const databaseUrl = process.env.YAAM_E2E_DATABASE_URL;
-  if (!databaseUrl) {
-    throw new Error('YAAM_E2E_DATABASE_URL не задан — global-setup.ts не выполнился?');
+  hqAdminUser = process.env.YAAM_E2E_HQ_ADMIN_USER || '';
+  hqAdminPassword = process.env.YAAM_E2E_HQ_ADMIN_PASSWORD || '';
+  if (!databaseUrl || !hqAdminUser || !hqAdminPassword) {
+    throw new Error('YAAM_E2E_DATABASE_URL / YAAM_E2E_HQ_ADMIN_USER / YAAM_E2E_HQ_ADMIN_PASSWORD не заданы — global-setup.ts не выполнился?');
   }
 
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { createPostgresqlApp } = require(path.join(SERVER_DIR, 'services/postgresql/app.js'));
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { hashPassword } = require(path.join(SERVER_DIR, 'services/hq/passwordHash.js'));
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { startHqReverseProxy } = require(path.join(SERVER_DIR, 'test/postgresql/helpers/hqReverseProxy.js'));
   // embeddedPg.js стирает DATABASE_URL/PG*-переменные КАК ПОБОЧНЫЙ ЭФФЕКТ
@@ -59,9 +77,6 @@ test.beforeAll(async () => {
   process.env.DATABASE_URL = databaseUrl;
   process.env.PAYMENT_PROVIDER = process.env.PAYMENT_PROVIDER || 'mock';
 
-  hqAdminUser = 'owner';
-  hqAdminPassword = `CleanRoot-${crypto.randomBytes(9).toString('base64url')}`;
-  const hqAdminPasswordHash = await hashPassword(hqAdminPassword);
   const hqSessionSecret = crypto.randomBytes(32).toString('hex');
 
   const appPort = await getFreePort();
@@ -69,8 +84,11 @@ test.beforeAll(async () => {
     port: appPort,
     host: '127.0.0.1',
     schedulerIntervalMs: 1_000_000,
-    hqAdminUser,
-    hqAdminPasswordHash,
+    // hqAdminUser/hqAdminPasswordHash сознательно НЕ передаются: владелец
+    // уже забутстрапен главным instance'ом из global-setup.ts, повторный
+    // bootstrap здесь был бы no-op (см. комментарий в шапке файла) — этот
+    // instance просто аутентифицируется против уже существующего в БД
+    // владельца через hqSessionSecret.
     hqSessionSecret,
     hqLinkBasePath: '', // clean-root — предмет этого теста
   });
