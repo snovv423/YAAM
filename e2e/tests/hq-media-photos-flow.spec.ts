@@ -218,5 +218,27 @@ test('YAAM HQ: полный цикл медиа-системы — фото ре
   const actualFileCount = countFilesRecursive(MEDIA_LOCAL_DIR!);
   expect(actualFileCount).toBeGreaterThanOrEqual(expectedFileCount);
 
+  // 18. Stage 5B.2 — приватный master физически не доступен ни по какому
+  // публичному пути, даже при точном знании его расположения (задание,
+  // раздел 3: "master не должен быть доступен через URL даже при угадывании
+  // пути"). /media-fixtures монтирует ТОЛЬКО public/ подкаталог (см.
+  // services/postgresql/app.js) — запрос под private/ физически выходит за
+  // пределы смонтированного static-корня и получает 404 от express.static
+  // самим фактом того, что этого пути там нет, без какой-либо специальной
+  // проверки "это master, отказать".
+  const storageKeyRows = await db.query('SELECT storage_key FROM restaurant_photos WHERE restaurant_id = $1 LIMIT 1', [restaurantId]);
+  const storageKeyBase: string = storageKeyRows[0].storage_key;
+  const masterUrl = `${API_BASE_URL}/media-fixtures/private/masters/${storageKeyBase}/master.webp`;
+  const masterRes = await page.request.get(masterUrl);
+  expect(masterRes.status()).toBe(404);
+  // Контраст: соответствующий публичный thumb того же базового ключа
+  // ДОЛЖЕН быть доступен — подтверждает, что 404 выше — это специфично для
+  // private/, а не общая поломка static-раздачи. /media-fixtures монтирует
+  // baseDir/public как корень, а getPublicUrl() стрипает префикс "public/"
+  // из objectKey при выводе URL — реальный путь его не повторяет.
+  const thumbUrl = `${API_BASE_URL}/media-fixtures/${storageKeyBase}/thumb.webp`;
+  const thumbRes = await page.request.get(thumbUrl);
+  expect(thumbRes.status()).toBe(200);
+
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });

@@ -6,7 +6,7 @@
 // delete()) — тот же принцип "один сервис = единственный источник SQL для
 // своего раздела", что и menuAdminService.js/restaurantAdminService.js.
 //
-// provider (LocalMediaProvider | S3MediaProvider) передаётся явным
+// provider (LocalMediaProvider) передаётся явным
 // параметром в каждую функцию, которая реально трогает хранилище — не
 // импортируется здесь как singleton, чтобы:
 //   1) unit/integration-тесты могли передать LocalMediaProvider с временным
@@ -27,6 +27,7 @@ const db = require('../../../db/postgresql');
 const { ValidationError } = require('../restaurantLifecycle');
 const menuSvc = require('../menuAdminService');
 const { processImage, VARIANTS, PUBLIC_VARIANT_NAMES } = require('./imagePipeline');
+const { MIN_FREE_BYTES_FOR_UPLOAD, LOW_SPACE_WARNING_BYTES } = require('./diskUsage');
 
 const ALT_TEXT_MAX = 200;
 // Разумный верхний предел количества фотографий на одного владельца —
@@ -35,8 +36,20 @@ const MAX_PHOTOS_PER_OWNER = 20;
 
 const ALL_VARIANT_NAMES = Object.keys(VARIANTS); // ['thumb', 'card', 'full', 'master']
 
+// Stage 5B.2 (задание, раздел 3) — единый storageKeyBase (например
+// `restaurants/12/<uuid>`) остаётся ОДНОЙ колонкой в БД (без изменения
+// схемы — задание, раздел 13: "предпочесть сохранить текущую схему"), но
+// физический путь на диске разный для публичных вариантов и приватного
+// master: `public/...` отдаётся наружу (Nginx/Express static), `private/
+// masters/...` — никогда. Master не должен быть доступен по URL даже при
+// угадывании пути (задание, раздел 3) — здесь достигается тем, что мастер
+// физически лежит в отдельном поддереве, которое ни Nginx, ни Express
+// static в принципе не монтируют (см. services/postgresql/app.js).
 function variantObjectKey(storageKeyBase, variant) {
-  return `${storageKeyBase}-${variant}.webp`;
+  if (variant === 'master') {
+    return `private/masters/${storageKeyBase}/master.webp`;
+  }
+  return `public/${storageKeyBase}/${variant}.webp`;
 }
 
 // Публичные URL фотографии — всегда ВЫВОДЯТСЯ из storage_key через активный
@@ -118,6 +131,31 @@ async function uploadPhoto(config, provider, ownerId, buffer, altTextRaw) {
   );
   if (countRows[0].n >= MAX_PHOTOS_PER_OWNER) {
     throw new ValidationError(`Достигнут предел ${MAX_PHOTOS_PER_OWNER} фотографий — сначала удалите лишние.`);
+  }
+
+  // Операционная проверка места на диске (задание, раздел 11) — duck-typed:
+  // не каждый провайдер обязан её поддерживать (только LocalMediaProvider,
+  // единственный существующий, её реализует). Fail-closed только при реально
+  // опасном остатке (недостаточно места даже для одной загрузки со всеми
+  // вариантами), иначе — просто предупреждение в лог, загрузка не
+  // блокируется раньше необходимого.
+  if (typeof provider.getDiskUsage === 'function') {
+    try {
+      const usage = await provider.getDiskUsage();
+      if (usage.freeBytes < MIN_FREE_BYTES_FOR_UPLOAD) {
+        console.error(`[photoService] Недостаточно места на диске для загрузки: свободно ${usage.freeBytes} байт.`);
+        throw new ValidationError('Недостаточно свободного места на сервере для загрузки фотографии — обратитесь к администратору YAAM.');
+      }
+      if (usage.freeBytes < LOW_SPACE_WARNING_BYTES) {
+        console.warn(`[photoService] Мало свободного места на медиа-хранилище: ${(usage.freeBytes / 1024 / 1024 / 1024).toFixed(1)} ГБ свободно.`);
+      }
+    } catch (err) {
+      if (err instanceof ValidationError) throw err;
+      // Сама проверка не удалась (например, statfs временно недоступен) —
+      // не должна блокировать загрузку сама по себе (задание: "без лишнего
+      // шума", "не блокировать загрузку слишком рано").
+      console.error('[photoService] Не удалось проверить свободное место на диске:', err.message);
+    }
   }
 
   // Валидация/обработка (сигнатура, размер, decompression bomb, EXIF,

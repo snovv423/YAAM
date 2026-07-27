@@ -38,14 +38,16 @@ function createHqRouter({ sessionSecret, isProduction, linkBasePath, mediaProvid
   const router = express.Router();
 
   // Stage 5B: если медиа реально настроено, CSP img-src должен разрешать
-  // origin, на котором физически лежат фотографии (S3-совместимое
-  // хранилище/CDN) — иначе браузер молча блокирует все <img> в HQ.
-  // getPublicUrl() — чистая функция без сети (см. services/hq/media/
-  // provider.js), безопасно вызвать один раз при сборке роутера.
+  // origin, на котором физически лежат фотографии — иначе браузер молча
+  // блокирует все <img> в HQ. getPublicUrl() — чистая функция без сети (см.
+  // services/hq/media/provider.js), безопасно вызвать один раз при сборке
+  // роутера. Stage 5B.2: getPublicUrl() теперь отказывается строить URL для
+  // чего угодно вне префикса `public/` — пробный ключ должен ему
+  // соответствовать, иначе этот вызов сам бы бросал исключение.
   let mediaImgOrigin = null;
   if (mediaProvider) {
     try {
-      mediaImgOrigin = new URL(mediaProvider.getPublicUrl('csp-probe')).origin;
+      mediaImgOrigin = new URL(mediaProvider.getPublicUrl('public/csp-probe')).origin;
     } catch {
       mediaImgOrigin = null;
     }
@@ -76,7 +78,7 @@ function createHqRouter({ sessionSecret, isProduction, linkBasePath, mediaProvid
   // смонтирован ДО общего pagesRouter (тот ниже больше не содержит заглушки
   // "Рестораны" — заменена этим полноценным разделом целиком).
   router.use('/restaurants', createRequireHqAuth(resolvedLinkBasePath), createRestaurantsRouter({ linkBasePath: resolvedLinkBasePath, mediaProvider }));
-  router.use('/', createRequireHqAuth(resolvedLinkBasePath), createPagesRouter({ linkBasePath: resolvedLinkBasePath }));
+  router.use('/', createRequireHqAuth(resolvedLinkBasePath), createPagesRouter({ linkBasePath: resolvedLinkBasePath, mediaProvider }));
 
   return router;
 }

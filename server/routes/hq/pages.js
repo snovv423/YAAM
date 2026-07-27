@@ -117,9 +117,29 @@ function renderFinanceStub({ finance }) {
   `;
 }
 
-function renderSettings({ hqUser, linkBasePath, csrfToken, loginError, passwordError }) {
+// Stage 5B.2 (задание, раздел 11) — компактная read-only строка о занятом
+// медиа-хранилищем месте, только если данные получены надёжно (statfs +
+// обход каталога прошли без ошибки) — иначе панель просто не рендерится,
+// без сообщения об ошибке (задание: "без лишнего шума", "не строить
+// отдельный dashboard").
+function formatBytesMb(bytes) {
+  return `${Math.round(bytes / (1024 * 1024))} МБ`;
+}
+function formatBytesGb(bytes) {
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} ГБ`;
+}
+
+function renderSettings({ hqUser, linkBasePath, csrfToken, loginError, passwordError, mediaDiskUsage }) {
   const changeLoginAction = `${linkBasePath}/settings/change-login`;
   const changePasswordAction = `${linkBasePath}/settings/change-password`;
+  const mediaPanel = mediaDiskUsage ? `
+    <div class="panel">
+      <div style="font-weight:700;margin-bottom:14px">Хранилище фотографий</div>
+      <table>
+        <tr><td>Занято фотографиями</td><td style="text-align:right">${formatBytesMb(mediaDiskUsage.usedByMediaBytes)}</td></tr>
+        <tr><td>Свободно на диске</td><td style="text-align:right">${formatBytesGb(mediaDiskUsage.freeBytes)}</td></tr>
+      </table>
+    </div>` : '';
   return `
     <h1>Настройки</h1>
     <div class="panel">
@@ -129,6 +149,7 @@ function renderSettings({ hqUser, linkBasePath, csrfToken, loginError, passwordE
         <tr><td>Статус сессии</td><td style="text-align:right">Активна</td></tr>
       </table>
     </div>
+    ${mediaPanel}
 
     <div class="panel">
       <div style="font-weight:700;margin-bottom:10px">Безопасность</div>
@@ -165,7 +186,7 @@ function renderSettings({ hqUser, linkBasePath, csrfToken, loginError, passwordE
   `;
 }
 
-function createPagesRouter({ linkBasePath }) {
+function createPagesRouter({ linkBasePath, mediaProvider = null }) {
   const router = express.Router();
   const rootPath = hqRootPath(linkBasePath);
   const loginPath = `${linkBasePath}/login`;
@@ -214,14 +235,26 @@ function createPagesRouter({ linkBasePath }) {
     }
   });
 
-  router.get('/settings', (req, res) => {
+  router.get('/settings', async (req, res) => {
     const csrfToken = ensureCsrfToken(req);
+    // Stage 5B.2 (задание, раздел 11) — best-effort: если провайдер не
+    // поддерживает getDiskUsage() или проверка сама не удалась (например,
+    // statfs временно недоступен), панель просто не показывается — не
+    // ошибка страницы "Настройки" целиком.
+    let mediaDiskUsage = null;
+    if (mediaProvider && typeof mediaProvider.getDiskUsage === 'function') {
+      try {
+        mediaDiskUsage = await mediaProvider.getDiskUsage();
+      } catch (err) {
+        console.error('[hq/settings] Не удалось получить статистику диска медиа-хранилища:', err.message);
+      }
+    }
     res.send(layout({
       title: 'Настройки',
       active: 'settings',
       csrfToken,
       linkBasePath,
-      body: renderSettings({ hqUser: req.session.hqUser || '', linkBasePath, csrfToken }),
+      body: renderSettings({ hqUser: req.session.hqUser || '', linkBasePath, csrfToken, mediaDiskUsage }),
     }));
   });
 

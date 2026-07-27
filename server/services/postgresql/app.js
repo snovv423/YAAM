@@ -21,6 +21,7 @@ const express = require('express');
 const cors = require('cors');
 const basicAuth = require('express-basic-auth');
 const crypto = require('node:crypto');
+const path = require('node:path');
 
 const apiRoutes = require('../../routes/postgresql/api');
 const adminRoutes = require('../../routes/postgresql/admin');
@@ -173,27 +174,23 @@ function validateAppEnv(env) {
     errors.push('Для production за локальным Nginx требуется TRUST_PROXY=loopback.');
   }
 
-  // YAAM HQ Stage 5B — медиа-система (задание, раздел 4: fail-closed). Не
-  // задан вовсе — медиа-функциональность просто не монтируется (см. ниже),
-  // это не ошибка конфигурации сама по себе. "local" — только не-production
-  // (LocalMediaProvider никогда не должен обслуживать реальный трафик).
-  // "s3" — обязаны быть заданы ВСЕ переменные подключения, иначе приложение
-  // не должно стартовать вовсе, а не тихо остаться без медиа.
-  if (env.MEDIA_PROVIDER !== undefined && env.MEDIA_PROVIDER !== '' && !['local', 's3'].includes(env.MEDIA_PROVIDER)) {
-    errors.push('MEDIA_PROVIDER допускает только "local" или "s3".');
+  // YAAM HQ Stage 5B/5B.2 — медиа-система (задание, раздел 4: fail-closed).
+  // Не задан вовсе — медиа-функциональность просто не монтируется (см.
+  // ниже), это не ошибка конфигурации сама по себе. Единственный
+  // поддерживаемый provider — "local": YAAM работает в масштабе одного
+  // региона (Чечня), отдельное S3-совместимое хранилище на этом масштабе —
+  // инфраструктура "на вырост" (задание Stage 5B.2, раздел 1), фотографии
+  // хранятся в постоянной директории на самом VPS. В production обязателен
+  // MEDIA_LOCAL_ROOT (persistent-режим) — временный/auto-каталог означал бы,
+  // что фотографии исчезают при каждом restart/deploy.
+  if (env.MEDIA_PROVIDER !== undefined && env.MEDIA_PROVIDER !== '' && env.MEDIA_PROVIDER !== 'local') {
+    errors.push('MEDIA_PROVIDER допускает только "local".');
   }
-  if (env.MEDIA_PROVIDER === 'local' && env.APP_ENV === 'production') {
-    errors.push('MEDIA_PROVIDER=local запрещён в production — используйте s3.');
+  if (env.MEDIA_PROVIDER === 'local' && env.MEDIA_LOCAL_ROOT && env.MEDIA_LOCAL_DIR) {
+    errors.push('Заданы одновременно MEDIA_LOCAL_ROOT и MEDIA_LOCAL_DIR — укажите ровно один.');
   }
-  if (env.MEDIA_PROVIDER === 's3') {
-    const requiredMediaVars = [
-      'MEDIA_S3_ENDPOINT', 'MEDIA_S3_REGION', 'MEDIA_S3_BUCKET',
-      'MEDIA_S3_ACCESS_KEY_ID', 'MEDIA_S3_SECRET_ACCESS_KEY', 'MEDIA_S3_PUBLIC_BASE_URL',
-    ];
-    const missingMediaVars = requiredMediaVars.filter((name) => !env[name]);
-    if (missingMediaVars.length) {
-      errors.push(`MEDIA_PROVIDER=s3 требует переменные окружения: ${missingMediaVars.join(', ')}.`);
-    }
+  if (env.MEDIA_PROVIDER === 'local' && env.APP_ENV === 'production' && !env.MEDIA_LOCAL_ROOT) {
+    errors.push('В production MEDIA_PROVIDER=local требует MEDIA_LOCAL_ROOT (постоянная директория на VPS).');
   }
 
   if (errors.length) {
@@ -465,14 +462,19 @@ function createPostgresqlApp({
     next();
   });
 
-  // 6b. YAAM HQ Stage 5B — раздача файлов LocalMediaProvider только в
-  // dev/test (MEDIA_PROVIDER=local уже сам по себе запрещён в production —
-  // см. services/hq/media/provider.js — этот static-маршрут existует только
-  // как следствие того же выбора, никогда не смонтирован при s3). Реальный
-  // S3-совместимый провайдер отдаёт файлы напрямую со своего домена/CDN,
-  // минуя этот процесс полностью — этот маршрут НЕ часть production-пути.
-  if (mediaProvider instanceof LocalMediaProvider) {
-    app.use('/media-fixtures', express.static(mediaProvider.baseDir, { maxAge: '1h', etag: true }));
+  // 6b. YAAM HQ Stage 5B/5B.2 — раздача файлов LocalMediaProvider только в
+  // dev/test (persistent=false — временный/явный test-каталог). Production
+  // persistent-режим (MEDIA_LOCAL_ROOT) НЕ монтирует этот маршрут вовсе —
+  // на реальном VPS публичные фотографии отдаёт Nginx напрямую из
+  // MEDIA_LOCAL_ROOT/public (см. server/deploy/nginx-yaam-postgresql.conf,
+  // server/docs/persistent-local-media-runbook.md), Node вообще не
+  // участвует в раздаче байт изображений. Смонтирован только public/
+  // подкаталог — private/ (master) никогда не проходит через этот static
+  // route, даже в dev/test (запрос /media-fixtures/private/... получит 404
+  // от express.static, потому что private/ физически вне смонтированного
+  // корня).
+  if (mediaProvider instanceof LocalMediaProvider && !mediaProvider.persistent) {
+    app.use('/media-fixtures', express.static(path.join(mediaProvider.baseDir, 'public'), { maxAge: '1h', etag: true }));
   }
 
   // 7. публичный API

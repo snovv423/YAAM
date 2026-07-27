@@ -25,19 +25,45 @@ const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const os = require('node:os');
 const sharp = require('sharp');
 const { startEmbeddedPostgres } = require('./helpers/embeddedPg');
 
 const SCHEMA_SQL = fs.readFileSync(path.join(__dirname, '../../db/postgresql/schema.sql'), 'utf8');
 
+// Stage 5B.2 — этот список должен включать КАЖДЫЙ модуль, который где-либо
+// делает `require('.../db/postgresql')`, а не только сами роутеры. Причина:
+// db/postgresql/index.js — ленивый singleton (getPool()/close()), и любой
+// сервисный модуль, загруженный ОДИН раз раньше в этом файле (например,
+// когда предыдущий тест явно сделал delete require.cache для photoService.js
+// и потребовал его заново — см. тесты A/B/D, G1, H1 ниже), навсегда
+// закрепляет за собой ТУ версию db/postgresql, что была в кэше в момент его
+// собственной загрузки — а не текущую. lifecycle.stop()/db.close() закрывает
+// пул только ТОЙ версии db/postgresql, которую сам lifecycle.js захватил, а
+// НЕ версии, захваченной другими сервисами. Без полного списка ниже
+// startApp()-based тесты после теста, который явно пересобирал photoService
+// (A/B/D, G1, H1), могли бы тихо писать в БД ПРЕДЫДУЩЕГО теста через
+// оставшийся открытым чужой пул — что и происходило до этого исправления.
 const HQ_MODULE_PATHS = [
+  require.resolve('../../db/postgresql'),
   require.resolve('../../services/postgresql/app.js'),
+  require.resolve('../../services/postgresql/lifecycle.js'),
+  require.resolve('../../services/postgresql/health.js'),
+  require.resolve('../../services/postgresql/orderService.js'),
+  require.resolve('../../services/hq/ownerService.js'),
+  require.resolve('../../services/hq/securityLog.js'),
+  require.resolve('../../services/hq/auditLog.js'),
+  require.resolve('../../services/hq/restaurantStatsService.js'),
+  require.resolve('../../services/hq/menuAdminService.js'),
+  require.resolve('../../services/hq/restaurantAdminService.js'),
+  require.resolve('../../services/hq/media/photoService.js'),
   require.resolve('../../routes/hq/index.js'),
   require.resolve('../../routes/hq/auth.js'),
   require.resolve('../../routes/hq/pages.js'),
   require.resolve('../../routes/hq/restaurants.js'),
   require.resolve('../../routes/hq/middleware.js'),
   require.resolve('../../routes/postgresql/api.js'),
+  require.resolve('../../routes/postgresql/admin.js'),
 ];
 
 const TEST_SESSION_SECRET = 'e'.repeat(48);
@@ -90,10 +116,14 @@ async function waitForAddress(instance, timeoutMs = 2000) {
   throw new Error('httpServer никогда не начал слушать');
 }
 
-async function startApp(databaseUrl, { mediaProvider = 'local' } = {}) {
+async function startApp(databaseUrl, { mediaProvider = 'local', mediaLocalRoot } = {}) {
   process.env.DATABASE_URL = databaseUrl;
   process.env.PAYMENT_PROVIDER = 'mock';
   if (mediaProvider) process.env.MEDIA_PROVIDER = mediaProvider; else delete process.env.MEDIA_PROVIDER;
+  // Stage 5B.2 — persistent-режим (MEDIA_LOCAL_ROOT), используется тестом
+  // K1 ниже, чтобы проверить "restart backend не теряет фотографии" на
+  // уровне настоящего HTTP-приложения, а не только самого провайдера.
+  if (mediaLocalRoot) process.env.MEDIA_LOCAL_ROOT = mediaLocalRoot; else delete process.env.MEDIA_LOCAL_ROOT;
   process.env.APP_ENV = 'local';
   const appModule = reloadHqAppModule();
   const instance = appModule.createPostgresqlApp({
@@ -108,6 +138,7 @@ async function stopApp(instance) {
   await instance.stop();
   delete process.env.DATABASE_URL;
   delete process.env.MEDIA_PROVIDER;
+  delete process.env.MEDIA_LOCAL_ROOT;
 }
 
 async function loginHq(base) {
@@ -461,6 +492,84 @@ test('I1: все 6 audit-событий (Stage 5B.1) реально пишутс
       assert.ok(!row.details.includes('local-media://'), 'details не должен содержать полный URL/endpoint хранилища');
       assert.ok(!/storage_key|bucket/i.test(row.details));
     }
+  } finally {
+    await stopApp(instance);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// K — Stage 5B.2: persistent-режим переживает restart backend, приватный
+// master не проходит через /media-fixtures (только public/ смонтирован)
+// ---------------------------------------------------------------------------
+test('K1: persistent MEDIA_LOCAL_ROOT — restart backend (новый инстанс приложения над тем же каталогом) не теряет фотографии', async () => {
+  const databaseUrl = await freshDatabase('media_persistent_restart');
+  const mediaRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'yaam-media-persistent-test-'));
+  try {
+    const first = await startApp(databaseUrl, { mediaProvider: 'local', mediaLocalRoot: mediaRoot });
+    let restaurantId;
+    let storageKeyBase;
+    try {
+      const cookie = await loginHq(first.base);
+      const rest = await setupPublishedRestaurantWithDish(first.base, cookie, { name: 'Persistent Restart' });
+      restaurantId = rest.restaurantId;
+      const settingsPage = await getPage(first.base, cookie, `${rest.restaurantPath}/settings`);
+      await uploadPhoto(first.base, cookie, `${rest.restaurantPath}/photos`, settingsPage.csrf, { altText: 'Переживёт рестарт' });
+
+      const db = require('../../db/postgresql');
+      const rows = await db.query('SELECT storage_key FROM restaurant_photos WHERE restaurant_id = $1', [restaurantId]);
+      storageKeyBase = rows[0].storage_key;
+      // Сразу после загрузки — файлы физически на диске персистентного корня.
+      assert.ok(fs.existsSync(path.join(mediaRoot, 'public', storageKeyBase, 'thumb.webp')));
+      assert.ok(fs.existsSync(path.join(mediaRoot, 'private', 'masters', storageKeyBase, 'master.webp')));
+    } finally {
+      // "Restart" — останавливаем ИМЕННО этот инстанс приложения, каталог
+      // MEDIA_LOCAL_ROOT НЕ удаляется (задание: "restart не удаляет файлы").
+      await first.instance.stop();
+    }
+
+    const second = await startApp(databaseUrl, { mediaProvider: 'local', mediaLocalRoot: mediaRoot });
+    try {
+      // Новый процесс/новый provider-инстанс над тем же persistent root и
+      // той же БД — фотография должна остаться полностью рабочей.
+      const cookie = await loginHq(second.base);
+      const settingsPage = await getPage(second.base, cookie, `/hq/restaurants/${restaurantId}/settings`);
+      assert.ok(settingsPage.html.includes('Переживёт рестарт'), 'фотография должна остаться видна в HQ после restart');
+      assert.ok(fs.existsSync(path.join(mediaRoot, 'public', storageKeyBase, 'card.webp')), 'файл должен физически пережить restart, не быть пересоздан/утерян');
+
+      const publicRes = await fetch(`${second.base}/api/restaurants/${restaurantId}`);
+      const publicJson = await publicRes.json();
+      assert.equal(publicJson.primary_photo.alt, 'Переживёт рестарт');
+    } finally {
+      await stopApp(second.instance);
+    }
+  } finally {
+    fs.rmSync(mediaRoot, { recursive: true, force: true });
+  }
+});
+
+test('L1: приватный master недоступен через /media-fixtures (смонтирован только public/) — 404, соответствующий public thumb — 200', async () => {
+  const databaseUrl = await freshDatabase('media_private_not_served');
+  const { instance, base } = await startApp(databaseUrl);
+  try {
+    const cookie = await loginHq(base);
+    const rest = await setupPublishedRestaurantWithDish(base, cookie, { name: 'Private Master Restaurant' });
+    const settingsPage = await getPage(base, cookie, `${rest.restaurantPath}/settings`);
+    await uploadPhoto(base, cookie, `${rest.restaurantPath}/photos`, settingsPage.csrf, { altText: 'Проверка приватности' });
+
+    const db = require('../../db/postgresql');
+    const rows = await db.query('SELECT storage_key FROM restaurant_photos WHERE restaurant_id = $1', [rest.restaurantId]);
+    const storageKeyBase = rows[0].storage_key;
+
+    const masterRes = await fetch(`${base}/media-fixtures/private/masters/${storageKeyBase}/master.webp`);
+    assert.equal(masterRes.status, 404, 'private/masters/ не должен быть доступен даже при точном знании пути');
+
+    // /media-fixtures монтирует ИМЕННО baseDir/public как корень — сам
+    // objectKey уже включает "public/" (см. photoService.js:variantObjectKey),
+    // а getPublicUrl() стрипает этот префикс при выводе URL (см.
+    // provider.js) — поэтому реальный HTTP-путь к варианту НЕ повторяет
+    // "public/" второй раз.
+    const thumbRes = await fetch(`${base}/media-fixtures/${storageKeyBase}/thumb.webp`);
+    assert.equal(thumbRes.status, 200, 'контраст: соответствующий публичный вариант должен быть доступен');
   } finally {
     await stopApp(instance);
   }
