@@ -300,6 +300,10 @@ test('B: полный HTTP-цикл управления рестораном + 
     assert.equal(auditAfterPublish.length, 1);
     page = await getPage(base, cookie, restaurantPath);
     assert.match(page.html, /Закрыт/, 'публикация не открывает автоматически (задание, раздел 8)');
+    // Открытие требует доступное блюдо (Stage 5A) — этот тест про lifecycle
+    // ресторана, не про меню, поэтому минимальное блюдо дано напрямую SQL.
+    const catForOpen = await db.execute('INSERT INTO categories (restaurant_id, name) VALUES ($1, $2) RETURNING id', [restaurantId, 'Cat']);
+    await db.execute('INSERT INTO menu_items (restaurant_id, category_id, name, price) VALUES ($1,$2,$3,$4)', [restaurantId, catForOpen.rows[0].id, 'Dish', 100]);
     res = await postForm(base, cookie, `${restaurantPath}/open`, { _csrf: page.csrf });
     assert.equal(res.status, 302);
     page = await getPage(base, cookie, restaurantPath);
@@ -495,7 +499,10 @@ test('E: Обзор/Заказы/Оценки/Статистика показы�
       const r = await postForm(base, cookie, '/hq/restaurants', { _csrf: p.csrf, name, cities: 'Грозный' });
       const restaurantPath = r.headers.get('location');
       const id = Number(restaurantPath.split('/').pop());
-      await db.execute('UPDATE restaurants SET is_open = 1 WHERE id = $1', [id]);
+      // published_at — Stage 5A: createOrder() требует опубликованный
+      // ресторан (defense-in-depth поверх Stage 4.1), этот хелпер реально
+      // создаёт заказы через orderService дальше в тесте.
+      await db.execute('UPDATE restaurants SET is_open = 1, published_at = NOW() WHERE id = $1', [id]);
       const cat = await db.query('INSERT INTO categories (restaurant_id, name) VALUES ($1,$2) RETURNING id', [id, 'Cat']);
       const item = await db.query('INSERT INTO menu_items (restaurant_id, category_id, name, price, is_available) VALUES ($1,$2,$3,$4,1) RETURNING id', [id, cat[0].id, 'Блюдо', 700]);
       return { id, restaurantPath, menuItemId: item[0].id };

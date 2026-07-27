@@ -61,8 +61,12 @@ function uniquePhone() {
 
 async function pgCreateRestaurant() {
   const rows = await db.query(
-    `INSERT INTO restaurants (name, cuisine, cities, is_open, min_order, phone, rating, rating_count)
-     VALUES ('Stage9Fix Test Restaurant', 'test', '["Грозный"]', 1, 0, '+79280000099', 4.5, 10) RETURNING id`
+    // published_at — Stage 5A: orderService.createOrder теперь явно
+    // отклоняет заказы для неопубликованных ресторанов (defense-in-depth
+    // поверх Stage 4.1 lifecycle), этот файл реально создаёт заказы через
+    // createOrderAndResolve() и должен работать на опубликованном ресторане.
+    `INSERT INTO restaurants (name, cuisine, cities, is_open, min_order, phone, rating, rating_count, published_at)
+     VALUES ('Stage9Fix Test Restaurant', 'test', '["Грозный"]', 1, 0, '+79280000099', 4.5, 10, NOW()) RETURNING id`
   );
   return rows[0].id;
 }

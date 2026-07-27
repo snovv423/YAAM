@@ -202,13 +202,38 @@ function toPublicRestaurantDTO(row) {
   return dto;
 }
 
+// YAAM HQ Stage 5A — тот же allowlist-принцип, что и PUBLIC_RESTAURANT_FIELDS
+// выше: явный список полей блюда, которые уходят клиенту, а не "весь ряд
+// минус пара полей". `archived_at` не может утечь, даже если завтра в
+// menu_items добавят ещё одну внутреннюю колонку — она просто не попадёт в
+// DTO, пока её явно сюда не добавят. `category_id`/`restaurant_id`/
+// `sort_order` намеренно не включены — внутренняя структура БД, клиенту
+// не нужна (порядок уже выражен порядком элементов массива `items`).
+const PUBLIC_MENU_ITEM_FIELDS = [
+  'id', 'name', 'description', 'composition', 'price', 'photo_url',
+  'weight_g', 'kcal', 'protein_g', 'fat_g', 'carbs_g', 'is_available',
+  'is_popular',
+];
+
+function toPublicMenuItemDTO(row) {
+  const dto = {};
+  for (const field of PUBLIC_MENU_ITEM_FIELDS) {
+    dto[field] = row[field];
+  }
+  return dto;
+}
+
+// Публичное меню отдаёт только неархивированные категории и блюда
+// неархивированного ресторана (задание Stage 5A, раздел 11) — тот же
+// принцип фильтрации, что уже применён к самому ресторану (Stage 4:
+// archived_at, Stage 4.1: published_at) в GET /restaurants ниже.
 async function restaurantWithMenu(restaurant) {
   const categories = await db.query(
-    'SELECT * FROM categories WHERE restaurant_id = $1 ORDER BY sort_order',
+    'SELECT * FROM categories WHERE restaurant_id = $1 AND archived_at IS NULL ORDER BY sort_order',
     [restaurant.id],
   );
   const items = await db.query(
-    'SELECT * FROM menu_items WHERE restaurant_id = $1 ORDER BY sort_order',
+    'SELECT * FROM menu_items WHERE restaurant_id = $1 AND archived_at IS NULL ORDER BY sort_order',
     [restaurant.id],
   );
   const hits = await hitMenuItemIds(restaurant.id);
@@ -217,7 +242,9 @@ async function restaurantWithMenu(restaurant) {
     menu: categories.map((c) => ({
       id: c.id,
       name: c.name,
-      items: items.filter((i) => i.category_id === c.id).map((i) => ({ ...i, is_popular: hits.has(i.id) ? 1 : 0 })),
+      items: items
+        .filter((i) => i.category_id === c.id)
+        .map((i) => toPublicMenuItemDTO({ ...i, is_popular: hits.has(i.id) ? 1 : 0 })),
     })),
   };
 }

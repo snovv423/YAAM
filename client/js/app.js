@@ -459,7 +459,7 @@ async function doOpenRest(id){
   document.getElementById('msb-name').textContent=curRest.name;
   document.getElementById('msb-rate').textContent=showRating?`★ ${curRest.rate}`:'';
   const tabs=curRest.menu.map(c=>c.cat);
-  document.getElementById('m-tabs').innerHTML=tabs.map((t,i)=>`<div class="mtab ${i===0?'on':''}" onclick="document.getElementById('sec${i}').scrollIntoView({behavior:'smooth'})">${t}</div>`).join('');
+  document.getElementById('m-tabs').innerHTML=tabs.map((t,i)=>`<div class="mtab ${i===0?'on':''}" onclick="document.getElementById('sec${i}').scrollIntoView({behavior:'smooth'})">${esc(t)}</div>`).join('');
   renderMenuBody(); go('menu'); updateBar();
   window.scrollTo(0,0);
   initMenuScrollFX();
@@ -498,6 +498,13 @@ function initMenuScrollFX(){
   },{rootMargin:'-96px 0px -75% 0px'});
   sections.forEach(s=>catObserver.observe(s));
 }
+// Название/описание блюда и название категории теперь свободный текст,
+// вводимый владельцем ресторана в YAAM HQ (Stage 5A) — экранирование перед
+// вставкой в innerHTML обязательно (задание, раздел 17: "любой
+// пользовательский текст должен escaping-иться... при public client
+// render"). d-name/d-sostav используют .textContent (безопасно сами по
+// себе) — esc() нужен именно там, где текст идёт через innerHTML-шаблоны.
+function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function key(ci,ii){return ci+'_'+ii;}
 function findItem(k){const[ci,ii]=k.split('_').map(Number);const d=curRest.menu[ci].items[ii];return{n:d.n.replace(/'/g,''),p:d.p,id:d.id||null};}
 function dishCard(d,ci,ii){
@@ -506,12 +513,12 @@ function dishCard(d,ci,ii){
   const photo=hasSrc?`<img src="${d.photoUrl||U(d.im,700)}" loading="lazy" onerror="this.closest('.dphoto').classList.add('nophoto');this.remove()">`:'';
   return `<div class="dish ${so?'dis':''}" ${so?'':`onclick="openDish('${k}')"`}>
     <div class="dphoto ${hasSrc?'':'nophoto'}" style="background:${d.g}">${photo}
-    <div class="dplate"><div class="dname">${d.n}${d.pop?' <span class="hit">Хит</span>':''}</div><div class="ddesc">${d.d}</div></div>
+    <div class="dplate"><div class="dname">${esc(d.n)}${d.pop?' <span class="hit">Хит</span>':''}</div><div class="ddesc">${esc(d.d)}</div></div>
     <div class="dactions"><div class="dprice">${d.p} ₽</div>${so?'<span class="soldout">Нет в наличии</span>':`<div data-ctrl-key="${k}" onclick="event.stopPropagation()">${q>0?qtyHtml(k,q):`<button class="add" onclick="addItem('${k}',event)">+</button>`}</div>`}</div></div></div>`;
 }
 function renderMenuBody(){
   let html='';
-  curRest.menu.forEach((c,ci)=>{html+=`<div class="cat-h" id="sec${ci}">${c.cat}</div>`+c.items.map((d,ii)=>dishCard(d,ci,ii)).join('');});
+  curRest.menu.forEach((c,ci)=>{html+=`<div class="cat-h" id="sec${ci}">${esc(c.cat)}</div>`+c.items.map((d,ii)=>dishCard(d,ci,ii)).join('');});
   document.getElementById('m-body').innerHTML=html;
 }
 function qtyHtml(k,q){return `<div class="qty"><button onclick="dec('${k}')">−</button><span>${q}</span><button onclick="inc('${k}',event)">+</button></div>`;}
@@ -911,9 +918,16 @@ async function tryRestoreSession(){
 let curDishKey=null,curDishPrice=0,dishQty=1;
 function openDish(k){
   curDishKey=k;const[ci,ii]=k.split('_').map(Number);const d=curRest.menu[ci].items[ii];
-  // из API приходят реальные значения (могут быть пустыми, если админ их не заполнил);
-  // в демо-режиме — из локального справочника DETAILS.
-  const fromApi=d.kcal!=null;
+  // из API приходят реальные значения (могут быть пустыми, если владелец
+  // ресторана их не заполнил в YAAM HQ — Stage 5A позволяет создать блюдо
+  // вовсе без БЖУ); в демо-режиме — из локального справочника DETAILS.
+  // Признак режима — USE_API, а не "есть ли конкретно у этого блюда kcal":
+  // раньше здесь стояло d.kcal!=null, из-за чего РЕАЛЬНОЕ блюдо с полностью
+  // пустой пищевой ценностью (валидный сценарий, задание Stage 5A: "БЖУ не
+  // обязательны") тихо получало ПОДДЕЛЬНЫЕ демо-цифры (300г/450 ккал/...)
+  // вместо честного "—" — ровно то, что задание запрещает ("никаких
+  // hardcoded demo values").
+  const fromApi=USE_API;
   const det=fromApi
     ? {w:d.w||'—',kcal:d.kcal??'—',p:d.prot??'—',f:d.fat??'—',c:d.carb??'—',s:d.s||'Состав не указан'}
     : (DETAILS[d.n]||{w:300,kcal:450,p:20,f:20,c:40,s:'Натуральные ингредиенты'});

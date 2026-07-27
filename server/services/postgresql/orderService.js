@@ -589,15 +589,34 @@ async function createOrder({
   const restaurantRows = await db.query('SELECT * FROM restaurants WHERE id = $1', [restaurantId]);
   const restaurant = restaurantRows[0];
   if (!restaurant) throw new OrderCreationInputError('ресторан не найден');
+  // Stage 5A, раздел 14 — явные, самостоятельные проверки lifecycle-статуса
+  // ресторана (Stage 4.1), а не полагание ТОЛЬКО на is_open: сегодня HQ
+  // структурно не может опубликовать is_open=1 черновик или архивированный
+  // ресторан (services/hq/restaurantLifecycle.js guard'ы), но это
+  // defense-in-depth на случай прямой правки БД в обход HQ — тот же принцип,
+  // что уже применён к archived_at/is_open у restaurants в Stage 4.
+  if (restaurant.archived_at) throw new OrderCreationInputError('ресторан архивирован — заказ невозможен');
+  if (!restaurant.published_at) throw new OrderCreationInputError('ресторан ещё не опубликован — заказ невозможен');
   if (!restaurant.is_open) throw new OrderCreationInputError('ресторан сейчас закрыт — заказ невозможен');
 
   // Клиентские name/price — не источник истины, только menuItemId проверяется
   // и цена/название берутся из БД. Прямой вызов API в обход браузера не может
   // занизить сумму.
+  //
+  // Stage 5A: JOIN categories и archived_at-фильтр на ОБЕИХ таблицах —
+  // архивированное блюдо ИЛИ блюдо из архивированной категории отклоняется
+  // тем же путём, что и просто отсутствующее (задание, раздел 14: "сервер
+  // отклоняет архивированное блюдо... из архивированной/неактивной
+  // категории") — сообщение об ошибке намеренно не различает "не найдено" и
+  // "архивировано", чтобы не подсказывать внешнему вызывающему внутреннее
+  // состояние чужого/скрытого блюда.
   const trustedItems = [];
   for (const { menuItemId, qty, clientName } of requestedItems) {
     const rows = await db.query(
-      'SELECT * FROM menu_items WHERE id = $1 AND restaurant_id = $2',
+      `SELECT mi.* FROM menu_items mi
+       JOIN categories c ON c.id = mi.category_id
+       WHERE mi.id = $1 AND mi.restaurant_id = $2
+         AND mi.archived_at IS NULL AND c.archived_at IS NULL`,
       [menuItemId, restaurantId]
     );
     const real = rows[0];

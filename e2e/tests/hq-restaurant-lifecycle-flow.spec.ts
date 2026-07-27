@@ -82,7 +82,11 @@ test('YAAM HQ: publication lifecycle — черновик, публикация,
   expect(publicOne.id).toBe(restaurantId);
   expect(publicOne.is_open).toBe(0);
 
-  // 8. Открыть.
+  // 8. Открыть. Открытие требует доступное блюдо (Stage 5A) — этот сценарий
+  // про publication lifecycle, а не про меню, поэтому минимальное блюдо
+  // дано напрямую через SQL.
+  const catRow = await db.execute('INSERT INTO categories (restaurant_id, name) VALUES ($1, $2) RETURNING id', [restaurantId, 'Cat']);
+  await db.execute('INSERT INTO menu_items (restaurant_id, category_id, name, price) VALUES ($1,$2,$3,$4)', [restaurantId, catRow.rows[0].id, 'Dish', 100]);
   await page.getByRole('button', { name: 'Открыть', exact: true }).click();
   await expect(page.getByText('Открыт', { exact: true })).toBeVisible();
 

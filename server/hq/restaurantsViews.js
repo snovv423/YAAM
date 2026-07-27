@@ -284,6 +284,7 @@ function renderTabs({ restaurantId, active, linkBasePath }) {
   const base = `${linkBasePath}/restaurants/${restaurantId}`;
   const tabs = [
     { key: 'overview', href: base, label: 'Обзор' },
+    { key: 'menu', href: `${base}/menu`, label: 'Меню' },
     { key: 'orders', href: `${base}/orders`, label: 'Заказы' },
     { key: 'ratings', href: `${base}/ratings`, label: 'Оценки' },
     { key: 'statistics', href: `${base}/statistics`, label: 'Статистика' },

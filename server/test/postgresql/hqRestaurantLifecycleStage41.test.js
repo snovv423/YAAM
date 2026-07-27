@@ -134,6 +134,19 @@ function uniquePhone() {
   return '+79' + String(crypto.randomInt(100000000, 999999999)).padStart(9, '0');
 }
 
+// Stage 5A добавил серверную проверку "открыть можно только если есть
+// доступное блюдо" (services/hq/restaurantAdminService.js:openRestaurant) —
+// эти тесты Stage 4.1 проверяют publication lifecycle, а не меню, поэтому
+// им нужен минимальный доступный dish исключительно для того, чтобы
+// openRestaurant() вообще мог пройти дальше своих lifecycle-guard'ов.
+async function insertAvailableDish(db, restaurantId) {
+  const cat = await db.execute('INSERT INTO categories (restaurant_id, name) VALUES ($1, $2) RETURNING id', [restaurantId, 'Cat']);
+  await db.execute(
+    'INSERT INTO menu_items (restaurant_id, category_id, name, price) VALUES ($1,$2,$3,$4)',
+    [restaurantId, cat.rows[0].id, 'Dish', 100],
+  );
+}
+
 // ===========================================================================
 // M. Миграция/backfill — апгрейд уже существующей (Stage 4) БД
 // ===========================================================================
@@ -245,6 +258,7 @@ test('A: полный цикл переходов через сервисный 
   await t.test('A6: openRestaurant после публикации -> is_open=1', async () => {
     const r = await svc.createRestaurant({ name: 'Открыть После Публикации', cities: 'Грозный' });
     await svc.publishRestaurant(r.id);
+    await insertAvailableDish(db, r.id);
     const opened = await svc.openRestaurant(r.id);
     assert.equal(opened.is_open, 1);
   });
@@ -252,6 +266,7 @@ test('A: полный цикл переходов через сервисный 
   await t.test('A7: closeRestaurant возвращает в "опубликован и закрыт"', async () => {
     const r = await svc.createRestaurant({ name: 'Закрыть', cities: 'Грозный' });
     await svc.publishRestaurant(r.id);
+    await insertAvailableDish(db, r.id);
     await svc.openRestaurant(r.id);
     const closed = await svc.closeRestaurant(r.id);
     assert.equal(closed.is_open, 0);
@@ -261,6 +276,7 @@ test('A: полный цикл переходов через сервисный 
   await t.test('A8: unpublishRestaurant закрывает и снимает паузу', async () => {
     const r = await svc.createRestaurant({ name: 'Снять С Публикации', cities: 'Грозный' });
     await svc.publishRestaurant(r.id);
+    await insertAvailableDish(db, r.id);
     await svc.openRestaurant(r.id);
     await svc.pauseRestaurant(r.id, 'short');
     const unpublished = await svc.unpublishRestaurant(r.id);
@@ -272,6 +288,7 @@ test('A: полный цикл переходов через сервисный 
   await t.test('A9: resumeRestaurant НЕ подменяет "Открыть" — отклонено, если ресторан не на паузе', async () => {
     const r = await svc.createRestaurant({ name: 'Resume Не Пауза', cities: 'Грозный' });
     await svc.publishRestaurant(r.id);
+    await insertAvailableDish(db, r.id);
     await svc.openRestaurant(r.id);
     await svc.closeRestaurant(r.id);
     await assert.rejects(() => svc.resumeRestaurant(r.id), /не на паузе/);
@@ -287,6 +304,7 @@ test('A: полный цикл переходов через сервисный 
   await t.test('A11: restoreRestaurant ВСЕГДА возвращает в черновик', async () => {
     const r = await svc.createRestaurant({ name: 'Восстановить В Черновик', cities: 'Грозный' });
     await svc.publishRestaurant(r.id);
+    await insertAvailableDish(db, r.id);
     await svc.openRestaurant(r.id);
     await svc.archiveRestaurant(r.id);
     const restored = await svc.restoreRestaurant(r.id);
@@ -312,6 +330,7 @@ test('A: полный цикл переходов через сервисный 
 test('B: публичный API скрывает черновик/снятый с публикации/архивированный; показывает опубликованный закрытый', async () => {
   const databaseUrl = await freshDatabase('yaam_hq_lifecycle_public_api_test');
   const { instance, base } = await startApp(databaseUrl);
+  const db = require('../../db/postgresql');
   try {
     const cookie = await loginHq(base);
     const createPage = await getPage(base, cookie, '/hq/restaurants/new');
@@ -335,7 +354,10 @@ test('B: публичный API скрывает черновик/снятый �
     assert.ok(!('published_at' in one), 'published_at — внутреннее поле HQ, не должно быть в публичном DTO');
     assert.ok(!('archived_at' in one), 'archived_at — внутреннее поле HQ, не должно быть в публичном DTO');
 
-    // Открываем — всё ещё виден, теперь is_open=1.
+    // Открываем — всё ещё виден, теперь is_open=1. Открытие требует
+    // доступное блюдо (Stage 5A) — эта проверка не о меню, поэтому дано
+    // напрямую через SQL.
+    await insertAvailableDish(db, restaurantId);
     page = await getPage(base, cookie, restaurantPath);
     await postForm(base, cookie, `${restaurantPath}/open`, { _csrf: page.csrf });
     one = await (await fetch(`${base}/api/restaurants/${restaurantId}`)).json();

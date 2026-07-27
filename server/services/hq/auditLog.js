@@ -17,6 +17,19 @@ const ACTIONS = [
   // Stage 4.1
   'restaurant_published',
   'restaurant_unpublished',
+  // Stage 5A — меню
+  'category_created',
+  'category_updated',
+  'category_archived',
+  'category_restored',
+  'category_moved',
+  'menu_item_created',
+  'menu_item_updated',
+  'menu_item_available',
+  'menu_item_unavailable',
+  'menu_item_archived',
+  'menu_item_restored',
+  'menu_item_moved',
 ];
 
 // Единственные поля ресторана, которые вообще могут попасть в текст лога —
@@ -27,6 +40,29 @@ const SAFE_DIFF_FIELDS = [
   'name', 'cuisine', 'description', 'cities', 'address', 'hours',
   'min_order', 'phone', 'is_open',
 ];
+
+// Stage 5A — тот же allowlist-принцип для блюда. Намеренно БЕЗ composition
+// (может быть длинным свободным текстом — задание, раздел 15: "без
+// огромного полного состава объекта") и БЕЗ photo_url (задание: "без
+// photo_path, если он может раскрыть внутреннее устройство хранилища" —
+// консервативно применено и к простой URL-строке этого этапа).
+const MENU_ITEM_SAFE_DIFF_FIELDS = [
+  'name', 'price', 'description', 'weight_g', 'kcal', 'protein_g', 'fat_g',
+  'carbs_g', 'category_id', 'is_available',
+];
+
+const CATEGORY_SAFE_DIFF_FIELDS = ['name'];
+
+// Разумный лимит на длину одного значения внутри diff-строки (задание,
+// раздел 15/6: "название может журналироваться безопасно с разумным
+// лимитом") — обрезает даже allowlist-поля, если значение неожиданно
+// длинное (например description, если её когда-нибудь добавят в список).
+const DIFF_VALUE_MAX_LEN = 80;
+
+function truncateForLog(value) {
+  const str = String(value ?? '');
+  return str.length > DIFF_VALUE_MAX_LEN ? `${str.slice(0, DIFF_VALUE_MAX_LEN)}…` : str;
+}
 
 async function logAuditEvent({ action, restaurantId, details, ip }) {
   if (!ACTIONS.includes(action)) {
@@ -44,18 +80,39 @@ async function logAuditEvent({ action, restaurantId, details, ip }) {
 }
 
 // Короткий человекочитаемый summary изменённых полей — только из
-// SAFE_DIFF_FIELDS, только реально изменившиеся значения. Используется для
-// details у restaurant_updated. before/after — обычные строки ресторана из
-// БД (snake_case), не DTO.
-function summarizeRestaurantDiff(before, after) {
+// переданного allowlist'а, только реально изменившиеся значения,
+// каждое значение обрезано truncateForLog(). before/after — обычные строки
+// из БД (snake_case), не DTO.
+function summarizeDiff(before, after, fields) {
   const parts = [];
-  for (const field of SAFE_DIFF_FIELDS) {
+  for (const field of fields) {
     const oldValue = before[field];
     const newValue = after[field];
     if (String(oldValue ?? '') === String(newValue ?? '')) continue;
-    parts.push(`${field}: "${oldValue ?? ''}" -> "${newValue ?? ''}"`);
+    parts.push(`${field}: "${truncateForLog(oldValue)}" -> "${truncateForLog(newValue)}"`);
   }
   return parts.length ? parts.join('; ') : null;
 }
 
-module.exports = { logAuditEvent, summarizeRestaurantDiff, ACTIONS, SAFE_DIFF_FIELDS };
+function summarizeRestaurantDiff(before, after) {
+  return summarizeDiff(before, after, SAFE_DIFF_FIELDS);
+}
+
+function summarizeMenuItemDiff(before, after) {
+  return summarizeDiff(before, after, MENU_ITEM_SAFE_DIFF_FIELDS);
+}
+
+function summarizeCategoryDiff(before, after) {
+  return summarizeDiff(before, after, CATEGORY_SAFE_DIFF_FIELDS);
+}
+
+module.exports = {
+  logAuditEvent,
+  summarizeRestaurantDiff,
+  summarizeMenuItemDiff,
+  summarizeCategoryDiff,
+  ACTIONS,
+  SAFE_DIFF_FIELDS,
+  MENU_ITEM_SAFE_DIFF_FIELDS,
+  CATEGORY_SAFE_DIFF_FIELDS,
+};

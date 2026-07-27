@@ -7,10 +7,14 @@
 const express = require('express');
 const svc = require('../../services/hq/restaurantAdminService');
 const statsService = require('../../services/hq/restaurantStatsService');
-const { logAuditEvent, summarizeRestaurantDiff } = require('../../services/hq/auditLog');
+const menuSvc = require('../../services/hq/menuAdminService');
+const {
+  logAuditEvent, summarizeRestaurantDiff, summarizeMenuItemDiff, summarizeCategoryDiff,
+} = require('../../services/hq/auditLog');
 const { ensureCsrfToken, requireCsrf } = require('../../services/hq/csrf');
 const { layout } = require('../../hq/layout');
 const views = require('../../hq/restaurantsViews');
+const menuViews = require('../../hq/menuViews');
 
 function notFoundBody(linkBasePath) {
   return `<h1>Ресторан не найден</h1><div class="panel"><div class="empty-state">Проверьте адрес или вернитесь к списку.</div></div><a class="btn ghost" href="${linkBasePath}/restaurants">← К списку ресторанов</a>`;
@@ -153,6 +157,342 @@ function createRestaurantsRouter({ linkBasePath }) {
       const overview = await statsService.getOverview(req.restaurant.id);
       res.json(overview);
     } catch (err) {
+      next(err);
+    }
+  });
+
+  // --- Меню (Stage 5A) ---
+
+  // Если после отключения/архивирования блюда у ОТКРЫТОГО ресторана не
+  // осталось ни одного доступного блюда — ресторан автоматически
+  // закрывается (задание, раздел 13, рекомендованный вариант: "остаётся
+  // опубликованным и видимым... HQ показывает причину"). closeRestaurant()
+  // уже гарантированно проходит все свои guard'ы в этой точке (ресторан был
+  // published+open, чтобы вообще принимать заказы), поэтому вызывается
+  // напрямую, без обхода lifecycle-проверок.
+  async function autoCloseIfNoAvailableDishes(restaurant, ip) {
+    if (!restaurant.is_open) return false;
+    const available = await menuSvc.countAvailableMenuItems(restaurant.id);
+    if (available > 0) return false;
+    await svc.closeRestaurant(restaurant.id);
+    await logAuditEvent({
+      action: 'restaurant_updated', restaurantId: restaurant.id,
+      details: 'is_open: 1 -> 0 (auto: нет доступных блюд)', ip,
+    });
+    return true;
+  }
+
+  router.param('categoryId', async (req, res, next, categoryId) => {
+    try {
+      const category = await menuSvc.getCategoryById(req.restaurant.id, categoryId);
+      if (!category) {
+        const csrfToken = ensureCsrfToken(req);
+        return res.status(404).send(layout({
+          title: 'Не найдено', active: 'restaurants', csrfToken, linkBasePath, body: notFoundBody(linkBasePath),
+        }));
+      }
+      req.category = category;
+      next();
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.param('itemId', async (req, res, next, itemId) => {
+    try {
+      const item = await menuSvc.getMenuItemById(req.restaurant.id, itemId);
+      if (!item) {
+        const csrfToken = ensureCsrfToken(req);
+        return res.status(404).send(layout({
+          title: 'Не найдено', active: 'restaurants', csrfToken, linkBasePath, body: notFoundBody(linkBasePath),
+        }));
+      }
+      req.menuItem = item;
+      next();
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  function menuActionRedirect(res, restaurantId, extra) {
+    const qs = extra ? `?${new URLSearchParams(extra).toString()}` : '';
+    res.redirect(`${linkBasePath}/restaurants/${restaurantId}/menu${qs}`);
+  }
+
+  router.get('/:id/menu', async (req, res, next) => {
+    try {
+      const menu = await menuSvc.listMenu(req.restaurant.id);
+      const csrfToken = ensureCsrfToken(req);
+      const body = await pageShell({
+        restaurant: req.restaurant, active: 'menu', csrfToken, req,
+        tabBody: menuViews.renderMenuTab({
+          restaurant: req.restaurant, menu, filter: req.query.filter, csrfToken, linkBasePath,
+          error: req.query.error, notice: req.query.notice,
+        }),
+      });
+      res.send(layout({ title: `Меню — ${req.restaurant.name}`, active: 'restaurants', csrfToken, linkBasePath, body }));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post('/:id/menu/categories', requireCsrf, async (req, res, next) => {
+    try {
+      const category = await menuSvc.createCategory(req.restaurant.id, req.body);
+      await logAuditEvent({
+        action: 'category_created', restaurantId: req.restaurant.id,
+        details: `name: "${category.name}"`, ip: req.ip,
+      });
+      menuActionRedirect(res, req.restaurant.id);
+    } catch (err) {
+      if (err instanceof svc.ValidationError) {
+        return menuActionRedirect(res, req.restaurant.id, { error: err.message });
+      }
+      next(err);
+    }
+  });
+
+  router.get('/:id/menu/categories/:categoryId/edit', (req, res) => {
+    const csrfToken = ensureCsrfToken(req);
+    const body = menuViews.renderCategoryEditForm({
+      restaurant: req.restaurant, category: req.category, csrfToken, linkBasePath,
+    });
+    res.send(layout({ title: `Категория — ${req.restaurant.name}`, active: 'restaurants', csrfToken, linkBasePath, body }));
+  });
+
+  router.post('/:id/menu/categories/:categoryId', requireCsrf, async (req, res, next) => {
+    try {
+      const before = req.category;
+      const updated = await menuSvc.updateCategory(req.restaurant.id, req.category.id, req.body);
+      const details = summarizeCategoryDiff(before, updated);
+      await logAuditEvent({ action: 'category_updated', restaurantId: req.restaurant.id, details, ip: req.ip });
+      menuActionRedirect(res, req.restaurant.id);
+    } catch (err) {
+      if (err instanceof svc.ValidationError) {
+        const csrfToken = ensureCsrfToken(req);
+        const body = menuViews.renderCategoryEditForm({
+          restaurant: req.restaurant, category: { ...req.category, name: req.body.name }, error: err.message, csrfToken, linkBasePath,
+        });
+        return res.status(400).send(layout({ title: `Категория — ${req.restaurant.name}`, active: 'restaurants', csrfToken, linkBasePath, body }));
+      }
+      next(err);
+    }
+  });
+
+  router.post('/:id/menu/categories/:categoryId/archive', requireCsrf, async (req, res, next) => {
+    try {
+      const archived = await menuSvc.archiveCategory(req.restaurant.id, req.category.id);
+      if (archived) {
+        await logAuditEvent({
+          action: 'category_archived', restaurantId: req.restaurant.id,
+          details: `name: "${archived.name}"`, ip: req.ip,
+        });
+      }
+      menuActionRedirect(res, req.restaurant.id);
+    } catch (err) {
+      if (err instanceof svc.ValidationError) {
+        return menuActionRedirect(res, req.restaurant.id, { error: err.message });
+      }
+      next(err);
+    }
+  });
+
+  router.post('/:id/menu/categories/:categoryId/restore', requireCsrf, async (req, res, next) => {
+    try {
+      const restored = await menuSvc.restoreCategory(req.restaurant.id, req.category.id);
+      if (restored) {
+        await logAuditEvent({
+          action: 'category_restored', restaurantId: req.restaurant.id,
+          details: `name: "${restored.name}"`, ip: req.ip,
+        });
+      }
+      menuActionRedirect(res, req.restaurant.id);
+    } catch (err) {
+      if (err instanceof svc.ValidationError) {
+        return menuActionRedirect(res, req.restaurant.id, { error: err.message });
+      }
+      next(err);
+    }
+  });
+
+  router.post('/:id/menu/categories/:categoryId/move', requireCsrf, async (req, res, next) => {
+    try {
+      await menuSvc.moveCategory(req.restaurant.id, req.category.id, req.body.direction === 'up' ? 'up' : 'down');
+      await logAuditEvent({
+        action: 'category_moved', restaurantId: req.restaurant.id,
+        details: `name: "${req.category.name}", direction: ${req.body.direction}`, ip: req.ip,
+      });
+      menuActionRedirect(res, req.restaurant.id);
+    } catch (err) {
+      if (err instanceof svc.ValidationError) {
+        return menuActionRedirect(res, req.restaurant.id, { error: err.message });
+      }
+      next(err);
+    }
+  });
+
+  router.get('/:id/menu/items/new', async (req, res, next) => {
+    try {
+      const menu = await menuSvc.listMenu(req.restaurant.id);
+      const csrfToken = ensureCsrfToken(req);
+      const body = menuViews.renderMenuItemForm({
+        restaurant: req.restaurant, item: null, categories: menu, csrfToken, linkBasePath, isNew: true,
+      });
+      res.send(layout({ title: `Новое блюдо — ${req.restaurant.name}`, active: 'restaurants', csrfToken, linkBasePath, body }));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post('/:id/menu/items', requireCsrf, async (req, res, next) => {
+    try {
+      const item = await menuSvc.createMenuItem(req.restaurant.id, req.body);
+      await logAuditEvent({
+        action: 'menu_item_created', restaurantId: req.restaurant.id,
+        details: `name: "${item.name}", price: ${item.price}`, ip: req.ip,
+      });
+      res.redirect(`${linkBasePath}/restaurants/${req.restaurant.id}/menu`);
+    } catch (err) {
+      if (err instanceof svc.ValidationError) {
+        const menu = await menuSvc.listMenu(req.restaurant.id);
+        const csrfToken = ensureCsrfToken(req);
+        const body = menuViews.renderMenuItemForm({
+          restaurant: req.restaurant,
+          item: { ...req.body, category_id: Number.parseInt(req.body.category_id, 10) || null },
+          categories: menu, error: err.message, csrfToken, linkBasePath, isNew: true,
+        });
+        return res.status(400).send(layout({ title: `Новое блюдо — ${req.restaurant.name}`, active: 'restaurants', csrfToken, linkBasePath, body }));
+      }
+      next(err);
+    }
+  });
+
+  router.get('/:id/menu/items/:itemId', async (req, res, next) => {
+    try {
+      const menu = await menuSvc.listMenu(req.restaurant.id);
+      const csrfToken = ensureCsrfToken(req);
+      const body = menuViews.renderMenuItemForm({
+        restaurant: req.restaurant, item: req.menuItem, categories: menu, csrfToken, linkBasePath, isNew: false,
+      });
+      res.send(layout({ title: `${req.menuItem.name} — ${req.restaurant.name}`, active: 'restaurants', csrfToken, linkBasePath, body }));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post('/:id/menu/items/:itemId', requireCsrf, async (req, res, next) => {
+    try {
+      const before = req.menuItem;
+      const updated = await menuSvc.updateMenuItem(req.restaurant.id, req.menuItem.id, req.body);
+      const details = summarizeMenuItemDiff(before, updated);
+      await logAuditEvent({ action: 'menu_item_updated', restaurantId: req.restaurant.id, details, ip: req.ip });
+      res.redirect(`${linkBasePath}/restaurants/${req.restaurant.id}/menu`);
+    } catch (err) {
+      if (err instanceof svc.ValidationError) {
+        const menu = await menuSvc.listMenu(req.restaurant.id);
+        const csrfToken = ensureCsrfToken(req);
+        const body = menuViews.renderMenuItemForm({
+          restaurant: req.restaurant,
+          item: { ...req.menuItem, ...req.body, id: req.menuItem.id, category_id: Number.parseInt(req.body.category_id, 10) || req.menuItem.category_id },
+          categories: menu, error: err.message, csrfToken, linkBasePath, isNew: false,
+        });
+        return res.status(400).send(layout({ title: `${req.menuItem.name} — ${req.restaurant.name}`, active: 'restaurants', csrfToken, linkBasePath, body }));
+      }
+      next(err);
+    }
+  });
+
+  router.post('/:id/menu/items/:itemId/available', requireCsrf, async (req, res, next) => {
+    try {
+      const available = req.body.available === '1';
+      const updated = await menuSvc.setMenuItemAvailability(req.restaurant.id, req.menuItem.id, available);
+      if (updated) {
+        await logAuditEvent({
+          action: available ? 'menu_item_available' : 'menu_item_unavailable',
+          restaurantId: req.restaurant.id, details: `name: "${updated.name}"`, ip: req.ip,
+        });
+      }
+      let notice;
+      if (!available) {
+        const autoClosed = await autoCloseIfNoAvailableDishes(req.restaurant, req.ip);
+        if (autoClosed) notice = 'Ресторан закрыт: в меню нет доступных блюд.';
+      }
+      menuActionRedirect(res, req.restaurant.id, notice ? { notice } : undefined);
+    } catch (err) {
+      if (err instanceof svc.ValidationError) {
+        return menuActionRedirect(res, req.restaurant.id, { error: err.message });
+      }
+      next(err);
+    }
+  });
+
+  router.post('/:id/menu/items/:itemId/archive', requireCsrf, async (req, res, next) => {
+    try {
+      const archived = await menuSvc.archiveMenuItem(req.restaurant.id, req.menuItem.id);
+      let notice;
+      if (archived) {
+        await logAuditEvent({
+          action: 'menu_item_archived', restaurantId: req.restaurant.id,
+          details: `name: "${archived.name}"`, ip: req.ip,
+        });
+        const autoClosed = await autoCloseIfNoAvailableDishes(req.restaurant, req.ip);
+        if (autoClosed) notice = 'Ресторан закрыт: в меню нет доступных блюд.';
+      }
+      menuActionRedirect(res, req.restaurant.id, notice ? { notice } : undefined);
+    } catch (err) {
+      if (err instanceof svc.ValidationError) {
+        return menuActionRedirect(res, req.restaurant.id, { error: err.message });
+      }
+      next(err);
+    }
+  });
+
+  router.post('/:id/menu/items/:itemId/restore', requireCsrf, async (req, res, next) => {
+    try {
+      const restored = await menuSvc.restoreMenuItem(req.restaurant.id, req.menuItem.id);
+      if (restored) {
+        await logAuditEvent({
+          action: 'menu_item_restored', restaurantId: req.restaurant.id,
+          details: `name: "${restored.name}"`, ip: req.ip,
+        });
+      }
+      menuActionRedirect(res, req.restaurant.id);
+    } catch (err) {
+      if (err instanceof svc.ValidationError) {
+        return menuActionRedirect(res, req.restaurant.id, { error: err.message });
+      }
+      next(err);
+    }
+  });
+
+  router.post('/:id/menu/items/:itemId/move', requireCsrf, async (req, res, next) => {
+    try {
+      await menuSvc.moveMenuItem(req.restaurant.id, req.menuItem.id, req.body.direction === 'up' ? 'up' : 'down');
+      await logAuditEvent({
+        action: 'menu_item_moved', restaurantId: req.restaurant.id,
+        details: `name: "${req.menuItem.name}", direction: ${req.body.direction}`, ip: req.ip,
+      });
+      menuActionRedirect(res, req.restaurant.id);
+    } catch (err) {
+      if (err instanceof svc.ValidationError) {
+        return menuActionRedirect(res, req.restaurant.id, { error: err.message });
+      }
+      next(err);
+    }
+  });
+
+  router.post('/:id/menu/items/:itemId/move-category', requireCsrf, async (req, res, next) => {
+    try {
+      await menuSvc.moveMenuItemToCategory(req.restaurant.id, req.menuItem.id, req.body.category_id);
+      await logAuditEvent({
+        action: 'menu_item_moved', restaurantId: req.restaurant.id,
+        details: `name: "${req.menuItem.name}", moved to category_id: ${req.body.category_id}`, ip: req.ip,
+      });
+      menuActionRedirect(res, req.restaurant.id);
+    } catch (err) {
+      if (err instanceof svc.ValidationError) {
+        return menuActionRedirect(res, req.restaurant.id, { error: err.message });
+      }
       next(err);
     }
   });

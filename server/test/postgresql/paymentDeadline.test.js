@@ -59,7 +59,9 @@ function retryKeyGen() {
 
 async function pgCreateRestaurant() {
   const rows = await db.query(
-    `INSERT INTO restaurants (name, cuisine, cities, is_open, min_order) VALUES ('Test', 'test', '[]', 1, 0) RETURNING id`,
+    // published_at — Stage 5A: createOrderAndResolve() теперь явно требует
+    // опубликованный ресторан (defense-in-depth поверх Stage 4.1 lifecycle).
+    `INSERT INTO restaurants (name, cuisine, cities, is_open, min_order, published_at) VALUES ('Test', 'test', '[]', 1, 0, NOW()) RETURNING id`,
   );
   return rows[0].id;
 }

@@ -166,6 +166,14 @@ CREATE TABLE IF NOT EXISTS categories (
   sort_order INTEGER NOT NULL DEFAULT 0
 );
 
+-- YAAM HQ Stage 5A — архивирование категории (задание, раздел 9/5): NULL =
+-- активна, не-NULL = архивирована. Тот же приём, что и restaurants.
+-- archived_at (Stage 4) — тем же resolveLifecycleStatus-стилем.
+-- category_id REFERENCES ... ON DELETE CASCADE у menu_items (см. ниже)
+-- физически не даёт архивировать категорию удалением — только этим полем.
+ALTER TABLE categories ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS ix_categories_archived_at ON categories (archived_at) WHERE archived_at IS NOT NULL;
+
 -- =========================================================================
 -- menu_items
 -- =========================================================================
@@ -187,6 +195,15 @@ CREATE TABLE IF NOT EXISTS menu_items (
   is_available INTEGER NOT NULL DEFAULT 1,  -- 0/1, стоп-лист переключает это
   sort_order INTEGER NOT NULL DEFAULT 0
 );
+
+-- YAAM HQ Stage 5A — архивирование блюда (задание, раздел 9): NULL =
+-- активно, не-NULL = архивировано. `order_items.menu_item_id` ссылается на
+-- эту таблицу БЕЗ ON DELETE (см. ниже) — архивирование, а не DELETE, именно
+-- поэтому и обязательно: физический DELETE строки с существующими
+-- order_items либо упал бы на FK, либо (для блюда без единого заказа) тихо
+-- уничтожил бы саму возможность увидеть его в истории HQ.
+ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS ix_menu_items_archived_at ON menu_items (archived_at) WHERE archived_at IS NOT NULL;
 
 -- =========================================================================
 -- orders
@@ -564,7 +581,12 @@ CREATE TABLE IF NOT EXISTS hq_audit_log (
   action TEXT NOT NULL CHECK (action IN (
     'restaurant_created', 'restaurant_updated', 'restaurant_paused',
     'restaurant_resumed', 'restaurant_archived', 'restaurant_restored',
-    'restaurant_published', 'restaurant_unpublished'
+    'restaurant_published', 'restaurant_unpublished',
+    'category_created', 'category_updated', 'category_archived',
+    'category_restored', 'category_moved',
+    'menu_item_created', 'menu_item_updated', 'menu_item_available',
+    'menu_item_unavailable', 'menu_item_archived', 'menu_item_restored',
+    'menu_item_moved'
   )),
   restaurant_id INTEGER REFERENCES restaurants(id),
   details TEXT,
@@ -574,21 +596,26 @@ CREATE TABLE IF NOT EXISTS hq_audit_log (
 CREATE INDEX IF NOT EXISTS ix_hq_audit_log_restaurant_id ON hq_audit_log (restaurant_id);
 CREATE INDEX IF NOT EXISTS ix_hq_audit_log_created_at ON hq_audit_log (created_at);
 
--- YAAM HQ Stage 4.1 — 'restaurant_published'/'restaurant_unpublished'
--- добавлены в allowlist выше. Таблица уже существует на любой БД, где
--- применялся Stage 4 (`CREATE TABLE IF NOT EXISTS` тогда — no-op), поэтому
--- CHECK нужно расширить отдельно, идемпотентно: DROP старого constraint'а
--- (стандартное имя Postgres для inline column CHECK —
--- "<таблица>_<колонка>_check") и ADD нового с уже расширенным списком.
--- DROP CONSTRAINT IF EXISTS безопасен и на СВЕЖЕЙ базе, где CREATE TABLE
--- выше уже создал constraint сразу с полным списком под тем же именем — в
--- этом случае DROP+ADD просто пересоздают идентичный constraint, без потери
--- данных (это DDL, не удаляет строки).
+-- YAAM HQ Stage 4.1/5A — расширения allowlist выше ('restaurant_published'/
+-- 'restaurant_unpublished', затем 12 событий раздела «Меню»). Таблица уже
+-- существует на любой БД, где применялся Stage 4 (`CREATE TABLE IF NOT
+-- EXISTS` тогда — no-op), поэтому CHECK нужно расширить отдельно,
+-- идемпотентно: DROP старого constraint'а (стандартное имя Postgres для
+-- inline column CHECK — "<таблица>_<колонка>_check") и ADD нового с уже
+-- расширенным списком. DROP CONSTRAINT IF EXISTS безопасен и на СВЕЖЕЙ базе,
+-- где CREATE TABLE выше уже создал constraint сразу с полным списком под тем
+-- же именем — в этом случае DROP+ADD просто пересоздают идентичный
+-- constraint, без потери данных (это DDL, не удаляет строки).
 ALTER TABLE hq_audit_log DROP CONSTRAINT IF EXISTS hq_audit_log_action_check;
 ALTER TABLE hq_audit_log ADD CONSTRAINT hq_audit_log_action_check CHECK (action IN (
   'restaurant_created', 'restaurant_updated', 'restaurant_paused',
   'restaurant_resumed', 'restaurant_archived', 'restaurant_restored',
-  'restaurant_published', 'restaurant_unpublished'
+  'restaurant_published', 'restaurant_unpublished',
+  'category_created', 'category_updated', 'category_archived',
+  'category_restored', 'category_moved',
+  'menu_item_created', 'menu_item_updated', 'menu_item_available',
+  'menu_item_unavailable', 'menu_item_archived', 'menu_item_restored',
+  'menu_item_moved'
 ));
 
 COMMIT;

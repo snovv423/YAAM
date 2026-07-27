@@ -81,9 +81,13 @@ function uniquePhone() {
 // PostgreSQL fixtures
 // ---------------------------------------------------------------------------
 
+// published_at — Stage 5A: createOrder() теперь явно требует опубликованный
+// ресторан (defense-in-depth поверх Stage 4.1 lifecycle) — этот файл тестирует
+// is_open-поведение специально, публикация всегда включена, чтобы не путать
+// два независимых измерения.
 async function pgCreateRestaurant({ isOpen = true, minOrder = 0 } = {}) {
   const rows = await db.query(
-    `INSERT INTO restaurants (name, cuisine, cities, is_open, min_order) VALUES ('Test', 'test', '[]', $1, $2) RETURNING id`,
+    `INSERT INTO restaurants (name, cuisine, cities, is_open, min_order, published_at) VALUES ('Test', 'test', '[]', $1, $2, NOW()) RETURNING id`,
     [isOpen ? 1 : 0, minOrder]
   );
   return rows[0].id;

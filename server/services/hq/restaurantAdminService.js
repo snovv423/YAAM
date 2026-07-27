@@ -17,6 +17,7 @@ const crypto = require('node:crypto');
 const orderService = require('../postgresql/orderService');
 const { todayRangeUtc, PROJECT_TIMEZONE_OFFSET_MINUTES } = require('./dashboardMetrics');
 const lifecycle = require('./restaurantLifecycle');
+const { countAvailableMenuItems } = require('./menuAdminService');
 
 // ValidationError живёт в restaurantLifecycle.js (Stage 4.1) — переиспользуется
 // здесь же, а не дублируется второй копией класса, чтобы `err instanceof
@@ -264,10 +265,20 @@ async function unpublishRestaurant(id) {
 // опубликован; не архивирован; не на паузе").
 // ---------------------------------------------------------------------------
 
+// Stage 5A, раздел 13 — серверная проверка (не только disabled-кнопка):
+// открыть можно только если у ресторана есть хотя бы одно доступное,
+// неархивированное блюдо в неархивированной категории. Проверяется ПОСЛЕ
+// структурных lifecycle-guard'ов (assertCanOpen) — сообщение об отсутствии
+// меню не должно маскировать более базовую причину отказа (черновик/пауза/
+// архив).
 async function openRestaurant(id) {
   const restaurant = await getRestaurantById(id);
   if (!restaurant) return null;
   lifecycle.assertCanOpen(restaurant);
+  const availableDishes = await countAvailableMenuItems(id);
+  if (availableDishes === 0) {
+    throw new ValidationError('Добавьте хотя бы одно доступное блюдо, прежде чем открывать ресторан.');
+  }
   const updated = await db.execute('UPDATE restaurants SET is_open = 1 WHERE id = $1 RETURNING *', [id]);
   return updated.rows[0] || null;
 }
