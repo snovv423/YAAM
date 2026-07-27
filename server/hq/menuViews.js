@@ -5,6 +5,7 @@
 // шаблонные функции без движка/фреймворка, esc() на каждое значение из БД.
 const { esc } = require('./layout');
 const { money } = require('./restaurantsViews');
+const { renderPhotoManager } = require('./photosViews');
 
 const ITEM_FILTERS = ['active', 'unavailable', 'archived', 'all'];
 
@@ -222,7 +223,10 @@ function renderCategoryEditForm({ restaurant, category, error, csrfToken, linkBa
 // Форма блюда (создание и редактирование — общая разметка)
 // ===========================================================================
 
-function renderMenuItemForm({ restaurant, item, categories, error, csrfToken, linkBasePath, isNew }) {
+function renderMenuItemForm({
+  restaurant, item, categories, error, csrfToken, linkBasePath, isNew,
+  photos = [], archivedPhotos = [], mediaConfigured = false, maxPhotos = 0,
+}) {
   const v = item || {};
   const action = isNew
     ? `${linkBasePath}/restaurants/${restaurant.id}/menu/items`
@@ -274,10 +278,18 @@ function renderMenuItemForm({ restaurant, item, categories, error, csrfToken, li
         </div>
         <label for="if-photo">Ссылка на фото (необязательно)</label>
         <input id="if-photo" name="photo_url" type="text" value="${esc(v.photo_url || '')}" placeholder="https://..." autocomplete="off">
+        ${photos.length ? '<div class="photo-meta">Используется, только если ниже нет ни одной загруженной фотографии.</div>' : ''}
         <button type="submit">${isNew ? 'Добавить блюдо' : 'Сохранить'}</button>
         ${error ? `<div class="error">${esc(error)}</div>` : ''}
       </form>
     </div>
+    ${!isNew ? renderPhotoManager({
+      title: 'Фотографии блюда',
+      photos, archivedPhotos, mediaConfigured, maxPhotos,
+      uploadAction: `${linkBasePath}/restaurants/${restaurant.id}/menu/items/${v.id}/photos`,
+      actionBase: `${linkBasePath}/restaurants/${restaurant.id}/menu/items/${v.id}/photos`,
+      csrfToken,
+    }) : ''}
     <a class="btn ghost" href="${linkBasePath}/restaurants/${restaurant.id}/menu">← К меню</a>
   `;
 }

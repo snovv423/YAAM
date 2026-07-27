@@ -61,8 +61,12 @@
 <div id="menu" class="screen">
   <div class="hero" id="m-hero">
     <button class="back" onclick="go('home')">← Назад</button>
+    <button type="button" class="gnav gprev" id="m-gprev" aria-label="Предыдущее фото" onclick="galleryStep('m',-1)">‹</button>
+    <button type="button" class="gnav gnext" id="m-gnext" aria-label="Следующее фото" onclick="galleryStep('m',1)">›</button>
+    <div class="gcount" id="m-gcount"></div>
     <div class="hero-info"><div class="mtitle" id="m-name"></div><div class="mmeta" id="m-meta"></div></div>
   </div>
+  <div class="gallery" id="m-gallery"></div>
   <div class="menu-sticky-group">
     <div class="menu-stickybar" id="menu-stickybar">
       <span class="msb-name" id="msb-name"></span>
@@ -75,7 +79,12 @@
 
 <!-- DISH -->
 <div id="dish" class="screen">
-  <div class="dhero" id="d-hero"><button class="back" onclick="go('menu')">← Назад</button></div>
+  <div class="dhero" id="d-hero">
+    <button class="back" onclick="go('menu')">← Назад</button>
+    <button type="button" class="gnav gprev" id="d-gprev" aria-label="Предыдущее фото" onclick="galleryStep('d',-1)">‹</button>
+    <button type="button" class="gnav gnext" id="d-gnext" aria-label="Следующее фото" onclick="galleryStep('d',1)">›</button>
+    <div class="gcount" id="d-gcount"></div>
+  </div>
   <div class="gallery" id="d-gallery"></div>
   <div class="dwrap">
     <div class="dttl" id="d-name"></div><div class="dsub" id="d-sub"></div>

@@ -30,6 +30,17 @@ const ACTIONS = [
   'menu_item_archived',
   'menu_item_restored',
   'menu_item_moved',
+  // Stage 5B — медиа-система (задание, раздел 12: ровно 10 новых событий).
+  'restaurant_photo_uploaded',
+  'restaurant_photo_primary_changed',
+  'restaurant_photo_moved',
+  'restaurant_photo_archived',
+  'restaurant_photo_restored',
+  'menu_item_photo_uploaded',
+  'menu_item_photo_primary_changed',
+  'menu_item_photo_moved',
+  'menu_item_photo_archived',
+  'menu_item_photo_restored',
 ];
 
 // Единственные поля ресторана, которые вообще могут попасть в текст лога —
@@ -106,11 +117,24 @@ function summarizeCategoryDiff(before, after) {
   return summarizeDiff(before, after, CATEGORY_SAFE_DIFF_FIELDS);
 }
 
+// Stage 5B — фотографии (задание, раздел 12: "Never log: secret keys; full
+// signed URLs; internal storage endpoint; binary data"). storage_key
+// сознательно НЕ включён — он однозначно определяет объект в реальном
+// хранилище, тот же консервативный принцип, что уже применён к photo_url в
+// MENU_ITEM_SAFE_DIFF_FIELDS выше. Только id фотографии и безопасный
+// alt_text (обычный текст, задаваемый владельцем).
+function summarizePhotoDetails(photo) {
+  const parts = [`photo_id: ${photo.id}`];
+  if (photo.alt_text) parts.push(`alt: "${truncateForLog(photo.alt_text)}"`);
+  return parts.join('; ');
+}
+
 module.exports = {
   logAuditEvent,
   summarizeRestaurantDiff,
   summarizeMenuItemDiff,
   summarizeCategoryDiff,
+  summarizePhotoDetails,
   ACTIONS,
   SAFE_DIFF_FIELDS,
   MENU_ITEM_SAFE_DIFF_FIELDS,

@@ -5,6 +5,7 @@
 // шаблонные функции без движка/фреймворка, esc() на каждое значение из БД.
 const { esc } = require('./layout');
 const lifecycle = require('../services/hq/restaurantLifecycle');
+const { renderPhotoManager } = require('./photosViews');
 
 const ORDER_STATUS_LABELS = {
   awaiting_payment: 'Ожидает оплаты',
@@ -586,7 +587,10 @@ function renderStatisticsTab({ restaurant, statistics: s, periodOptions, linkBas
 // Настройки ресторана
 // ===========================================================================
 
-function renderRestaurantSettingsTab({ restaurant: r, linkBasePath, csrfToken, error, notice }) {
+function renderRestaurantSettingsTab({
+  restaurant: r, linkBasePath, csrfToken, error, notice,
+  photos = [], archivedPhotos = [], mediaConfigured = false, maxPhotos = 0,
+}) {
   const archiveAction = r.archived_at
     ? `<form method="post" action="${linkBasePath}/restaurants/${r.id}/restore" onsubmit="return confirm('Восстановить «${esc(r.name)}» из архива?')">
         <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
@@ -623,6 +627,14 @@ function renderRestaurantSettingsTab({ restaurant: r, linkBasePath, csrfToken, e
         ${notice ? `<div class="notice">${esc(notice)}</div>` : ''}
       </form>
     </div>
+
+    ${renderPhotoManager({
+      title: 'Фотографии ресторана',
+      photos, archivedPhotos, mediaConfigured, maxPhotos,
+      uploadAction: `${linkBasePath}/restaurants/${r.id}/photos`,
+      actionBase: `${linkBasePath}/restaurants/${r.id}/photos`,
+      csrfToken,
+    })}
 
     <div class="panel">
       <div style="font-weight:700;margin-bottom:14px">Telegram</div>

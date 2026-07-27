@@ -163,10 +163,18 @@ let demoStage='qr'; // 'qr' — создан, ждёт демо-оплаты; 's
 // Приводим ответ бэкенда к той же форме, в которой всегда жили демо-данные
 // из data.js — это позволяет всем render-функциям ниже не знать, откуда
 // пришли данные (demo-массив или API), и не дублировать логику отрисовки.
+// YAAM HQ Stage 5B — публичный DTO (routes/postgresql/api.js) уже отдаёт
+// primary_photo/gallery с готовыми URL трёх вариантов (thumb/card/full) и
+// сам заботится о fallback на legacy photo_url, если владелец ещё не
+// загрузил ни одной настоящей фотографии (задание, раздел 13) — здесь
+// только приводим форму объекта к тому, что ждут render-функции ниже.
+function normalizePhotoGallery(apiGallery){
+  return (apiGallery||[]).map(p=>({thumb:p.urls.thumb,card:p.urls.card,full:p.urls.full,alt:p.alt||''}));
+}
 function normalizeRestaurant(r){
   return{
-    id:r.id, name:r.name, cui:r.cuisine||'', photoUrl:r.photo_url||'', phone:r.phone||'', address:r.address||'',
-    g:'linear-gradient(135deg,#3d6b4e,#1e4630)', im:null,
+    id:r.id, name:r.name, cui:r.cuisine||'', photoUrl:r.primary_photo?r.primary_photo.urls.card:'', phone:r.phone||'', address:r.address||'',
+    g:'linear-gradient(135deg,#3d6b4e,#1e4630)', im:null, gallery:normalizePhotoGallery(r.gallery),
     rate:r.rating||0, votes:r.rating_count||0, ordersCount:r.orders_count??null,
     hours:r.hours||'', deliv:r.delivery_price||0, min:r.min_order||0,
     open:!!r.is_open, isNew:!!r.is_new, cities:r.cities||[],
@@ -174,7 +182,8 @@ function normalizeRestaurant(r){
       cat:cat.name,
       items:cat.items.map(it=>({
         id:it.id, n:it.name, d:it.description||'', p:it.price,
-        g:'linear-gradient(135deg,#3d6b4e,#1e4630)', im:null, photoUrl:it.photo_url||'',
+        g:'linear-gradient(135deg,#3d6b4e,#1e4630)', im:null, photoUrl:it.primary_photo?it.primary_photo.urls.card:'',
+        gallery:normalizePhotoGallery(it.gallery),
         pop:!!it.is_popular, available:it.is_available!==0,
         w:it.weight_g, kcal:it.kcal, prot:it.protein_g, fat:it.fat_g, carb:it.carbs_g, s:it.composition,
       })),
@@ -446,13 +455,15 @@ async function doOpenRest(id){
   }
   if(!same){cart={};saveCartState();}
   const h=document.getElementById('m-hero');h.querySelectorAll('img').forEach(x=>x.remove());
-  const heroHasSrc=!!(curRest.photoUrl||curRest.im);
+  const mGallery=curRest.gallery||[];
+  const heroHasSrc=!!(mGallery.length||curRest.photoUrl||curRest.im);
   h.classList.toggle('nophoto',!heroHasSrc);
   h.style.background=curRest.g;
   if(heroHasSrc){
-    const heroSrc=curRest.photoUrl||U(curRest.im,900);
-    const img=new Image();img.src=heroSrc;img.onerror=function(){h.classList.add('nophoto');this.remove()};h.insertBefore(img,h.firstChild);
+    const heroSrc=mGallery.length?mGallery[0].full:(curRest.photoUrl||U(curRest.im,900));
+    const img=new Image();img.src=heroSrc;img.alt=mGallery.length?(mGallery[0].alt||''):'';img.onerror=function(){h.classList.add('nophoto');this.remove()};h.insertBefore(img,h.firstChild);
   }
+  renderGallery('m',mGallery,false);
   document.getElementById('m-name').textContent=curRest.name;
   const showRating=curRest.votes>=RATING_MIN_VOTES;
   document.getElementById('m-meta').innerHTML=`${showRating?`<span>★ ${curRest.rate} · ${curRest.votes}</span>`:''}<span>Часы: ${curRest.hours}</span>`;
@@ -932,23 +943,34 @@ function openDish(k){
     ? {w:d.w||'—',kcal:d.kcal??'—',p:d.prot??'—',f:d.fat??'—',c:d.carb??'—',s:d.s||'Состав не указан'}
     : (DETAILS[d.n]||{w:300,kcal:450,p:20,f:20,c:40,s:'Натуральные ингредиенты'});
   const h=document.getElementById('d-hero');h.querySelectorAll('img').forEach(x=>x.remove());
-  const dishHasSrc=!!(d.photoUrl||d.im);
+  // Реальная галерея (Stage 5B) приходит только из API — d.gallery всегда
+  // непустая, если у блюда есть хоть одно фото (сервер сам заворачивает
+  // legacy photo_url в gallery из одного элемента — см. buildPhotoFields в
+  // routes/postgresql/api.js), поэтому demo-режим (POOL-заглушки) ниже
+  // остаётся полностью нетронутым отдельной веткой.
+  const dGallery=fromApi?(d.gallery||[]):[];
+  const dishHasSrc=!!(dGallery.length||d.photoUrl||d.im);
   h.classList.toggle('nophoto',!dishHasSrc);
   h.style.background=d.g;
-  const gallery=document.getElementById('d-gallery');
   if(dishHasSrc){
-    const heroSrc=d.photoUrl||U(d.im,1000);
-    const img=new Image();img.src=heroSrc;img.onerror=function(){h.classList.add('nophoto');this.remove()};h.insertBefore(img,h.firstChild);
-    if(d.photoUrl){
-      gallery.innerHTML=`<div class="thumb on"><img src="${d.photoUrl}" onerror="this.parentNode.style.display='none'"></div>`;
+    const heroSrc=dGallery.length?dGallery[0].full:(d.photoUrl||U(d.im,1000));
+    const img=new Image();img.src=heroSrc;img.alt=dGallery.length?(dGallery[0].alt||''):'';img.onerror=function(){h.classList.add('nophoto');this.remove()};h.insertBefore(img,h.firstChild);
+  }
+  renderGallery('d',dGallery);
+  if(!dGallery.length){
+    const gallery=document.getElementById('d-gallery');
+    if(dishHasSrc){
+      if(d.photoUrl){
+        gallery.innerHTML=`<div class="thumb on"><img src="${d.photoUrl}" onerror="this.parentNode.style.display='none'"></div>`;
+      }else{
+        const ids=[d.im,...POOL.filter(x=>x!==d.im)].slice(0,4);
+        gallery.innerHTML=ids.map((id,i)=>`<div class="thumb ${i===0?'on':''}" onclick="swapHero('${id}',${i})"><img src="${U(id,200)}" onerror="this.parentNode.style.display='none'"></div>`).join('');
+      }
+      gallery.style.display='';
     }else{
-      const ids=[d.im,...POOL.filter(x=>x!==d.im)].slice(0,4);
-      gallery.innerHTML=ids.map((id,i)=>`<div class="thumb ${i===0?'on':''}" onclick="swapHero('${id}',${i})"><img src="${U(id,200)}" onerror="this.parentNode.style.display='none'"></div>`).join('');
+      gallery.innerHTML='';
+      gallery.style.display='none';
     }
-    gallery.style.display='';
-  }else{
-    gallery.innerHTML='';
-    gallery.style.display='none';
   }
   document.getElementById('d-name').textContent=d.n;
   document.getElementById('d-sub').textContent=`${det.w} г · ${d.p} ₽`;
@@ -961,6 +983,56 @@ function dishQtyPlus(){dishQty++;renderDishAdd();}
 function dishQtyMinus(){if(dishQty>1){dishQty--;renderDishAdd();}}
 function addFromDish(){const it=findItem(curDishKey);cart[curDishKey]={n:it.n,p:it.p,q:dishQty,menuItemId:it.id};refreshAll(curDishKey);go('menu');}
 function swapHero(id,i){const img=document.querySelector('#d-hero img');if(img)img.src=U(id,1000);document.querySelectorAll('#d-gallery .thumb').forEach((t,j)=>t.classList.toggle('on',j===i));}
+
+// YAAM HQ Stage 5B — реальная многофотографийная галерея (ресторан/блюдо),
+// без сторонних библиотек: тумб-стрип с горизонтальным нативным скроллом
+// (свайп на мобильном "бесплатно"), плюс явные кнопки-стрелки и счётчик
+// поверх hero (задание, раздел 9/10 — swipe не единственный способ листать,
+// стрелки/счётчик обязательны, ничего из этого не показывается при одной
+// фотографии). prefix — 'm' (ресторан, #m-hero/#m-gallery/#m-gprev/...) или
+// 'd' (блюдо, #d-hero/#d-gallery/...). Кнопки-тумбы — реальные <button>, а
+// не <div onclick>, ради клавиатурной доступности (задание, раздел 10).
+let galleryState={};
+// showArrows=false для 'm' (шапка ресторана): там поверх hero уже лежит
+// название переменной высоты (.hero-info, до 2 строк) — стрелки поверх
+// низкого 190px-hero рисковали бы перекрывать длинные названия. Тумб-стрип
+// под hero уже даёт равноценную не-swipe навигацию (клик по любой миниатюре),
+// поэтому явные стрелки для 'm' не показываются, только счётчик (он в
+// верхнем углу, вне зоны заголовка). У 'd' (блюдо) своего наложенного
+// текста на hero нет — стрелки включены.
+function renderGallery(prefix,photos,showArrows){
+  galleryState[prefix]={photos:photos||[],index:0};
+  const stripEl=document.getElementById(prefix+'-gallery');
+  const prevBtn=document.getElementById(prefix+'-gprev');
+  const nextBtn=document.getElementById(prefix+'-gnext');
+  const countEl=document.getElementById(prefix+'-gcount');
+  const multi=galleryState[prefix].photos.length>1;
+  const arrowsOn=multi&&showArrows!==false;
+  if(prevBtn)prevBtn.style.display=arrowsOn?'flex':'none';
+  if(nextBtn)nextBtn.style.display=arrowsOn?'flex':'none';
+  if(countEl)countEl.style.display=multi?'block':'none';
+  if(stripEl){
+    stripEl.innerHTML=multi?galleryState[prefix].photos.map((p,i)=>
+      `<button type="button" class="thumb ${i===0?'on':''}" aria-label="Фото ${i+1} из ${galleryState[prefix].photos.length}" onclick="gallerySet('${prefix}',${i})"><img src="${p.thumb}" alt="${esc(p.alt)}" loading="lazy"></button>`
+    ).join(''):'';
+  }
+  gallerySet(prefix,0);
+}
+function gallerySet(prefix,i){
+  const st=galleryState[prefix];
+  const n=st?st.photos.length:0;
+  if(!n)return;
+  const idx=((i%n)+n)%n;
+  st.index=idx;
+  const photo=st.photos[idx];
+  const heroImg=document.querySelector('#'+prefix+'-hero img');
+  if(heroImg){heroImg.src=photo.full;heroImg.alt=photo.alt||'';}
+  const stripEl=document.getElementById(prefix+'-gallery');
+  if(stripEl)stripEl.querySelectorAll('.thumb').forEach((t,j)=>t.classList.toggle('on',j===idx));
+  const countEl=document.getElementById(prefix+'-gcount');
+  if(countEl&&n>1)countEl.textContent=(idx+1)+' / '+n;
+}
+function galleryStep(prefix,delta){const st=galleryState[prefix];if(st)gallerySet(prefix,st.index+delta);}
 
 function totals(){let sum=0,cnt=0;for(const k in cart){sum+=cart[k].p*cart[k].q;cnt+=cart[k].q;}return{sum,cnt};}
 function plural(n,a,b,c){n=Math.abs(n)%100;const n1=n%10;if(n>10&&n<20)return c;if(n1>1&&n1<5)return b;if(n1===1)return a;return c;}

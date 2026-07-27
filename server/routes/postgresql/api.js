@@ -34,6 +34,16 @@ const rateLimit = require('express-rate-limit');
 const db = require('../../db/postgresql');
 const orderService = require('../../services/postgresql/orderService');
 const paymentService = require('../../services/paymentService');
+// YAAM HQ Stage 5B — тот же module-level singleton принцип, что и db.js
+// выше (читает process.env напрямую, не получает конфигурацию через
+// factory/DI — routes/postgresql/api.js исторически изолированный модуль,
+// см. комментарий в начале файла). getPublicUrl() — чистая функция без
+// сети, поэтому дублирование инстанса с services/postgresql/app.js
+// (который создаёт СВОЙ mediaProvider для HQ) безопасно: оба выводят
+// идентичные URL из одной и той же конфигурации окружения.
+const { createMediaProviderFromEnv } = require('../../services/hq/media/provider');
+const { attachPhotoFields } = require('../../services/hq/media/publicPhotoDTO');
+const mediaProvider = createMediaProviderFromEnv(process.env);
 
 const router = express.Router();
 
@@ -223,6 +233,38 @@ function toPublicMenuItemDTO(row) {
   return dto;
 }
 
+// Батч-запросы (не N+1) — один SELECT ... WHERE owner_id = ANY($1) на весь
+// список ресторанов/блюд одного ответа, независимо от того, сколько их.
+// mediaProvider === null (MEDIA_PROVIDER не задан) -> пустая карта, публичный
+// API продолжает работать через legacy photo_url (см. buildPhotoFields).
+async function fetchActiveRestaurantPhotos(restaurantIds) {
+  const map = new Map();
+  if (!mediaProvider || !restaurantIds.length) return map;
+  const rows = await db.query(
+    'SELECT * FROM restaurant_photos WHERE restaurant_id = ANY($1::int[]) AND archived_at IS NULL ORDER BY restaurant_id, sort_order, id',
+    [restaurantIds],
+  );
+  for (const row of rows) {
+    if (!map.has(row.restaurant_id)) map.set(row.restaurant_id, []);
+    map.get(row.restaurant_id).push(row);
+  }
+  return map;
+}
+
+async function fetchActiveMenuItemPhotos(menuItemIds) {
+  const map = new Map();
+  if (!mediaProvider || !menuItemIds.length) return map;
+  const rows = await db.query(
+    'SELECT * FROM menu_item_photos WHERE menu_item_id = ANY($1::int[]) AND archived_at IS NULL ORDER BY menu_item_id, sort_order, id',
+    [menuItemIds],
+  );
+  for (const row of rows) {
+    if (!map.has(row.menu_item_id)) map.set(row.menu_item_id, []);
+    map.get(row.menu_item_id).push(row);
+  }
+  return map;
+}
+
 // Публичное меню отдаёт только неархивированные категории и блюда
 // неархивированного ресторана (задание Stage 5A, раздел 11) — тот же
 // принцип фильтрации, что уже применён к самому ресторану (Stage 4:
@@ -237,14 +279,23 @@ async function restaurantWithMenu(restaurant) {
     [restaurant.id],
   );
   const hits = await hitMenuItemIds(restaurant.id);
+  const [restaurantPhotos, itemPhotos] = await Promise.all([
+    fetchActiveRestaurantPhotos([restaurant.id]),
+    fetchActiveMenuItemPhotos(items.map((i) => i.id)),
+  ]);
   return {
-    ...toPublicRestaurantDTO(restaurant),
+    ...attachPhotoFields(mediaProvider, toPublicRestaurantDTO(restaurant), restaurantPhotos.get(restaurant.id) || [], restaurant.photo_url),
     menu: categories.map((c) => ({
       id: c.id,
       name: c.name,
       items: items
         .filter((i) => i.category_id === c.id)
-        .map((i) => toPublicMenuItemDTO({ ...i, is_popular: hits.has(i.id) ? 1 : 0 })),
+        .map((i) => attachPhotoFields(
+          mediaProvider,
+          toPublicMenuItemDTO({ ...i, is_popular: hits.has(i.id) ? 1 : 0 }),
+          itemPhotos.get(i.id) || [],
+          i.photo_url,
+        )),
     })),
   };
 }
@@ -289,9 +340,9 @@ router.get('/restaurants', async (req, res) => {
       WHERE r.archived_at IS NULL AND r.published_at IS NOT NULL
       GROUP BY r.id
     `);
-    const all = rows
-      .filter((r) => !city || JSON.parse(r.cities || '[]').includes(city))
-      .map(toPublicRestaurantDTO);
+    const filtered = rows.filter((r) => !city || JSON.parse(r.cities || '[]').includes(city));
+    const photosByRestaurant = await fetchActiveRestaurantPhotos(filtered.map((r) => r.id));
+    const all = filtered.map((r) => attachPhotoFields(mediaProvider, toPublicRestaurantDTO(r), photosByRestaurant.get(r.id) || [], r.photo_url));
     res.json(all);
   } catch (err) {
     console.error('[api-postgresql] GET /restaurants failed:', err.message);

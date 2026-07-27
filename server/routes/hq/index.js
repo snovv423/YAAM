@@ -16,7 +16,7 @@
 const express = require('express');
 const path = require('node:path');
 const { createHqSessionMiddleware } = require('../../services/hq/session');
-const { hqSecurityHeaders } = require('../../services/hq/securityHeaders');
+const { createHqSecurityHeaders } = require('../../services/hq/securityHeaders');
 const { normalizeHqLinkBasePath, hqRootPath } = require('../../services/hq/basePath');
 const { createAuthRouter } = require('./auth');
 const { createPagesRouter } = require('./pages');
@@ -29,7 +29,7 @@ const { createRequireHqAuth } = require('./middleware');
 // Внутренний mount point роутера в services/postgresql/app.js ВСЕГДА '/hq' —
 // linkBasePath меняет только то, что сам роутер ПИШЕТ в свои же ответы
 // (redirect/href/form action/cookie path), не то, где Express его слушает.
-function createHqRouter({ sessionSecret, isProduction, linkBasePath }) {
+function createHqRouter({ sessionSecret, isProduction, linkBasePath, mediaProvider = null }) {
   if (!sessionSecret) {
     throw new Error('createHqRouter требует sessionSecret');
   }
@@ -37,7 +37,20 @@ function createHqRouter({ sessionSecret, isProduction, linkBasePath }) {
 
   const router = express.Router();
 
-  router.use(hqSecurityHeaders);
+  // Stage 5B: если медиа реально настроено, CSP img-src должен разрешать
+  // origin, на котором физически лежат фотографии (S3-совместимое
+  // хранилище/CDN) — иначе браузер молча блокирует все <img> в HQ.
+  // getPublicUrl() — чистая функция без сети (см. services/hq/media/
+  // provider.js), безопасно вызвать один раз при сборке роутера.
+  let mediaImgOrigin = null;
+  if (mediaProvider) {
+    try {
+      mediaImgOrigin = new URL(mediaProvider.getPublicUrl('csp-probe')).origin;
+    } catch {
+      mediaImgOrigin = null;
+    }
+  }
+  router.use(createHqSecurityHeaders({ extraImgSrc: mediaImgOrigin }));
 
   // Единственный статический ресурс HQ (server/hq/static/hq.js —
   // double-submit-защита формы логина) — вынесен из инлайн <script>, потому
@@ -62,7 +75,7 @@ function createHqRouter({ sessionSecret, isProduction, linkBasePath }) {
   // Stage 4: /restaurants — отдельный роутер (server/routes/hq/restaurants.js),
   // смонтирован ДО общего pagesRouter (тот ниже больше не содержит заглушки
   // "Рестораны" — заменена этим полноценным разделом целиком).
-  router.use('/restaurants', createRequireHqAuth(resolvedLinkBasePath), createRestaurantsRouter({ linkBasePath: resolvedLinkBasePath }));
+  router.use('/restaurants', createRequireHqAuth(resolvedLinkBasePath), createRestaurantsRouter({ linkBasePath: resolvedLinkBasePath, mediaProvider }));
   router.use('/', createRequireHqAuth(resolvedLinkBasePath), createPagesRouter({ linkBasePath: resolvedLinkBasePath }));
 
   return router;

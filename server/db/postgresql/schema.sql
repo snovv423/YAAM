@@ -206,6 +206,73 @@ ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS ix_menu_items_archived_at ON menu_items (archived_at) WHERE archived_at IS NOT NULL;
 
 -- =========================================================================
+-- restaurant_photos / menu_item_photos
+-- =========================================================================
+-- YAAM HQ Stage 5B — производственная медиа-система (задание, разделы 3-4).
+-- Бинарные данные никогда не попадают в PostgreSQL: здесь хранятся только
+-- метаданные, storage_key — единственный указатель на реальный объект во
+-- внешнем S3-совместимом хранилище (или во временном каталоге
+-- LocalMediaProvider в тестах). Публичный URL никогда не хранится колонкой —
+-- он всегда выводится на чтении из storage_key через активный провайдер
+-- (getPublicUrl), чтобы смена домена/провайдера в будущем не требовала
+-- миграции данных. storage_key — базовый ключ одной загруженной фотографии;
+-- три обработанных варианта (thumb/card/full) адресуются детерминированными
+-- суффиксами поверх этого же базового ключа (imagePipeline.js), поэтому
+-- отдельная колонка/JSON под варианты не нужна.
+--
+-- archived_at — архивирование вместо физического DELETE строки (тот же
+-- принцип, что и menu_items.archived_at выше): история заказов и HQ audit
+-- log не должны зависеть от фотографий, а реальное удаление объекта из
+-- хранилища выполняется отдельным шагом сервисного слоя ПОСЛЕ успешной
+-- транзакции архивирования, не самим DELETE строки.
+--
+-- is_primary — не BOOLEAN, а тот же INTEGER 0/1 в стиле остальных булевых
+-- колонок этой схемы (is_popular, is_available и т.д.). Ровно одна активная
+-- primary-фотография на владельца обеспечивается partial unique индексом
+-- ниже на уровне БД, а не только проверкой в JavaScript.
+--
+-- updated_at: как и в payments/refunds выше, в этой схеме нет триггера
+-- автообновления — колонка выставляется вручную в UPDATE-запросах
+-- сервисного слоя (photoService.js), тот же установившийся паттерн.
+CREATE TABLE IF NOT EXISTS restaurant_photos (
+  id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  restaurant_id INTEGER NOT NULL REFERENCES restaurants(id) ON DELETE CASCADE,
+  storage_key TEXT NOT NULL UNIQUE,
+  width INTEGER NOT NULL,
+  height INTEGER NOT NULL,
+  alt_text TEXT NOT NULL DEFAULT '',
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  is_primary INTEGER NOT NULL DEFAULT 0,    -- 0/1
+  archived_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_restaurant_photos_one_primary
+  ON restaurant_photos (restaurant_id) WHERE is_primary = 1 AND archived_at IS NULL;
+CREATE INDEX IF NOT EXISTS ix_restaurant_photos_active
+  ON restaurant_photos (restaurant_id, sort_order) WHERE archived_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS menu_item_photos (
+  id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  menu_item_id INTEGER NOT NULL REFERENCES menu_items(id) ON DELETE CASCADE,
+  storage_key TEXT NOT NULL UNIQUE,
+  width INTEGER NOT NULL,
+  height INTEGER NOT NULL,
+  alt_text TEXT NOT NULL DEFAULT '',
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  is_primary INTEGER NOT NULL DEFAULT 0,    -- 0/1
+  archived_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_menu_item_photos_one_primary
+  ON menu_item_photos (menu_item_id) WHERE is_primary = 1 AND archived_at IS NULL;
+CREATE INDEX IF NOT EXISTS ix_menu_item_photos_active
+  ON menu_item_photos (menu_item_id, sort_order) WHERE archived_at IS NULL;
+
+-- =========================================================================
 -- orders
 -- =========================================================================
 CREATE TABLE IF NOT EXISTS orders (
@@ -586,7 +653,12 @@ CREATE TABLE IF NOT EXISTS hq_audit_log (
     'category_restored', 'category_moved',
     'menu_item_created', 'menu_item_updated', 'menu_item_available',
     'menu_item_unavailable', 'menu_item_archived', 'menu_item_restored',
-    'menu_item_moved'
+    'menu_item_moved',
+    -- Stage 5B — медиа-система (10 событий, задание, раздел 12).
+    'restaurant_photo_uploaded', 'restaurant_photo_primary_changed',
+    'restaurant_photo_moved', 'restaurant_photo_archived', 'restaurant_photo_restored',
+    'menu_item_photo_uploaded', 'menu_item_photo_primary_changed',
+    'menu_item_photo_moved', 'menu_item_photo_archived', 'menu_item_photo_restored'
   )),
   restaurant_id INTEGER REFERENCES restaurants(id),
   details TEXT,
@@ -596,16 +668,16 @@ CREATE TABLE IF NOT EXISTS hq_audit_log (
 CREATE INDEX IF NOT EXISTS ix_hq_audit_log_restaurant_id ON hq_audit_log (restaurant_id);
 CREATE INDEX IF NOT EXISTS ix_hq_audit_log_created_at ON hq_audit_log (created_at);
 
--- YAAM HQ Stage 4.1/5A — расширения allowlist выше ('restaurant_published'/
--- 'restaurant_unpublished', затем 12 событий раздела «Меню»). Таблица уже
--- существует на любой БД, где применялся Stage 4 (`CREATE TABLE IF NOT
--- EXISTS` тогда — no-op), поэтому CHECK нужно расширить отдельно,
--- идемпотентно: DROP старого constraint'а (стандартное имя Postgres для
--- inline column CHECK — "<таблица>_<колонка>_check") и ADD нового с уже
--- расширенным списком. DROP CONSTRAINT IF EXISTS безопасен и на СВЕЖЕЙ базе,
--- где CREATE TABLE выше уже создал constraint сразу с полным списком под тем
--- же именем — в этом случае DROP+ADD просто пересоздают идентичный
--- constraint, без потери данных (это DDL, не удаляет строки).
+-- YAAM HQ Stage 4.1/5A/5B — расширения allowlist выше ('restaurant_published'/
+-- 'restaurant_unpublished', затем 12 событий раздела «Меню», затем 10
+-- событий медиа-системы). Таблица уже существует на любой БД, где применялся
+-- Stage 4 (`CREATE TABLE IF NOT EXISTS` тогда — no-op), поэтому CHECK нужно
+-- расширить отдельно, идемпотентно: DROP старого constraint'а (стандартное
+-- имя Postgres для inline column CHECK — "<таблица>_<колонка>_check") и ADD
+-- нового с уже расширенным списком. DROP CONSTRAINT IF EXISTS безопасен и на
+-- СВЕЖЕЙ базе, где CREATE TABLE выше уже создал constraint сразу с полным
+-- списком под тем же именем — в этом случае DROP+ADD просто пересоздают
+-- идентичный constraint, без потери данных (это DDL, не удаляет строки).
 ALTER TABLE hq_audit_log DROP CONSTRAINT IF EXISTS hq_audit_log_action_check;
 ALTER TABLE hq_audit_log ADD CONSTRAINT hq_audit_log_action_check CHECK (action IN (
   'restaurant_created', 'restaurant_updated', 'restaurant_paused',
@@ -615,7 +687,11 @@ ALTER TABLE hq_audit_log ADD CONSTRAINT hq_audit_log_action_check CHECK (action 
   'category_restored', 'category_moved',
   'menu_item_created', 'menu_item_updated', 'menu_item_available',
   'menu_item_unavailable', 'menu_item_archived', 'menu_item_restored',
-  'menu_item_moved'
+  'menu_item_moved',
+  'restaurant_photo_uploaded', 'restaurant_photo_primary_changed',
+  'restaurant_photo_moved', 'restaurant_photo_archived', 'restaurant_photo_restored',
+  'menu_item_photo_uploaded', 'menu_item_photo_primary_changed',
+  'menu_item_photo_moved', 'menu_item_photo_archived', 'menu_item_photo_restored'
 ));
 
 COMMIT;

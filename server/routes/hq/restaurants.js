@@ -5,11 +5,14 @@
 // применяется в точке монтирования, не здесь, тем же принципом, что и
 // createPagesRouter).
 const express = require('express');
+const multer = require('multer');
 const svc = require('../../services/hq/restaurantAdminService');
 const statsService = require('../../services/hq/restaurantStatsService');
 const menuSvc = require('../../services/hq/menuAdminService');
+const photoService = require('../../services/hq/media/photoService');
+const { MAX_SOURCE_BYTES } = require('../../services/hq/media/imagePipeline');
 const {
-  logAuditEvent, summarizeRestaurantDiff, summarizeMenuItemDiff, summarizeCategoryDiff,
+  logAuditEvent, summarizeRestaurantDiff, summarizeMenuItemDiff, summarizeCategoryDiff, summarizePhotoDetails,
 } = require('../../services/hq/auditLog');
 const { ensureCsrfToken, requireCsrf } = require('../../services/hq/csrf');
 const { layout } = require('../../hq/layout');
@@ -20,7 +23,20 @@ function notFoundBody(linkBasePath) {
   return `<h1>Ресторан не найден</h1><div class="panel"><div class="empty-state">Проверьте адрес или вернитесь к списку.</div></div><a class="btn ghost" href="${linkBasePath}/restaurants">← К списку ресторанов</a>`;
 }
 
-function createRestaurantsRouter({ linkBasePath }) {
+// multer.memoryStorage() — файл буферизуется в память и полностью
+// валидируется/обрабатывается (services/hq/media/imagePipeline.js) ДО того,
+// как коснётся хранилища (задание, раздел 4: "buffered so uploaded files
+// can be validated... before ever touching the storage provider"). Лимит
+// размера здесь — первая линия защиты (обрывает соединение раньше, чем файл
+// целиком попадёт в память); imagePipeline.validateSourceImage() повторяет
+// ту же проверку размера самостоятельно (defense in depth, не полагается
+// только на middleware).
+const photoUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_SOURCE_BYTES, files: 1 },
+});
+
+function createRestaurantsRouter({ linkBasePath, mediaProvider = null }) {
   const router = express.Router();
 
   // ---------------------------------------------------------------------
@@ -104,6 +120,23 @@ function createRestaurantsRouter({ linkBasePath }) {
       next(err);
     }
   });
+
+  // YAAM HQ Stage 5B — данные для панели «Фотографии ресторана» (вкладка
+  // «Настройки»). mediaConfigured=false, если MEDIA_PROVIDER не задан на
+  // этом окружении (задание, раздел 4) — сама вкладка Настроек продолжает
+  // работать, просто без раздела фотографий.
+  async function restaurantPhotoViewData(restaurantId) {
+    if (!mediaProvider) return { photos: [], archivedPhotos: [], mediaConfigured: false, maxPhotos: photoService.MAX_PHOTOS_PER_OWNER };
+    const all = await photoService.listRestaurantPhotos(restaurantId, { includeArchived: true });
+    const active = all.filter((p) => !p.archived_at);
+    const archived = all.filter((p) => p.archived_at);
+    return {
+      photos: active.map((p) => ({ ...p, urls: photoService.photoVariantUrls(mediaProvider, p) })),
+      archivedPhotos: archived.map((p) => ({ ...p, urls: photoService.photoVariantUrls(mediaProvider, p) })),
+      mediaConfigured: true,
+      maxPhotos: photoService.MAX_PHOTOS_PER_OWNER,
+    };
+  }
 
   async function pageShell({ restaurant, active, csrfToken, tabBody, req }) {
     const menuItemsCount = active === 'overview' || active === 'settings' ? await svc.countMenuItems(restaurant.id) : 0;
@@ -217,6 +250,21 @@ function createRestaurantsRouter({ linkBasePath }) {
   function menuActionRedirect(res, restaurantId, extra) {
     const qs = extra ? `?${new URLSearchParams(extra).toString()}` : '';
     res.redirect(`${linkBasePath}/restaurants/${restaurantId}/menu${qs}`);
+  }
+
+  // YAAM HQ Stage 5B — данные для панели «Фотографии блюда» (карточка
+  // блюда). Тот же принцип, что и restaurantPhotoViewData выше.
+  async function menuItemPhotoViewData(restaurantId, itemId) {
+    if (!mediaProvider) return { photos: [], archivedPhotos: [], mediaConfigured: false, maxPhotos: photoService.MAX_PHOTOS_PER_OWNER };
+    const all = await photoService.listMenuItemPhotos(restaurantId, itemId, { includeArchived: true });
+    const active = all.filter((p) => !p.archived_at);
+    const archived = all.filter((p) => p.archived_at);
+    return {
+      photos: active.map((p) => ({ ...p, urls: photoService.photoVariantUrls(mediaProvider, p) })),
+      archivedPhotos: archived.map((p) => ({ ...p, urls: photoService.photoVariantUrls(mediaProvider, p) })),
+      mediaConfigured: true,
+      maxPhotos: photoService.MAX_PHOTOS_PER_OWNER,
+    };
   }
 
   router.get('/:id/menu', async (req, res, next) => {
@@ -371,8 +419,10 @@ function createRestaurantsRouter({ linkBasePath }) {
     try {
       const menu = await menuSvc.listMenu(req.restaurant.id);
       const csrfToken = ensureCsrfToken(req);
+      const photoData = await menuItemPhotoViewData(req.restaurant.id, req.menuItem.id);
       const body = menuViews.renderMenuItemForm({
         restaurant: req.restaurant, item: req.menuItem, categories: menu, csrfToken, linkBasePath, isNew: false,
+        error: req.query.error, ...photoData,
       });
       res.send(layout({ title: `${req.menuItem.name} — ${req.restaurant.name}`, active: 'restaurants', csrfToken, linkBasePath, body }));
     } catch (err) {
@@ -391,13 +441,137 @@ function createRestaurantsRouter({ linkBasePath }) {
       if (err instanceof svc.ValidationError) {
         const menu = await menuSvc.listMenu(req.restaurant.id);
         const csrfToken = ensureCsrfToken(req);
+        const photoData = await menuItemPhotoViewData(req.restaurant.id, req.menuItem.id);
         const body = menuViews.renderMenuItemForm({
           restaurant: req.restaurant,
           item: { ...req.menuItem, ...req.body, id: req.menuItem.id, category_id: Number.parseInt(req.body.category_id, 10) || req.menuItem.category_id },
-          categories: menu, error: err.message, csrfToken, linkBasePath, isNew: false,
+          categories: menu, error: err.message, csrfToken, linkBasePath, isNew: false, ...photoData,
         });
         return res.status(400).send(layout({ title: `${req.menuItem.name} — ${req.restaurant.name}`, active: 'restaurants', csrfToken, linkBasePath, body }));
       }
+      next(err);
+    }
+  });
+
+  // --- Фотографии блюда (Stage 5B) ---
+
+  router.param('dishPhotoId', async (req, res, next, dishPhotoId) => {
+    try {
+      const photo = await photoService.getMenuItemPhotoById(req.restaurant.id, req.menuItem.id, dishPhotoId);
+      if (!photo) {
+        const csrfToken = ensureCsrfToken(req);
+        return res.status(404).send(layout({
+          title: 'Не найдено', active: 'restaurants', csrfToken, linkBasePath, body: notFoundBody(linkBasePath),
+        }));
+      }
+      req.dishPhoto = photo;
+      next();
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  function dishPhotoActionRedirect(res, restaurantId, itemId, extra) {
+    const qs = extra ? `?${new URLSearchParams(extra).toString()}` : '';
+    res.redirect(`${linkBasePath}/restaurants/${restaurantId}/menu/items/${itemId}${qs}`);
+  }
+
+  router.post(
+    '/:id/menu/items/:itemId/photos',
+    photoUpload.single('photo'),
+    (err, req, res, next) => {
+      if (!err) return next();
+      dishPhotoActionRedirect(res, req.params.id, req.params.itemId, { error: 'Не удалось загрузить файл — слишком большой или повреждён.' });
+    },
+    requireCsrf,
+    async (req, res, next) => {
+      try {
+        if (!mediaProvider) throw new svc.ValidationError('Хранилище фотографий не настроено.');
+        if (!req.file) throw new svc.ValidationError('Выберите файл фотографии.');
+        const photo = await photoService.uploadMenuItemPhoto(mediaProvider, req.restaurant.id, req.menuItem.id, req.file.buffer, req.body.alt_text);
+        await logAuditEvent({
+          action: 'menu_item_photo_uploaded', restaurantId: req.restaurant.id,
+          details: summarizePhotoDetails(photo), ip: req.ip,
+        });
+        dishPhotoActionRedirect(res, req.restaurant.id, req.menuItem.id);
+      } catch (err) {
+        if (err instanceof svc.ValidationError) {
+          return dishPhotoActionRedirect(res, req.restaurant.id, req.menuItem.id, { error: err.message });
+        }
+        next(err);
+      }
+    },
+  );
+
+  router.post('/:id/menu/items/:itemId/photos/:dishPhotoId/primary', requireCsrf, async (req, res, next) => {
+    try {
+      const updated = await photoService.setMenuItemPhotoPrimary(req.restaurant.id, req.menuItem.id, req.dishPhoto.id);
+      if (updated) {
+        await logAuditEvent({
+          action: 'menu_item_photo_primary_changed', restaurantId: req.restaurant.id,
+          details: summarizePhotoDetails(updated), ip: req.ip,
+        });
+      }
+      dishPhotoActionRedirect(res, req.restaurant.id, req.menuItem.id);
+    } catch (err) {
+      if (err instanceof svc.ValidationError) return dishPhotoActionRedirect(res, req.restaurant.id, req.menuItem.id, { error: err.message });
+      next(err);
+    }
+  });
+
+  router.post('/:id/menu/items/:itemId/photos/:dishPhotoId/move', requireCsrf, async (req, res, next) => {
+    try {
+      const direction = req.body.direction === 'up' ? 'up' : 'down';
+      await photoService.moveMenuItemPhoto(req.restaurant.id, req.menuItem.id, req.dishPhoto.id, direction);
+      await logAuditEvent({
+        action: 'menu_item_photo_moved', restaurantId: req.restaurant.id,
+        details: `${summarizePhotoDetails(req.dishPhoto)}; direction: ${direction}`, ip: req.ip,
+      });
+      dishPhotoActionRedirect(res, req.restaurant.id, req.menuItem.id);
+    } catch (err) {
+      if (err instanceof svc.ValidationError) return dishPhotoActionRedirect(res, req.restaurant.id, req.menuItem.id, { error: err.message });
+      next(err);
+    }
+  });
+
+  router.post('/:id/menu/items/:itemId/photos/:dishPhotoId/alt', requireCsrf, async (req, res, next) => {
+    try {
+      await photoService.updateMenuItemPhotoAlt(req.restaurant.id, req.menuItem.id, req.dishPhoto.id, req.body.alt_text);
+      dishPhotoActionRedirect(res, req.restaurant.id, req.menuItem.id);
+    } catch (err) {
+      if (err instanceof svc.ValidationError) return dishPhotoActionRedirect(res, req.restaurant.id, req.menuItem.id, { error: err.message });
+      next(err);
+    }
+  });
+
+  router.post('/:id/menu/items/:itemId/photos/:dishPhotoId/archive', requireCsrf, async (req, res, next) => {
+    try {
+      const archived = await photoService.archiveMenuItemPhoto(req.restaurant.id, req.menuItem.id, req.dishPhoto.id);
+      if (archived) {
+        await logAuditEvent({
+          action: 'menu_item_photo_archived', restaurantId: req.restaurant.id,
+          details: summarizePhotoDetails(archived), ip: req.ip,
+        });
+      }
+      dishPhotoActionRedirect(res, req.restaurant.id, req.menuItem.id);
+    } catch (err) {
+      if (err instanceof svc.ValidationError) return dishPhotoActionRedirect(res, req.restaurant.id, req.menuItem.id, { error: err.message });
+      next(err);
+    }
+  });
+
+  router.post('/:id/menu/items/:itemId/photos/:dishPhotoId/restore', requireCsrf, async (req, res, next) => {
+    try {
+      const restored = await photoService.restoreMenuItemPhoto(req.restaurant.id, req.menuItem.id, req.dishPhoto.id);
+      if (restored) {
+        await logAuditEvent({
+          action: 'menu_item_photo_restored', restaurantId: req.restaurant.id,
+          details: summarizePhotoDetails(restored), ip: req.ip,
+        });
+      }
+      dishPhotoActionRedirect(res, req.restaurant.id, req.menuItem.id);
+    } catch (err) {
+      if (err instanceof svc.ValidationError) return dishPhotoActionRedirect(res, req.restaurant.id, req.menuItem.id, { error: err.message });
       next(err);
     }
   });
@@ -582,9 +756,10 @@ function createRestaurantsRouter({ linkBasePath }) {
   router.get('/:id/settings', async (req, res, next) => {
     try {
       const csrfToken = ensureCsrfToken(req);
+      const photoData = await restaurantPhotoViewData(req.restaurant.id);
       const body = await pageShell({
         restaurant: req.restaurant, active: 'settings', csrfToken, req,
-        tabBody: views.renderRestaurantSettingsTab({ restaurant: req.restaurant, linkBasePath, csrfToken }),
+        tabBody: views.renderRestaurantSettingsTab({ restaurant: req.restaurant, linkBasePath, csrfToken, ...photoData }),
       });
       res.send(layout({ title: `Настройки — ${req.restaurant.name}`, active: 'restaurants', csrfToken, linkBasePath, body }));
     } catch (err) {
@@ -599,9 +774,10 @@ function createRestaurantsRouter({ linkBasePath }) {
       const details = summarizeRestaurantDiff(before, updated);
       await logAuditEvent({ action: 'restaurant_updated', restaurantId: updated.id, details, ip: req.ip });
       const csrfToken = ensureCsrfToken(req);
+      const photoData = await restaurantPhotoViewData(updated.id);
       const body = await pageShell({
         restaurant: updated, active: 'settings', csrfToken, req,
-        tabBody: views.renderRestaurantSettingsTab({ restaurant: updated, linkBasePath, csrfToken, notice: 'Изменения сохранены.' }),
+        tabBody: views.renderRestaurantSettingsTab({ restaurant: updated, linkBasePath, csrfToken, notice: 'Изменения сохранены.', ...photoData }),
       });
       res.send(layout({ title: `Настройки — ${updated.name}`, active: 'restaurants', csrfToken, linkBasePath, body }));
     } catch (err) {
@@ -621,12 +797,142 @@ function createRestaurantsRouter({ linkBasePath }) {
           min_order: req.body.min_order,
         };
         const csrfToken = ensureCsrfToken(req);
+        const photoData = await restaurantPhotoViewData(req.restaurant.id);
         const body = await pageShell({
           restaurant: attempted, active: 'settings', csrfToken, req,
-          tabBody: views.renderRestaurantSettingsTab({ restaurant: attempted, linkBasePath, csrfToken, error: err.message }),
+          tabBody: views.renderRestaurantSettingsTab({ restaurant: attempted, linkBasePath, csrfToken, error: err.message, ...photoData }),
         });
         return res.status(400).send(layout({ title: `Настройки — ${req.restaurant.name}`, active: 'restaurants', csrfToken, linkBasePath, body }));
       }
+      next(err);
+    }
+  });
+
+  // --- Фотографии ресторана (Stage 5B) ---
+
+  router.param('photoId', async (req, res, next, photoId) => {
+    try {
+      const photo = await photoService.getRestaurantPhotoById(req.restaurant.id, photoId);
+      if (!photo) {
+        const csrfToken = ensureCsrfToken(req);
+        return res.status(404).send(layout({
+          title: 'Не найдено', active: 'restaurants', csrfToken, linkBasePath, body: notFoundBody(linkBasePath),
+        }));
+      }
+      req.photo = photo;
+      next();
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  function photoActionRedirect(res, restaurantId, extra) {
+    const qs = extra ? `?${new URLSearchParams(extra).toString()}` : '';
+    res.redirect(`${linkBasePath}/restaurants/${restaurantId}/settings${qs}`);
+  }
+
+  router.post(
+    '/:id/photos',
+    photoUpload.single('photo'),
+    // Multer сигнализирует об ошибке (файл больше лимита, лишнее поле и
+    // т.п.) через next(err) — Express находит следующий error-handling
+    // middleware (arity 4) в ЭТОЙ ЖЕ цепочке роута, до requireCsrf/основного
+    // обработчика (задание, раздел 5/11: понятная ошибка, не сырой 500).
+    (err, req, res, next) => {
+      if (!err) return next();
+      photoActionRedirect(res, req.params.id, { error: 'Не удалось загрузить файл — слишком большой или повреждён.' });
+    },
+    requireCsrf,
+    async (req, res, next) => {
+      try {
+        if (!mediaProvider) throw new svc.ValidationError('Хранилище фотографий не настроено.');
+        if (!req.file) throw new svc.ValidationError('Выберите файл фотографии.');
+        const photo = await photoService.uploadRestaurantPhoto(mediaProvider, req.restaurant.id, req.file.buffer, req.body.alt_text);
+        await logAuditEvent({
+          action: 'restaurant_photo_uploaded', restaurantId: req.restaurant.id,
+          details: summarizePhotoDetails(photo), ip: req.ip,
+        });
+        photoActionRedirect(res, req.restaurant.id);
+      } catch (err) {
+        if (err instanceof svc.ValidationError) {
+          return photoActionRedirect(res, req.restaurant.id, { error: err.message });
+        }
+        next(err);
+      }
+    },
+  );
+
+  router.post('/:id/photos/:photoId/primary', requireCsrf, async (req, res, next) => {
+    try {
+      const updated = await photoService.setRestaurantPhotoPrimary(req.restaurant.id, req.photo.id);
+      if (updated) {
+        await logAuditEvent({
+          action: 'restaurant_photo_primary_changed', restaurantId: req.restaurant.id,
+          details: summarizePhotoDetails(updated), ip: req.ip,
+        });
+      }
+      photoActionRedirect(res, req.restaurant.id);
+    } catch (err) {
+      if (err instanceof svc.ValidationError) return photoActionRedirect(res, req.restaurant.id, { error: err.message });
+      next(err);
+    }
+  });
+
+  router.post('/:id/photos/:photoId/move', requireCsrf, async (req, res, next) => {
+    try {
+      const direction = req.body.direction === 'up' ? 'up' : 'down';
+      await photoService.moveRestaurantPhoto(req.restaurant.id, req.photo.id, direction);
+      await logAuditEvent({
+        action: 'restaurant_photo_moved', restaurantId: req.restaurant.id,
+        details: `${summarizePhotoDetails(req.photo)}; direction: ${direction}`, ip: req.ip,
+      });
+      photoActionRedirect(res, req.restaurant.id);
+    } catch (err) {
+      if (err instanceof svc.ValidationError) return photoActionRedirect(res, req.restaurant.id, { error: err.message });
+      next(err);
+    }
+  });
+
+  router.post('/:id/photos/:photoId/alt', requireCsrf, async (req, res, next) => {
+    try {
+      // Правка описания — не входит в список 10 audit-событий (задание,
+      // раздел 12: закрытый список), поэтому не логируется.
+      await photoService.updateRestaurantPhotoAlt(req.restaurant.id, req.photo.id, req.body.alt_text);
+      photoActionRedirect(res, req.restaurant.id);
+    } catch (err) {
+      if (err instanceof svc.ValidationError) return photoActionRedirect(res, req.restaurant.id, { error: err.message });
+      next(err);
+    }
+  });
+
+  router.post('/:id/photos/:photoId/archive', requireCsrf, async (req, res, next) => {
+    try {
+      const archived = await photoService.archiveRestaurantPhoto(req.restaurant.id, req.photo.id);
+      if (archived) {
+        await logAuditEvent({
+          action: 'restaurant_photo_archived', restaurantId: req.restaurant.id,
+          details: summarizePhotoDetails(archived), ip: req.ip,
+        });
+      }
+      photoActionRedirect(res, req.restaurant.id);
+    } catch (err) {
+      if (err instanceof svc.ValidationError) return photoActionRedirect(res, req.restaurant.id, { error: err.message });
+      next(err);
+    }
+  });
+
+  router.post('/:id/photos/:photoId/restore', requireCsrf, async (req, res, next) => {
+    try {
+      const restored = await photoService.restoreRestaurantPhoto(req.restaurant.id, req.photo.id);
+      if (restored) {
+        await logAuditEvent({
+          action: 'restaurant_photo_restored', restaurantId: req.restaurant.id,
+          details: summarizePhotoDetails(restored), ip: req.ip,
+        });
+      }
+      photoActionRedirect(res, req.restaurant.id);
+    } catch (err) {
+      if (err instanceof svc.ValidationError) return photoActionRedirect(res, req.restaurant.id, { error: err.message });
       next(err);
     }
   });

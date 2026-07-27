@@ -26,6 +26,7 @@ const apiRoutes = require('../../routes/postgresql/api');
 const adminRoutes = require('../../routes/postgresql/admin');
 const { createHqRouter } = require('../../routes/hq');
 const hqOwnerService = require('../hq/ownerService');
+const { createMediaProviderFromEnv, LocalMediaProvider } = require('../hq/media/provider');
 const { buildCorsOptions } = require('../../config/cors');
 const { createPauseExpiryScheduler, createOrderTimeoutScheduler, createRefundReconciliationScheduler } = require('./scheduler');
 const { createHealthCheck } = require('./health');
@@ -170,6 +171,29 @@ function validateAppEnv(env) {
   }
   if (env.APP_ENV === 'production' && env.TRUST_PROXY !== 'loopback') {
     errors.push('Для production за локальным Nginx требуется TRUST_PROXY=loopback.');
+  }
+
+  // YAAM HQ Stage 5B — медиа-система (задание, раздел 4: fail-closed). Не
+  // задан вовсе — медиа-функциональность просто не монтируется (см. ниже),
+  // это не ошибка конфигурации сама по себе. "local" — только не-production
+  // (LocalMediaProvider никогда не должен обслуживать реальный трафик).
+  // "s3" — обязаны быть заданы ВСЕ переменные подключения, иначе приложение
+  // не должно стартовать вовсе, а не тихо остаться без медиа.
+  if (env.MEDIA_PROVIDER !== undefined && env.MEDIA_PROVIDER !== '' && !['local', 's3'].includes(env.MEDIA_PROVIDER)) {
+    errors.push('MEDIA_PROVIDER допускает только "local" или "s3".');
+  }
+  if (env.MEDIA_PROVIDER === 'local' && env.APP_ENV === 'production') {
+    errors.push('MEDIA_PROVIDER=local запрещён в production — используйте s3.');
+  }
+  if (env.MEDIA_PROVIDER === 's3') {
+    const requiredMediaVars = [
+      'MEDIA_S3_ENDPOINT', 'MEDIA_S3_REGION', 'MEDIA_S3_BUCKET',
+      'MEDIA_S3_ACCESS_KEY_ID', 'MEDIA_S3_SECRET_ACCESS_KEY', 'MEDIA_S3_PUBLIC_BASE_URL',
+    ];
+    const missingMediaVars = requiredMediaVars.filter((name) => !env[name]);
+    if (missingMediaVars.length) {
+      errors.push(`MEDIA_PROVIDER=s3 требует переменные окружения: ${missingMediaVars.join(', ')}.`);
+    }
   }
 
   if (errors.length) {
@@ -334,6 +358,19 @@ function createPostgresqlApp({
   const resolvedPort = port !== undefined ? port : (Number(env.PG_HEALTH_PORT) || 3001);
   const resolvedHost = host !== undefined ? host : (env.PG_HEALTH_HOST || '127.0.0.1');
 
+  // YAAM HQ Stage 5B — единственная точка создания media provider на весь
+  // процесс (не пересоздаётся на каждый запрос). validateAppEnv() выше уже
+  // гарантировал, что при MEDIA_PROVIDER=s3 конфигурация полная — здесь
+  // createMediaProviderFromEnv() лишь конструирует объект, второй раз
+  // бросить fail-closed уже не должен (но если всё же бросит — это
+  // законный сбой старта приложения, не тихая деградация). Не задан вовсе
+  // -> null, HQ рендерит раздел «Фотографии» как "медиа не настроено", без
+  // крэша остального приложения (рестораны/заказы работают как раньше).
+  const mediaProvider = createMediaProviderFromEnv(env);
+  if (!mediaProvider) {
+    console.warn('[app-postgresql] MEDIA_PROVIDER не задан — раздел «Фотографии» в HQ недоступен.');
+  }
+
   const scheduler = createPauseExpiryScheduler({ intervalMs: schedulerIntervalMs });
   // Production Switch — Stage 8: без этих двух заказы никогда не истекали бы
   // по SLA-таймауту, а зарезервированные (reserveRefundRow) возвраты,
@@ -428,6 +465,16 @@ function createPostgresqlApp({
     next();
   });
 
+  // 6b. YAAM HQ Stage 5B — раздача файлов LocalMediaProvider только в
+  // dev/test (MEDIA_PROVIDER=local уже сам по себе запрещён в production —
+  // см. services/hq/media/provider.js — этот static-маршрут existует только
+  // как следствие того же выбора, никогда не смонтирован при s3). Реальный
+  // S3-совместимый провайдер отдаёт файлы напрямую со своего домена/CDN,
+  // минуя этот процесс полностью — этот маршрут НЕ часть production-пути.
+  if (mediaProvider instanceof LocalMediaProvider) {
+    app.use('/media-fixtures', express.static(mediaProvider.baseDir, { maxAge: '1h', etag: true }));
+  }
+
   // 7. публичный API
   app.use('/api', apiRoutes);
 
@@ -470,6 +517,7 @@ function createPostgresqlApp({
       sessionSecret: resolvedHqSessionSecret,
       isProduction: env.APP_ENV === 'production',
       linkBasePath: resolvedHqLinkBasePath,
+      mediaProvider,
     }));
   } else {
     console.warn('[app-postgresql] HQ_SESSION_SECRET не задан — YAAM HQ недоступен, пока его не задать в .env');

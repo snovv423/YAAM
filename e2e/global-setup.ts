@@ -1,5 +1,6 @@
 import path from 'node:path';
 import fs from 'node:fs';
+import os from 'node:os';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import type { FullConfig } from '@playwright/test';
@@ -78,6 +79,38 @@ async function globalSetup(_config: FullConfig) {
   delete process.env.ADMIN_PASS;
   delete process.env.ENABLE_DEV_PAYMENT_ROUTES;
 
+  const appPort = await getFreePort();
+  const apiBaseUrl = `http://127.0.0.1:${appPort}`;
+
+  // YAAM HQ Stage 5B — LocalMediaProvider (задание, раздел 14D: "using
+  // LocalMediaProvider and a temp directory, never touching real external
+  // services"). MEDIA_LOCAL_BASE_URL указывает на статический маршрут
+  // /media-fixtures, который services/postgresql/app.js монтирует САМ,
+  // ТОЛЬКО когда активен LocalMediaProvider (никогда не в production —
+  // см. services/hq/media/provider.js) — это даёт реальному Chromium в
+  // Playwright реально загрузить фотографию по <img src>, а не выдуманный
+  // local-media://-URL, который браузер не умеет открыть.
+  //
+  // ВАЖНО: эти переменные ОБЯЗАНЫ быть выставлены ДО require()
+  // services/postgresql/app.js — тот при своём require() тянет
+  // routes/postgresql/api.js, а он создаёт СВОЙ собственный module-level
+  // mediaProvider (см. комментарий там же) читая process.env.MEDIA_PROVIDER
+  // ровно один раз, в момент этого самого require(). Если выставить их
+  // позже (как было до этого исправления), HQ-загрузка фото работает (её
+  // provider создаётся позже, внутри createPostgresqlApp()), но публичный
+  // API (GET /api/restaurants) навсегда получает mediaProvider=null и
+  // отдаёт primary_photo/gallery пустыми независимо от реальных данных в БД.
+  process.env.MEDIA_PROVIDER = 'local';
+  process.env.MEDIA_LOCAL_BASE_URL = `${apiBaseUrl}/media-fixtures`;
+  // Известный (не авто-сгенерированный) каталог — чтобы сам e2e-сценарий
+  // (hq-media-photos-flow.spec.ts, шаг 18: "confirm storage was cleaned up
+  // after the test") мог проверить его содержимое во время прогона, а
+  // globalTeardown ниже — реально удалить и подтвердить удаление, а не
+  // полагаться на то, что ОС когда-нибудь сама подчистит os.tmpdir().
+  const mediaLocalDir = fs.mkdtempSync(path.join(os.tmpdir(), 'yaam-e2e-media-'));
+  process.env.MEDIA_LOCAL_DIR = mediaLocalDir;
+  process.env.YAAM_E2E_MEDIA_LOCAL_DIR = mediaLocalDir;
+
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { createPostgresqlApp } = require(path.join(SERVER_DIR, 'services/postgresql/app.js'));
   // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -91,7 +124,6 @@ async function globalSetup(_config: FullConfig) {
   const hqAdminPasswordHash = await hashPassword(hqAdminPassword);
   const hqSessionSecret = crypto.randomBytes(32).toString('hex');
 
-  const appPort = await getFreePort();
   const appInstance = createPostgresqlApp({
     port: appPort,
     host: '127.0.0.1',
@@ -100,8 +132,6 @@ async function globalSetup(_config: FullConfig) {
     hqSessionSecret,
   });
   await appInstance.start(); // резолвится только после lifecycle.start() — бизнес-маршруты уже ready
-
-  const apiBaseUrl = `http://127.0.0.1:${appPort}`;
 
   const clientPort = await getFreePort();
   const staticServer = await startStaticServer({ rootDir: CLIENT_DIR, port: clientPort });
@@ -136,7 +166,13 @@ async function globalSetup(_config: FullConfig) {
     await staticServer.close();
     await appInstance.stop();
     await cluster.stop(); // сама удаляет свой временный data-каталог
-    console.log('[e2e:global-teardown] static server + app + embedded PostgreSQL остановлены и удалены');
+    // Stage 5B, шаг 18 сценария — реально удаляем и подтверждаем удаление
+    // временного каталога LocalMediaProvider (не полагаемся на ОС).
+    fs.rmSync(mediaLocalDir, { recursive: true, force: true });
+    if (fs.existsSync(mediaLocalDir)) {
+      throw new Error(`[e2e:global-teardown] временный каталог медиа не был удалён: ${mediaLocalDir}`);
+    }
+    console.log('[e2e:global-teardown] static server + app + embedded PostgreSQL + временный медиа-каталог остановлены и удалены');
   };
 }
 

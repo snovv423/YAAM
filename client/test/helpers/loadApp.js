@@ -25,7 +25,20 @@ function makeFakeElement(id) {
     innerHTML: '',
     value: '',
     disabled: false,
-    style: new Proxy({}, { get: () => '', set: () => true }),
+    // YAAM HQ Stage 5B — прежний стаб был read-only (set() всегда сообщал
+    // об успехе, но ничего не сохранял), из-за чего renderGallery()/
+    // gallerySet() (client/js/app.js) нельзя было проверить: любое чтение
+    // .style.display после записи всегда давало ''. Теперь Proxy реально
+    // хранит значения — существующие тесты этого не касались (ни один
+    // test/*.test.js до Stage 5B не читал .style.*), так что это чистое
+    // расширение возможностей, не смена уже проверяемого поведения.
+    style: (() => {
+      const store = {};
+      return new Proxy(store, {
+        get: (target, key) => (key in target ? target[key] : ''),
+        set: (target, key, value) => { target[key] = value; return true; },
+      });
+    })(),
     // Реальный, а не всегда-false стаб — нужен для cur(id) (используется и
     // существующим app.js, и новыми тестами order-state-machine hardening,
     // проверяющими go('status')/go('rejected') через cur()). Прежний
@@ -49,6 +62,7 @@ function makeFakeElement(id) {
     addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
     removeEventListener() {},
     appendChild() {},
+    insertBefore() {},
     querySelector() { return makeFakeElement(id + '__child'); },
     querySelectorAll() { return []; },
     animate() {},
@@ -134,6 +148,14 @@ function createSandbox({ apiBaseUrl, locationSearch, locationHref } = {}) {
     removeEventListener() {},
     scrollTo() {},
     IntersectionObserver: class { observe() {} unobserve() {} disconnect() {} },
+    // YAAM HQ Stage 5B — doOpenRest()/openDish() (client/js/app.js) создают
+    // `new Image()` для hero-фото с onerror-фолбэком на заглушку; браузерный
+    // global, которого раньше не было в этом стабе (ни один тест до этого не
+    // проходил через ветку с реальным photoUrl/im — см. hasSrc-проверки).
+    Image: class {
+      constructor() { this.src = ''; this.alt = ''; this.onerror = null; }
+      remove() {}
+    },
   };
   sandbox.window = sandbox; // как в реальном браузере — window === глобальный объект
   sandbox.window.YAAM_API_BASE_URL = apiBaseUrl || undefined;

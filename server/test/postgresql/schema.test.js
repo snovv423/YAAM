@@ -24,6 +24,8 @@ const EXPECTED_TABLES = [
   'hq_owner', 'hq_security_log',
   // YAAM HQ Stage 4 (журнал административных изменений раздела «Рестораны»).
   'hq_audit_log',
+  // YAAM HQ Stage 5B (медиа-система: фотографии ресторанов и блюд).
+  'restaurant_photos', 'menu_item_photos',
 ];
 
 const EXPECTED_INDEXES = {
@@ -34,6 +36,11 @@ const EXPECTED_INDEXES = {
   ux_refunds_one_active_per_payment: { unique: true, partial: true },
   ux_refunds_one_succeeded_per_payment: { unique: true, partial: true },
   ux_refunds_provider_reference: { unique: true, partial: true },
+  // YAAM HQ Stage 5B — ровно одна активная primary-фотография на владельца.
+  ux_restaurant_photos_one_primary: { unique: true, partial: true },
+  ux_menu_item_photos_one_primary: { unique: true, partial: true },
+  ix_restaurant_photos_active: { unique: false, partial: true },
+  ix_menu_item_photos_active: { unique: false, partial: true },
 };
 
 // Таблицы, где по схеме есть колонка created_at (categories/menu_items/order_items — нет).
@@ -42,6 +49,7 @@ const TABLES_WITH_CREATED_AT = [
   'payment_retry_attempts', 'payment_retry_keys', 'payment_presentations',
   'payment_initial_attempts', 'refunds',
   'hq_owner', 'hq_security_log', 'hq_audit_log',
+  'restaurant_photos', 'menu_item_photos',
 ];
 
 const EXPECTED_FUNCTIONS = [
@@ -59,7 +67,7 @@ const EXPECTED_TRIGGERS = {
 // hq_owner НЕ входит: его id — фиксированная константа (DEFAULT 1 CHECK
 // id=1), не GENERATED ALWAYS AS IDENTITY (единственная строка никогда не
 // "автоинкрементируется" — см. db/postgresql/schema.sql).
-const IDENTITY_TABLES = ['restaurants', 'categories', 'menu_items', 'orders', 'order_items', 'payments', 'refunds', 'hq_security_log', 'hq_audit_log'];
+const IDENTITY_TABLES = ['restaurants', 'categories', 'menu_items', 'orders', 'order_items', 'payments', 'refunds', 'hq_security_log', 'hq_audit_log', 'restaurant_photos', 'menu_item_photos'];
 
 let cluster;
 
@@ -83,7 +91,7 @@ async function runSchemaAndInspect(t, databaseName) {
       await client.query(SCHEMA_SQL);
     });
 
-    await t.test('создаются все 15 таблиц', async () => {
+    await t.test('создаются все 17 таблиц', async () => {
       const { rows } = await client.query(
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename`
       );
@@ -91,13 +99,13 @@ async function runSchemaAndInspect(t, databaseName) {
       assert.deepEqual(names, [...EXPECTED_TABLES].sort());
     });
 
-    await t.test('создаются все 14 внешних ключей', async () => {
+    await t.test('создаются все 16 внешних ключей', async () => {
       const { rows } = await client.query(`
         SELECT count(*)::int AS n
         FROM information_schema.table_constraints
         WHERE constraint_schema = 'public' AND constraint_type = 'FOREIGN KEY'
       `);
-      assert.equal(rows[0].n, 14);
+      assert.equal(rows[0].n, 16);
     });
 
     await t.test('CHECK-ограничения присутствуют (>=12, включая новый на payments.status)', async () => {
@@ -114,7 +122,7 @@ async function runSchemaAndInspect(t, databaseName) {
       assert.ok(onRefundsAmount, 'ожидали CHECK(amount > 0) на refunds');
     });
 
-    await t.test('создаются все 6 индексов, из них 5 partial unique', async () => {
+    await t.test('создаются все 10 индексов, из них 7 partial unique', async () => {
       const { rows } = await client.query(`
         SELECT
           i.relname AS index_name,
@@ -128,7 +136,7 @@ async function runSchemaAndInspect(t, databaseName) {
       `, [Object.keys(EXPECTED_INDEXES)]);
 
       const byName = Object.fromEntries(rows.map((r) => [r.index_name, r]));
-      assert.equal(Object.keys(byName).length, 6, 'ожидали ровно 6 именованных индексов из schema.sql');
+      assert.equal(Object.keys(byName).length, 10, 'ожидали ровно 10 именованных индексов из schema.sql');
 
       let partialUniqueCount = 0;
       for (const [name, expected] of Object.entries(EXPECTED_INDEXES)) {
@@ -138,7 +146,7 @@ async function runSchemaAndInspect(t, databaseName) {
         assert.equal(actual.is_partial, expected.partial, `${name}: ожидали partial=${expected.partial}`);
         if (actual.is_partial && actual.is_unique) partialUniqueCount += 1;
       }
-      assert.equal(partialUniqueCount, 5, 'ожидали ровно 5 partial UNIQUE индексов');
+      assert.equal(partialUniqueCount, 7, 'ожидали ровно 7 partial UNIQUE индексов');
     });
 
     await t.test('создаются 3 PL/pgSQL-функции', async () => {
@@ -174,7 +182,7 @@ async function runSchemaAndInspect(t, databaseName) {
       }
     });
 
-    await t.test('IDENTITY корректна на всех 9 автоинкрементных таблицах', async () => {
+    await t.test('IDENTITY корректна на всех 11 автоинкрементных таблицах', async () => {
       for (const table of IDENTITY_TABLES) {
         const { rows } = await client.query(`
           SELECT is_identity, identity_generation
@@ -206,7 +214,7 @@ async function runSchemaAndInspect(t, databaseName) {
       assert.equal(rows[0].data_type, 'bytea');
     });
 
-    await t.test('DEFAULT NOW() присутствует на всех 12 датовых колонках created_at', async () => {
+    await t.test('DEFAULT NOW() присутствует на всех 14 датовых колонках created_at', async () => {
       const { rows } = await client.query(`
         SELECT table_name, column_default
         FROM information_schema.columns
