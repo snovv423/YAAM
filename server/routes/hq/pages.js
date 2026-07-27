@@ -14,6 +14,8 @@ const { hqRootPath } = require('../../services/hq/basePath');
 const ownerService = require('../../services/hq/ownerService');
 const { logSecurityEvent } = require('../../services/hq/securityLog');
 const dashboardMetrics = require('../../services/hq/dashboardMetrics');
+const payoutService = require('../../services/hq/restaurantPayoutService');
+const { CONTRACT_STATUS_LABELS } = require('../../services/hq/restaurantContractService');
 
 const STATUS_LABELS = {
   awaiting_payment: 'Ожидают оплаты',
@@ -101,7 +103,25 @@ function renderOverview({ top, active, restaurants, finance, attentionItems, csr
   `;
 }
 
-function renderFinanceStub({ finance }) {
+function renderFinanceStub({ finance, payoutSummary, linkBasePath }) {
+  // Stage 6 (задание, раздел 12) — только готовность документов/реквизитов,
+  // никаких сумм к выплате (нет зрелой сущности задолженности перед
+  // рестораном на этом этапе — не выдумывается) и никаких кнопок
+  // «Выплатить» (задание прямо запрещает это здесь).
+  const readinessRows = payoutSummary.length
+    ? payoutSummary.map((r) => {
+        const contractLabel = r.contractStatus ? CONTRACT_STATUS_LABELS[r.contractStatus] || r.contractStatus : 'Не оформлен';
+        const readinessLabel = payoutService.READINESS_LABELS[r.readiness] || r.readiness;
+        const readinessBadgeClass = r.readiness === 'ready' ? 'open' : 'closed';
+        return `<tr>
+          <td>${esc(r.name)}</td>
+          <td>${esc(contractLabel)}</td>
+          <td><span class="badge ${readinessBadgeClass}">${esc(readinessLabel)}</span></td>
+          <td style="text-align:right"><a href="${linkBasePath}/restaurants/${r.restaurantId}/settings">Открыть ресторан</a></td>
+        </tr>`;
+      }).join('')
+    : `<tr><td colspan="4" class="empty-state">Ресторанов пока нет.</td></tr>`;
+
   return `
     <h1>Финансы</h1>
     <div class="panel">
@@ -113,6 +133,14 @@ function renderFinanceStub({ finance }) {
         <tr><td>Полные возвраты</td><td style="text-align:right">${finance.refundedOrders} шт · ${finance.refundedAmount} ₽</td></tr>
       </table>
       <div class="empty-state" style="margin-top:10px">Банковские выплаты будут доступны после подключения финансового модуля.</div>
+    </div>
+
+    <div class="panel">
+      <div style="font-weight:700;margin-bottom:14px">Готовность ресторанов к выплатам</div>
+      <table>
+        <thead><tr><th>Ресторан</th><th>Договор</th><th>Готовность</th><th></th></tr></thead>
+        <tbody>${readinessRows}</tbody>
+      </table>
     </div>
   `;
 }
@@ -221,14 +249,17 @@ function createPagesRouter({ linkBasePath, mediaProvider = null }) {
 
   router.get('/finance', async (req, res, next) => {
     try {
-      const finance = await dashboardMetrics.getFinanceSummary(db);
+      const [finance, payoutSummary] = await Promise.all([
+        dashboardMetrics.getFinanceSummary(db),
+        payoutService.listRestaurantsPayoutSummary(),
+      ]);
       const csrfToken = ensureCsrfToken(req);
       res.send(layout({
         title: 'Финансы',
         active: 'finance',
         csrfToken,
         linkBasePath,
-        body: renderFinanceStub({ finance }),
+        body: renderFinanceStub({ finance, payoutSummary, linkBasePath }),
       }));
     } catch (err) {
       next(err);

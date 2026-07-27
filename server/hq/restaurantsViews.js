@@ -6,6 +6,7 @@
 const { esc } = require('./layout');
 const lifecycle = require('../services/hq/restaurantLifecycle');
 const { renderPhotoManager } = require('./photosViews');
+const financeViews = require('./restaurantFinanceViews');
 
 const ORDER_STATUS_LABELS = {
   awaiting_payment: 'Ожидает оплаты',
@@ -246,7 +247,7 @@ function simpleActionForm({ action, csrfToken, label, cls, confirm: confirmMsg }
 // без единого блюда (задание Stage 5A, раздел 12) — предупреждение целиком в
 // client-side confirm(), тем же паттерном, что уже использует архив в этом
 // же файле (никакого отдельного server-rendered экрана подтверждения).
-function renderRestaurantHeader({ restaurant: r, csrfToken, linkBasePath, menuItemsCount = 0 }) {
+function renderRestaurantHeader({ restaurant: r, csrfToken, linkBasePath, menuItemsCount = 0, payoutReadiness = null }) {
   const status = lifecycle.resolveLifecycleStatus(r);
   const base = `${linkBasePath}/restaurants/${r.id}`;
   const actions = [];
@@ -274,7 +275,7 @@ function renderRestaurantHeader({ restaurant: r, csrfToken, linkBasePath, menuIt
     <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:14px;margin-bottom:16px">
       <div>
         <h1 style="margin-bottom:6px">${esc(r.name)}</h1>
-        <div style="color:var(--txt2);font-size:13px">${esc(parseCities(r.cities).join(', '))} · ${statusBadge(r)} · ${r.rating_count > 0 ? `${stars(Number(r.rating).toFixed(1))} (${r.rating_count})` : 'Оценок нет'} · Telegram: ${r.telegram_chat_id ? 'подключён' : 'не подключён'}</div>
+        <div style="color:var(--txt2);font-size:13px">${esc(parseCities(r.cities).join(', '))} · ${statusBadge(r)} · ${r.rating_count > 0 ? `${stars(Number(r.rating).toFixed(1))} (${r.rating_count})` : 'Оценок нет'} · Telegram: ${r.telegram_chat_id ? 'подключён' : 'не подключён'}${payoutReadiness ? ` · ${financeViews.renderPayoutReadinessInline(payoutReadiness)}` : ''}</div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">${actions.join(' ')}</div>
     </div>
@@ -590,6 +591,7 @@ function renderStatisticsTab({ restaurant, statistics: s, periodOptions, linkBas
 function renderRestaurantSettingsTab({
   restaurant: r, linkBasePath, csrfToken, error, notice,
   photos = [], mediaConfigured = false, maxPhotos = 0,
+  legal = null, bank = null, contract = null,
 }) {
   const archiveAction = r.archived_at
     ? `<form method="post" action="${linkBasePath}/restaurants/${r.id}/restore" onsubmit="return confirm('Восстановить «${esc(r.name)}» из архива?')">
@@ -627,6 +629,10 @@ function renderRestaurantSettingsTab({
         ${notice ? `<div class="notice">${esc(notice)}</div>` : ''}
       </form>
     </div>
+
+    ${financeViews.renderLegalDetailsSection({ restaurant: r, legal, linkBasePath })}
+    ${financeViews.renderBankDetailsSection({ restaurant: r, bank, linkBasePath })}
+    ${financeViews.renderContractSection({ restaurant: r, contract, linkBasePath })}
 
     ${renderPhotoManager({
       title: 'Фотографии ресторана',

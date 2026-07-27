@@ -289,6 +289,99 @@ DROP INDEX IF EXISTS ix_restaurant_photos_active;
 DROP INDEX IF EXISTS ix_menu_item_photos_active;
 
 -- =========================================================================
+-- restaurant_legal_details / restaurant_bank_details / restaurant_contracts
+-- =========================================================================
+-- YAAM HQ Stage 6 — юридические данные, банковские реквизиты и договор
+-- ресторана с YAAM (задание, разделы 3-6). Это закрытые операционные
+-- данные, доступные только владельцу YAAM через HQ — рестораны не имеют
+-- сюда доступа вовсе (задание, раздел 0).
+--
+-- restaurant_id — сам PRIMARY KEY, НЕ отдельная IDENTITY-колонка id (как у
+-- restaurant_photos/menu_item_photos выше): там у одного владельца МНОГО
+-- фотографий (1:N), здесь у одного ресторана РОВНО ОДНА актуальная запись
+-- каждого типа (1:1, задание, раздел 6: "одна актуальная запись каждого
+-- типа на один ресторан") — restaurant_id-как-PK одновременно и проще, и
+-- строже гарантирует это, чем IDENTITY id + отдельный UNIQUE(restaurant_id).
+-- История версий договора сознательно НЕ строится отдельной таблицей
+-- (задание, раздел 6) — историю изменений хранит hq_audit_log, как и для
+-- остальных разделов HQ.
+--
+-- Отдельные таблицы, не колонки restaurants — по трём причинам: (1) это
+-- принципиально другой класс данных (закрытые финансовые/юридические, не
+-- публичная карточка ресторана); (2) публичный API/routes/postgresql/api.js
+-- строит DTO через явный allowlist полей (PUBLIC_RESTAURANT_FIELDS) — как
+-- отдельные таблицы, эти колонки физически не могут утечь туда даже по
+-- ошибке будущего кода, который сделает `SELECT *` по restaurants; (3) как
+-- юридическое лицо получателя выплаты (см. restaurant_legal_details), так и
+-- публичное имя ресторана (restaurants.name) — разные сущности (задание,
+-- раздел 3: "Башня" публично, "ИП Иванов Иван Иванович" юридически) —
+-- смешивание их в одной таблице стирало бы эту границу на уровне схемы.
+--
+-- restaurant_id БЕЗ ON DELETE — тот же принцип, что и везде в этой схеме:
+-- DELETE ресторана запрещён продуктовым правилом (archived_at — единственный
+-- механизм "убрать"), поэтому реального ON DELETE CASCADE здесь никогда не
+-- потребуется.
+CREATE TABLE IF NOT EXISTS restaurant_legal_details (
+  restaurant_id INTEGER PRIMARY KEY REFERENCES restaurants(id),
+  legal_form TEXT NOT NULL CHECK (legal_form IN ('ip', 'ooo')),
+  legal_name TEXT NOT NULL,
+  short_legal_name TEXT NOT NULL DEFAULT '',
+  inn TEXT NOT NULL,
+  ogrn TEXT NOT NULL,
+  kpp TEXT NOT NULL DEFAULT '',              -- только для ООО (задание, раздел 3), у ИП всегда ''
+  legal_address TEXT NOT NULL,
+  actual_address TEXT NOT NULL DEFAULT '',
+  director_name TEXT NOT NULL,
+  authority_basis TEXT NOT NULL DEFAULT '',
+  contact_phone TEXT NOT NULL,
+  contact_email TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Банковские реквизиты для будущих выплат (задание, раздел 4). Полные
+-- значения account_number/correspondent_account НИКОГДА не покидают HQ:
+-- read-only обзор маскирует их (services/hq/restaurantBankDetailsService.js),
+-- audit log хранит максимум последние 4 цифры (services/hq/auditLog.js).
+CREATE TABLE IF NOT EXISTS restaurant_bank_details (
+  restaurant_id INTEGER PRIMARY KEY REFERENCES restaurants(id),
+  recipient_name TEXT NOT NULL,
+  recipient_inn TEXT NOT NULL,
+  recipient_kpp TEXT NOT NULL DEFAULT '',
+  account_number TEXT NOT NULL,              -- 20 цифр, проверено относительно bik
+  bik TEXT NOT NULL,                         -- 9 цифр
+  bank_name TEXT NOT NULL,
+  correspondent_account TEXT NOT NULL,       -- 20 цифр, проверено относительно bik
+  default_payment_purpose TEXT NOT NULL DEFAULT '',
+  internal_note TEXT NOT NULL DEFAULT '',    -- только для владельца YAAM, никогда не покидает HQ
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Договор ресторана с YAAM (задание, раздел 5). commission_bps — basis
+-- points (700 = 7%, текущая базовая модель YAAM), НЕ float — то же
+-- целочисленное представление денег/долей, что уже используется во всей
+-- остальной схеме (items_total/commission_amount на orders — целые рубли,
+-- не float). Это ДОГОВОРНОЕ значение для БУДУЩЕГО финансового модуля — оно
+-- НЕ подключено к фактическому расчёту комиссии заказа (тот остаётся
+-- 0.07-константой в services/postgresql/orderService.js, задание, раздел 5:
+-- "не ломать расчёты", "не делать скрытое изменение расчёта уже
+-- существующих заказов").
+CREATE TABLE IF NOT EXISTS restaurant_contracts (
+  restaurant_id INTEGER PRIMARY KEY REFERENCES restaurants(id),
+  contract_number TEXT NOT NULL DEFAULT '',
+  signed_at DATE,
+  starts_at DATE,
+  ends_at DATE,
+  status TEXT NOT NULL DEFAULT 'not_signed'
+    CHECK (status IN ('not_signed', 'prepared', 'signed', 'suspended', 'terminated')),
+  commission_bps INTEGER NOT NULL DEFAULT 700 CHECK (commission_bps >= 0 AND commission_bps <= 10000),
+  internal_note TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- =========================================================================
 -- orders
 -- =========================================================================
 CREATE TABLE IF NOT EXISTS orders (
@@ -676,7 +769,12 @@ CREATE TABLE IF NOT EXISTS hq_audit_log (
     -- значения намеренно убраны из allowlist — эта функциональность
     -- перестала существовать в коде, а не просто скрыта в UI.
     'restaurant_photo_uploaded', 'restaurant_photo_primary_changed', 'restaurant_photo_deleted',
-    'menu_item_photo_uploaded', 'menu_item_photo_primary_changed', 'menu_item_photo_deleted'
+    'menu_item_photo_uploaded', 'menu_item_photo_primary_changed', 'menu_item_photo_deleted',
+    -- Stage 6 — юридические данные/банковские реквизиты/договор (задание,
+    -- раздел 10). Ровно 7 событий, как и требует задание.
+    'restaurant_legal_details_created', 'restaurant_legal_details_updated',
+    'restaurant_bank_details_created', 'restaurant_bank_details_updated',
+    'restaurant_contract_created', 'restaurant_contract_updated', 'restaurant_contract_status_changed'
   )),
   restaurant_id INTEGER REFERENCES restaurants(id),
   details TEXT,
@@ -708,7 +806,10 @@ ALTER TABLE hq_audit_log ADD CONSTRAINT hq_audit_log_action_check CHECK (action 
   'menu_item_unavailable', 'menu_item_archived', 'menu_item_restored',
   'menu_item_moved',
   'restaurant_photo_uploaded', 'restaurant_photo_primary_changed', 'restaurant_photo_deleted',
-  'menu_item_photo_uploaded', 'menu_item_photo_primary_changed', 'menu_item_photo_deleted'
+  'menu_item_photo_uploaded', 'menu_item_photo_primary_changed', 'menu_item_photo_deleted',
+  'restaurant_legal_details_created', 'restaurant_legal_details_updated',
+  'restaurant_bank_details_created', 'restaurant_bank_details_updated',
+  'restaurant_contract_created', 'restaurant_contract_updated', 'restaurant_contract_status_changed'
 ));
 
 COMMIT;

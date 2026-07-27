@@ -6,6 +6,8 @@
 // НИКОГДА не должна ронять реальное действие (создание/правку/паузу/
 // архивирование ресторана) — поэтому эта функция сама ловит свои ошибки.
 const db = require('../../db/postgresql');
+const { maskAccountForAudit } = require('./ruRequisites');
+const { formatCommissionBpsAsPercent } = require('./restaurantContractService');
 
 const ACTIONS = [
   'restaurant_created',
@@ -41,6 +43,15 @@ const ACTIONS = [
   'menu_item_photo_uploaded',
   'menu_item_photo_primary_changed',
   'menu_item_photo_deleted',
+  // Stage 6 — юридические данные/банковские реквизиты/договор (задание,
+  // раздел 10). Ровно 7 событий.
+  'restaurant_legal_details_created',
+  'restaurant_legal_details_updated',
+  'restaurant_bank_details_created',
+  'restaurant_bank_details_updated',
+  'restaurant_contract_created',
+  'restaurant_contract_updated',
+  'restaurant_contract_status_changed',
 ];
 
 // Единственные поля ресторана, которые вообще могут попасть в текст лога —
@@ -63,6 +74,31 @@ const MENU_ITEM_SAFE_DIFF_FIELDS = [
 ];
 
 const CATEGORY_SAFE_DIFF_FIELDS = ['name'];
+
+// Stage 6 (задание, раздел 10) — "Можно: перечень изменённых полей...
+// Нельзя: полный расчётный счёт; полный корреспондентский счёт; полные
+// банковские реквизиты; внутренние примечания целиком; длинные адреса
+// целиком." Три категории полей на каждую сущность:
+//   *_SAFE_DIFF_FIELDS   — короткие небанковские значения, полный diff "было -> стало";
+//   *_MASKED_FIELDS      — только account_number/correspondent_account, маскированный diff;
+//   *_NAME_ONLY_FIELDS   — длинные адреса/примечания/назначение платежа — только факт
+//                          изменения ("field: изменено"), без самого значения.
+const LEGAL_DETAILS_SAFE_DIFF_FIELDS = [
+  'legal_form', 'legal_name', 'short_legal_name', 'inn', 'ogrn', 'kpp',
+  'director_name', 'contact_phone', 'contact_email',
+];
+const LEGAL_DETAILS_NAME_ONLY_FIELDS = ['legal_address', 'actual_address', 'authority_basis'];
+
+const BANK_DETAILS_SAFE_DIFF_FIELDS = ['recipient_name', 'recipient_inn', 'recipient_kpp', 'bik', 'bank_name'];
+const BANK_DETAILS_MASKED_FIELDS = ['account_number', 'correspondent_account'];
+const BANK_DETAILS_NAME_ONLY_FIELDS = ['default_payment_purpose', 'internal_note'];
+
+// commission_bps сознательно ВНЕ этого списка — логируется отдельно, в
+// процентах (человекочитаемо), не сырыми basis points. status — тоже вне
+// списка: логируется отдельным событием restaurant_contract_status_changed
+// (см. routes/hq/restaurants.js), не дублируется здесь.
+const CONTRACT_SAFE_DIFF_FIELDS = ['contract_number', 'signed_at', 'starts_at', 'ends_at'];
+const CONTRACT_NAME_ONLY_FIELDS = ['internal_note'];
 
 // Разумный лимит на длину одного значения внутри diff-строки (задание,
 // раздел 15/6: "название может журналироваться безопасно с разумным
@@ -117,6 +153,66 @@ function summarizeCategoryDiff(before, after) {
   return summarizeDiff(before, after, CATEGORY_SAFE_DIFF_FIELDS);
 }
 
+// Общий helper для "только факт изменения, без значения" (адреса/примечания/
+// назначение платежа — задание, раздел 10: "нельзя ... длинные адреса
+// целиком", "нельзя ... внутренние примечания целиком").
+function summarizeChangedFieldNames(before, after, fields) {
+  const parts = [];
+  for (const field of fields) {
+    if (String(before[field] ?? '') !== String(after[field] ?? '')) {
+      parts.push(`${field}: изменено`);
+    }
+  }
+  return parts;
+}
+
+function summarizeLegalDetailsDiff(before, after) {
+  const parts = [
+    ...(summarizeDiff(before, after, LEGAL_DETAILS_SAFE_DIFF_FIELDS)?.split('; ') ?? []),
+    ...summarizeChangedFieldNames(before, after, LEGAL_DETAILS_NAME_ONLY_FIELDS),
+  ];
+  return parts.length ? parts.join('; ') : null;
+}
+
+// Банковские реквизиты (задание, раздел 10, пример дословно):
+// "account_number: ****1234 -> ****5678" — маскировка через
+// ruRequisites.maskAccountForAudit, полные значения никогда не попадают в лог.
+function summarizeBankDetailsDiff(before, after) {
+  const maskedParts = [];
+  for (const field of BANK_DETAILS_MASKED_FIELDS) {
+    if (String(before[field] ?? '') === String(after[field] ?? '')) continue;
+    maskedParts.push(`${field}: ${maskAccountForAudit(before[field])} -> ${maskAccountForAudit(after[field])}`);
+  }
+  const parts = [
+    ...(summarizeDiff(before, after, BANK_DETAILS_SAFE_DIFF_FIELDS)?.split('; ') ?? []),
+    ...maskedParts,
+    ...summarizeChangedFieldNames(before, after, BANK_DETAILS_NAME_ONLY_FIELDS),
+  ];
+  return parts.length ? parts.join('; ') : null;
+}
+
+// Договор — БЕЗ status (см. summarizeContractStatusChange ниже) и БЕЗ
+// сырых commission_bps (показывается в процентах, человекочитаемо).
+function summarizeContractDiff(before, after) {
+  const commissionPart = before.commission_bps !== after.commission_bps
+    ? [`commission: "${formatCommissionBpsAsPercent(before.commission_bps)}%" -> "${formatCommissionBpsAsPercent(after.commission_bps)}%"`]
+    : [];
+  const parts = [
+    ...(summarizeDiff(before, after, CONTRACT_SAFE_DIFF_FIELDS)?.split('; ') ?? []),
+    ...commissionPart,
+    ...summarizeChangedFieldNames(before, after, CONTRACT_NAME_ONLY_FIELDS),
+  ];
+  return parts.length ? parts.join('; ') : null;
+}
+
+// Отдельное событие restaurant_contract_status_changed (задание, раздел 10:
+// "можно: старый/новый статус договора") — не смешивается с
+// summarizeContractDiff выше, чтобы смена статуса всегда была видна как
+// самостоятельное, легко находимое событие в логе.
+function summarizeContractStatusChange(before, after) {
+  return `status: "${before.status}" -> "${after.status}"`;
+}
+
 // Stage 5B — фотографии (задание, раздел 12: "Never log: secret keys; full
 // signed URLs; internal storage endpoint; binary data"). storage_key
 // сознательно НЕ включён — он однозначно определяет объект в реальном
@@ -135,8 +231,19 @@ module.exports = {
   summarizeMenuItemDiff,
   summarizeCategoryDiff,
   summarizePhotoDetails,
+  summarizeLegalDetailsDiff,
+  summarizeBankDetailsDiff,
+  summarizeContractDiff,
+  summarizeContractStatusChange,
   ACTIONS,
   SAFE_DIFF_FIELDS,
   MENU_ITEM_SAFE_DIFF_FIELDS,
   CATEGORY_SAFE_DIFF_FIELDS,
+  LEGAL_DETAILS_SAFE_DIFF_FIELDS,
+  LEGAL_DETAILS_NAME_ONLY_FIELDS,
+  BANK_DETAILS_SAFE_DIFF_FIELDS,
+  BANK_DETAILS_MASKED_FIELDS,
+  BANK_DETAILS_NAME_ONLY_FIELDS,
+  CONTRACT_SAFE_DIFF_FIELDS,
+  CONTRACT_NAME_ONLY_FIELDS,
 };

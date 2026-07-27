@@ -71,9 +71,22 @@ function hqLoginRateLimitHandler(req, res) {
 // (orderCreateLimiter и т.д.) — по IP, скользящее окно. 8 попыток / 15 минут —
 // достаточно для человека, ошибившегося пару раз, но останавливает
 // перебор пароля.
+//
+// HQ_LOGIN_RATE_LIMIT_MAX — опциональный ENV-override ТОЛЬКО для порога
+// (окно 15 минут не меняется). Не задан — ровно 8, как и было; production
+// никогда его не задаёт. Введён Stage 6 (e2e/global-setup.ts): все Playwright
+// spec-файлы делят один app-instance и один IP (127.0.0.1) на весь прогон —
+// с ростом числа HQ-сценариев их логины суммарно упираются в этот потолок
+// внутри одного 15-минутного окна, никак не показывая реальную проблему
+// безопасности. Валидное положительное целое — единственное, что принимается;
+// иначе (не задано, отрицательное, NaN) — безопасный дефолт 8, никогда не 0
+// (что означало бы "запретить все входы").
+const configuredMax = Number(process.env.HQ_LOGIN_RATE_LIMIT_MAX);
+const loginRateLimitMax = Number.isInteger(configuredMax) && configuredMax > 0 ? configuredMax : 8;
+
 const loginRateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 8,
+  max: loginRateLimitMax,
   standardHeaders: true,
   legacyHeaders: false,
   handler: hqLoginRateLimitHandler,

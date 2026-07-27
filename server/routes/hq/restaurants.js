@@ -11,13 +11,19 @@ const statsService = require('../../services/hq/restaurantStatsService');
 const menuSvc = require('../../services/hq/menuAdminService');
 const photoService = require('../../services/hq/media/photoService');
 const { MAX_SOURCE_BYTES } = require('../../services/hq/media/imagePipeline');
+const legalService = require('../../services/hq/restaurantLegalDetailsService');
+const bankService = require('../../services/hq/restaurantBankDetailsService');
+const contractService = require('../../services/hq/restaurantContractService');
+const payoutService = require('../../services/hq/restaurantPayoutService');
 const {
   logAuditEvent, summarizeRestaurantDiff, summarizeMenuItemDiff, summarizeCategoryDiff, summarizePhotoDetails,
+  summarizeLegalDetailsDiff, summarizeBankDetailsDiff, summarizeContractDiff, summarizeContractStatusChange,
 } = require('../../services/hq/auditLog');
 const { ensureCsrfToken, requireCsrf } = require('../../services/hq/csrf');
 const { layout } = require('../../hq/layout');
 const views = require('../../hq/restaurantsViews');
 const menuViews = require('../../hq/menuViews');
+const financeViews = require('../../hq/restaurantFinanceViews');
 
 function notFoundBody(linkBasePath) {
   return `<h1>Ресторан не найден</h1><div class="panel"><div class="empty-state">Проверьте адрес или вернитесь к списку.</div></div><a class="btn ghost" href="${linkBasePath}/restaurants">← К списку ресторанов</a>`;
@@ -136,11 +142,27 @@ function createRestaurantsRouter({ linkBasePath, mediaProvider = null }) {
     };
   }
 
+  // YAAM HQ Stage 6 — юридические данные/банковские реквизиты/договор для
+  // вкладки «Настройки» — один параллельный fetch, ровно тот же принцип,
+  // что и restaurantPhotoViewData выше.
+  async function restaurantFinanceViewData(restaurantId) {
+    const [legal, bank, contract] = await Promise.all([
+      legalService.getLegalDetails(restaurantId),
+      bankService.getBankDetails(restaurantId),
+      contractService.getContract(restaurantId),
+    ]);
+    return { legal, bank, contract };
+  }
+
   async function pageShell({ restaurant, active, csrfToken, tabBody, req }) {
     const menuItemsCount = active === 'overview' || active === 'settings' ? await svc.countMenuItems(restaurant.id) : 0;
+    // Готовность к выплатам (задание, раздел 11) — компактная строка в
+    // шапке, видна на КАЖДОЙ вкладке ресторана (три быстрых point-lookup'а
+    // по PK из отдельных таблиц — дёшево на масштабе YAAM).
+    const payout = await payoutService.getRestaurantPayoutDetails(restaurant.id);
     const banner = views.renderActionBanner({ error: req?.query?.error, notice: req?.query?.notice });
     return banner
-      + views.renderRestaurantHeader({ restaurant, csrfToken, linkBasePath, menuItemsCount })
+      + views.renderRestaurantHeader({ restaurant, csrfToken, linkBasePath, menuItemsCount, payoutReadiness: payout.readiness })
       + views.renderTabs({ restaurantId: restaurant.id, active, linkBasePath })
       + tabBody;
   }
@@ -724,9 +746,10 @@ function createRestaurantsRouter({ linkBasePath, mediaProvider = null }) {
     try {
       const csrfToken = ensureCsrfToken(req);
       const photoData = await restaurantPhotoViewData(req.restaurant.id);
+      const financeData = await restaurantFinanceViewData(req.restaurant.id);
       const body = await pageShell({
         restaurant: req.restaurant, active: 'settings', csrfToken, req,
-        tabBody: views.renderRestaurantSettingsTab({ restaurant: req.restaurant, linkBasePath, csrfToken, ...photoData }),
+        tabBody: views.renderRestaurantSettingsTab({ restaurant: req.restaurant, linkBasePath, csrfToken, ...photoData, ...financeData }),
       });
       res.send(layout({ title: `Настройки — ${req.restaurant.name}`, active: 'restaurants', csrfToken, linkBasePath, body }));
     } catch (err) {
@@ -742,9 +765,10 @@ function createRestaurantsRouter({ linkBasePath, mediaProvider = null }) {
       await logAuditEvent({ action: 'restaurant_updated', restaurantId: updated.id, details, ip: req.ip });
       const csrfToken = ensureCsrfToken(req);
       const photoData = await restaurantPhotoViewData(updated.id);
+      const financeData = await restaurantFinanceViewData(updated.id);
       const body = await pageShell({
         restaurant: updated, active: 'settings', csrfToken, req,
-        tabBody: views.renderRestaurantSettingsTab({ restaurant: updated, linkBasePath, csrfToken, notice: 'Изменения сохранены.', ...photoData }),
+        tabBody: views.renderRestaurantSettingsTab({ restaurant: updated, linkBasePath, csrfToken, notice: 'Изменения сохранены.', ...photoData, ...financeData }),
       });
       res.send(layout({ title: `Настройки — ${updated.name}`, active: 'restaurants', csrfToken, linkBasePath, body }));
     } catch (err) {
@@ -765,11 +789,117 @@ function createRestaurantsRouter({ linkBasePath, mediaProvider = null }) {
         };
         const csrfToken = ensureCsrfToken(req);
         const photoData = await restaurantPhotoViewData(req.restaurant.id);
+        const financeData = await restaurantFinanceViewData(req.restaurant.id);
         const body = await pageShell({
           restaurant: attempted, active: 'settings', csrfToken, req,
-          tabBody: views.renderRestaurantSettingsTab({ restaurant: attempted, linkBasePath, csrfToken, error: err.message, ...photoData }),
+          tabBody: views.renderRestaurantSettingsTab({ restaurant: attempted, linkBasePath, csrfToken, error: err.message, ...photoData, ...financeData }),
         });
         return res.status(400).send(layout({ title: `Настройки — ${req.restaurant.name}`, active: 'restaurants', csrfToken, linkBasePath, body }));
+      }
+      next(err);
+    }
+  });
+
+  // --- Юридические данные (Stage 6) ---
+
+  router.get('/:id/legal-details/edit', async (req, res, next) => {
+    try {
+      const legal = await legalService.getLegalDetails(req.restaurant.id);
+      const csrfToken = ensureCsrfToken(req);
+      const body = financeViews.renderLegalDetailsEditForm({ restaurant: req.restaurant, legal, linkBasePath, csrfToken });
+      res.send(layout({ title: `Юридические данные — ${req.restaurant.name}`, active: 'restaurants', csrfToken, linkBasePath, body }));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post('/:id/legal-details', requireCsrf, async (req, res, next) => {
+    try {
+      const { record, created, before } = await legalService.saveLegalDetails(req.restaurant.id, req.body);
+      const action = created ? 'restaurant_legal_details_created' : 'restaurant_legal_details_updated';
+      const details = created ? null : summarizeLegalDetailsDiff(before, record);
+      await logAuditEvent({ action, restaurantId: req.restaurant.id, details, ip: req.ip });
+      res.redirect(`${linkBasePath}/restaurants/${req.restaurant.id}/settings?notice=${encodeURIComponent('Юридические данные сохранены.')}`);
+    } catch (err) {
+      if (err instanceof legalService.ValidationError) {
+        const csrfToken = ensureCsrfToken(req);
+        const body = financeViews.renderLegalDetailsEditForm({ restaurant: req.restaurant, legal: req.body, linkBasePath, csrfToken, error: err.message });
+        return res.status(400).send(layout({ title: `Юридические данные — ${req.restaurant.name}`, active: 'restaurants', csrfToken, linkBasePath, body }));
+      }
+      next(err);
+    }
+  });
+
+  // --- Банковские реквизиты (Stage 6) ---
+
+  router.get('/:id/bank-details/edit', async (req, res, next) => {
+    try {
+      const bank = await bankService.getBankDetails(req.restaurant.id);
+      const csrfToken = ensureCsrfToken(req);
+      const body = financeViews.renderBankDetailsEditForm({ restaurant: req.restaurant, bank, linkBasePath, csrfToken });
+      res.send(layout({ title: `Банковские реквизиты — ${req.restaurant.name}`, active: 'restaurants', csrfToken, linkBasePath, body }));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post('/:id/bank-details', requireCsrf, async (req, res, next) => {
+    try {
+      const { record, created, before } = await bankService.saveBankDetails(req.restaurant.id, req.body);
+      const action = created ? 'restaurant_bank_details_created' : 'restaurant_bank_details_updated';
+      const details = created ? null : summarizeBankDetailsDiff(before, record);
+      await logAuditEvent({ action, restaurantId: req.restaurant.id, details, ip: req.ip });
+      res.redirect(`${linkBasePath}/restaurants/${req.restaurant.id}/settings?notice=${encodeURIComponent('Банковские реквизиты сохранены.')}`);
+    } catch (err) {
+      if (err instanceof bankService.ValidationError) {
+        const csrfToken = ensureCsrfToken(req);
+        const body = financeViews.renderBankDetailsEditForm({ restaurant: req.restaurant, bank: req.body, linkBasePath, csrfToken, error: err.message });
+        return res.status(400).send(layout({ title: `Банковские реквизиты — ${req.restaurant.name}`, active: 'restaurants', csrfToken, linkBasePath, body }));
+      }
+      next(err);
+    }
+  });
+
+  // --- Договор с YAAM (Stage 6) ---
+
+  router.get('/:id/contract/edit', async (req, res, next) => {
+    try {
+      const contract = await contractService.getContract(req.restaurant.id);
+      const csrfToken = ensureCsrfToken(req);
+      const body = financeViews.renderContractEditForm({ restaurant: req.restaurant, contract, linkBasePath, csrfToken });
+      res.send(layout({ title: `Договор с YAAM — ${req.restaurant.name}`, active: 'restaurants', csrfToken, linkBasePath, body }));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post('/:id/contract', requireCsrf, async (req, res, next) => {
+    try {
+      const { record, created, before } = await contractService.saveContract(req.restaurant.id, req.body);
+      if (created) {
+        await logAuditEvent({ action: 'restaurant_contract_created', restaurantId: req.restaurant.id, details: null, ip: req.ip });
+      } else {
+        // Смена статуса — ВСЕГДА отдельное событие (задание, раздел 10:
+        // "можно: старый/новый статус договора"), даже если в том же
+        // сохранении поменялись и другие поля — оба события пишутся,
+        // ничего не теряется и не смешивается в одной строке лога.
+        if (before.status !== record.status) {
+          await logAuditEvent({
+            action: 'restaurant_contract_status_changed', restaurantId: req.restaurant.id,
+            details: summarizeContractStatusChange(before, record), ip: req.ip,
+          });
+        }
+        const otherFieldsDetails = summarizeContractDiff(before, record);
+        if (otherFieldsDetails) {
+          await logAuditEvent({ action: 'restaurant_contract_updated', restaurantId: req.restaurant.id, details: otherFieldsDetails, ip: req.ip });
+        }
+      }
+      res.redirect(`${linkBasePath}/restaurants/${req.restaurant.id}/settings?notice=${encodeURIComponent('Договор сохранён.')}`);
+    } catch (err) {
+      if (err instanceof contractService.ValidationError) {
+        const csrfToken = ensureCsrfToken(req);
+        const body = financeViews.renderContractEditForm({ restaurant: req.restaurant, contract: req.body, linkBasePath, csrfToken, error: err.message });
+        return res.status(400).send(layout({ title: `Договор с YAAM — ${req.restaurant.name}`, active: 'restaurants', csrfToken, linkBasePath, body }));
       }
       next(err);
     }

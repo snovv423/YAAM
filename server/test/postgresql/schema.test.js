@@ -26,6 +26,8 @@ const EXPECTED_TABLES = [
   'hq_audit_log',
   // YAAM HQ Stage 5B (медиа-система: фотографии ресторанов и блюд).
   'restaurant_photos', 'menu_item_photos',
+  // YAAM HQ Stage 6 (юридические данные/банковские реквизиты/договор).
+  'restaurant_legal_details', 'restaurant_bank_details', 'restaurant_contracts',
 ];
 
 const EXPECTED_INDEXES = {
@@ -53,6 +55,7 @@ const TABLES_WITH_CREATED_AT = [
   'payment_initial_attempts', 'refunds',
   'hq_owner', 'hq_security_log', 'hq_audit_log',
   'restaurant_photos', 'menu_item_photos',
+  'restaurant_legal_details', 'restaurant_bank_details', 'restaurant_contracts',
 ];
 
 const EXPECTED_FUNCTIONS = [
@@ -94,7 +97,7 @@ async function runSchemaAndInspect(t, databaseName) {
       await client.query(SCHEMA_SQL);
     });
 
-    await t.test('создаются все 17 таблиц', async () => {
+    await t.test('создаются все 20 таблиц', async () => {
       const { rows } = await client.query(
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename`
       );
@@ -102,13 +105,13 @@ async function runSchemaAndInspect(t, databaseName) {
       assert.deepEqual(names, [...EXPECTED_TABLES].sort());
     });
 
-    await t.test('создаются все 16 внешних ключей', async () => {
+    await t.test('создаются все 19 внешних ключей', async () => {
       const { rows } = await client.query(`
         SELECT count(*)::int AS n
         FROM information_schema.table_constraints
         WHERE constraint_schema = 'public' AND constraint_type = 'FOREIGN KEY'
       `);
-      assert.equal(rows[0].n, 16);
+      assert.equal(rows[0].n, 19);
     });
 
     await t.test('CHECK-ограничения присутствуют (>=12, включая новый на payments.status)', async () => {
@@ -217,7 +220,7 @@ async function runSchemaAndInspect(t, databaseName) {
       assert.equal(rows[0].data_type, 'bytea');
     });
 
-    await t.test('DEFAULT NOW() присутствует на всех 14 датовых колонках created_at', async () => {
+    await t.test('DEFAULT NOW() присутствует на всех 17 датовых колонках created_at', async () => {
       const { rows } = await client.query(`
         SELECT table_name, column_default
         FROM information_schema.columns
