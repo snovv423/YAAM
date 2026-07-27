@@ -27,8 +27,6 @@ const REFUND_STATUS_LABELS = {
   requested: 'Запрошен', processing: 'В обработке', succeeded: 'Выполнен', failed: 'Не выполнен',
 };
 
-const PAUSE_PRESET_LABELS = { short: '33 мин', medium: '3 часа', long: '11 часов' };
-
 // Stage 4.1 — единая компактная метка lifecycle-статуса (задание, раздел 6,
 // вариант "компактная итоговая метка" — выбран вместо двух раздельных строк
 // "Публикация: X / Приём заказов: Y", чтобы не перегружать интерфейс, тот же
@@ -222,16 +220,31 @@ function simpleActionForm({ action, csrfToken, label, cls, confirm: confirmMsg }
     </form>`;
 }
 
-// Stage 4.1 — набор действий строго зависит от lifecycle-статуса (задание,
-// раздел 7): у черновика — только "Опубликовать"; у опубликованного —
-// "Снять с публикации" плюс операционные действия (открыть/закрыть/пауза);
-// у архивированного — ничего здесь (восстановление живёт на вкладке
-// «Настройки», рядом с остальным архивированием, как и было в Stage 4).
+// Stage 5A.1 — HQ минимализм (задание: "HQ — инструмент владельца YAAM.
+// Telegram-бот — инструмент ресторана. Не смешивать эти две роли"):
+// временная пауза (33 мин/3 часа/11 часов + возврат) — ИСКЛЮЧИТЕЛЬНО функция
+// ресторана через Telegram (server/bot/postgresql/index.js: /pause, /open) —
+// в HQ для нeё нет ни кнопок, ни форм, ни действий, только статус
+// (statusBadge ниже уже показывает "Пауза до HH:MM" — это осталось
+// нетронутым, меняется только то, что HQ теперь НЕ управляет паузой).
+// Открыть/Закрыть (ручной, бессрочный toggle is_open, ОТДЕЛЬНЫЙ от паузы,
+// Stage 4.1) сознательно ОСТАЮТСЯ в HQ — их отдельно защищает Stage 5A
+// серверная проверка "нельзя открыть без доступного блюда"
+// (services/hq/restaurantAdminService.js:openRestaurant), у Telegram-бота
+// аналогичной проверки нет вовсе (его /open вызывает resumeRestaurant()
+// безусловно) — уводить открытие/закрытие из HQ означало бы тихо потерять
+// единственное место, где эта защита реально работает.
+//
+// Итоговый набор действий строго зависит от lifecycle-статуса: у
+// черновика — только "Опубликовать"; у опубликованного — "Скрыть" (раньше
+// называлось "Снять с публикации" — только переименование, поведение то же)
+// плюс "Открыть" ИЛИ "Закрыть" (ровно одно актуальное, только когда
+// реально открыт/закрыт, не во время паузы); у архивированного — ничего
+// здесь (восстановление живёт на вкладке «Настройки», как и было).
 // menuItemsCount — только для текста предупреждения при публикации ресторана
-// без единого блюда (задание, раздел 12) — предупреждение целиком в
-// client-side confirm(), тем же паттерном, что уже используют пауза/архив в
-// этом же файле (никакого отдельного server-rendered экрана подтверждения —
-// задание прямо просит не раздувать workflow).
+// без единого блюда (задание Stage 5A, раздел 12) — предупреждение целиком в
+// client-side confirm(), тем же паттерном, что уже использует архив в этом
+// же файле (никакого отдельного server-rendered экрана подтверждения).
 function renderRestaurantHeader({ restaurant: r, csrfToken, linkBasePath, menuItemsCount = 0 }) {
   const status = lifecycle.resolveLifecycleStatus(r);
   const base = `${linkBasePath}/restaurants/${r.id}`;
@@ -247,16 +260,13 @@ function renderRestaurantHeader({ restaurant: r, csrfToken, linkBasePath, menuIt
       actions.push(simpleActionForm({ action: `${base}/open`, csrfToken, label: 'Открыть' }));
     } else if (status === 'open') {
       actions.push(simpleActionForm({ action: `${base}/close`, csrfToken, label: 'Закрыть', cls: 'ghost', confirm: `Закрыть «${r.name}» для новых заказов?` }));
-      actions.push(...Object.entries(PAUSE_PRESET_LABELS).map(([key, label]) => `
-        <form method="post" action="${base}/pause" onsubmit="return confirm('Поставить «${esc(r.name)}» на паузу на ${label}?')" style="display:inline">
-          <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
-          <input type="hidden" name="preset" value="${key}">
-          <button type="submit" class="ghost">Пауза: ${label}</button>
-        </form>`));
-    } else if (status === 'paused') {
-      actions.push(simpleActionForm({ action: `${base}/resume`, csrfToken, label: 'Возобновить' }));
     }
-    actions.push(simpleActionForm({ action: `${base}/unpublish`, csrfToken, label: 'Снять с публикации', cls: 'ghost', confirm: `Снять «${r.name}» с публикации? Ресторан исчезнет из публичного каталога.` }));
+    // status === 'paused' — намеренно без Открыть/Закрыть: пока ресторан на
+    // паузе через Telegram, оба действия структурно отклонены guard'ами
+    // (assertCanOpen/assertCanClose требуют "не на паузе") — показывать их
+    // здесь означало бы кнопку, которая всегда ошибается; статус "Пауза до
+    // HH:MM" уже виден в statusBadge выше.
+    actions.push(simpleActionForm({ action: `${base}/unpublish`, csrfToken, label: 'Скрыть', cls: 'ghost', confirm: `Скрыть «${r.name}»? Ресторан исчезнет из публичного каталога.` }));
   }
 
   return `
@@ -634,7 +644,6 @@ module.exports = {
   ORDER_STATUS_LABELS,
   PAYMENT_STATUS_LABELS,
   REFUND_STATUS_LABELS,
-  PAUSE_PRESET_LABELS,
   statusBadge,
   formatDateTime,
   formatDateOnly,

@@ -5,9 +5,15 @@ import { test, expect } from '@playwright/test';
 // YAAM HQ Stage 4.1 — полный браузерный сценарий publication lifecycle
 // (задание, раздел 15C, все 18 пунктов): создать -> черновик, скрыт
 // публично -> открыть нельзя до публикации -> опубликовать -> виден
-// публично закрытым -> открыть -> публично открыт -> снять с публикации ->
+// публично закрытым -> открыть -> публично открыт -> скрыть ->
 // скрыт и закрыт -> опубликовать снова -> пауза -> архивировать -> скрыт ->
 // восстановить -> снова черновик, скрыт -> audit log.
+//
+// Stage 5A.1: шаг «пауза» больше не кликает кнопку в HQ — управление
+// временной паузой убрано из HQ целиком (это функция ресторана через
+// Telegram), пауза ставится напрямую через orderService (тот же вызов, что
+// у реальной команды бота /pause), а тест проверяет, что HQ честно
+// показывает статус "Пауза до HH:MM" без единой кнопки управления.
 //
 // Использует тот же общий эфемерный стек (embedded PostgreSQL +
 // createPostgresqlApp(), HQ на /hq), что и hq-login-flow.spec.ts и
@@ -27,6 +33,8 @@ process.env.DATABASE_URL = DATABASE_URL;
 const SERVER_DIR = path.resolve(__dirname, '../../server');
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const db = require(path.join(SERVER_DIR, 'db/postgresql/index.js'));
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const orderService = require(path.join(SERVER_DIR, 'services/postgresql/orderService.js'));
 
 test('YAAM HQ: publication lifecycle — черновик, публикация, открытие, снятие с публикации, архив, восстановление', async ({ page }) => {
   const restaurantName = `E2E Lifecycle ${crypto.randomBytes(4).toString('hex')}`;
@@ -96,8 +104,9 @@ test('YAAM HQ: publication lifecycle — черновик, публикация,
   expect(publicOne).not.toHaveProperty('published_at');
   expect(publicOne).not.toHaveProperty('archived_at');
 
-  // 10. Снять с публикации.
-  await page.getByRole('button', { name: 'Снять с публикации' }).click();
+  // 10. Скрыть (Stage 5A.1: раньше кнопка называлась «Снять с
+  // публикации» — переименована, поведение не изменилось).
+  await page.getByRole('button', { name: 'Скрыть' }).click();
 
   // 11. Убедиться, что исчез публично и стал закрыт. Снятие с публикации
   // возвращает ровно в состояние "Черновик" (задание, раздел 0 — 5 состояний
@@ -113,9 +122,21 @@ test('YAAM HQ: publication lifecycle — черновик, публикация,
   await expect(page.getByText('Закрыт', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Открыть', exact: true }).click();
 
-  // 13. Поставить на паузу.
-  await page.getByRole('button', { name: /Пауза: 33 мин/ }).click();
+  // 13. Поставить на паузу — Stage 5A.1: временная пауза исключительно
+  // функция ресторана через Telegram (server/bot/postgresql/index.js:
+  // /pause), в HQ для неё нет ни кнопки, ни маршрута — пауза ставится тем
+  // же вызовом, что использует реальная команда бота, а HQ должен только
+  // честно ПОКАЗАТЬ статус, без единой кнопки управления.
+  await orderService.pauseRestaurant(restaurantId, 'short');
+  await page.reload();
   await expect(page.getByText(/Пауза до/)).toBeVisible();
+  await expect(page.getByRole('button', { name: /Пауза:/ })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Возобновить' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Открыть', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Закрыть', exact: true })).toHaveCount(0);
+  // «Скрыть» остаётся доступным даже во время паузы — пауза не блокирует
+  // публикационный lifecycle.
+  await expect(page.getByRole('button', { name: 'Скрыть' })).toBeVisible();
 
   // 14. Архивировать (архивирование живёт на вкладке «Настройки»).
   await page.locator('.tabs').getByRole('link', { name: 'Настройки' }).click();
@@ -144,7 +165,11 @@ test('YAAM HQ: publication lifecycle — черновик, публикация,
   expect(actions).toContain('restaurant_created');
   expect(actions).toContain('restaurant_published');
   expect(actions).toContain('restaurant_unpublished');
-  expect(actions).toContain('restaurant_paused');
+  // restaurant_paused НЕ ожидается — Stage 5A.1 убрал управление паузой из
+  // HQ, пауза шагом 13 поставлена напрямую через orderService (Telegram-
+  // эквивалент), который не пишет в hq_audit_log (этот журнал — только
+  // административные действия HQ, не операционные действия ресторана).
+  expect(actions).not.toContain('restaurant_paused');
   expect(actions).toContain('restaurant_archived');
   expect(actions).toContain('restaurant_restored');
   // published дважды (шаг 6 и шаг 12), unpublished один раз (шаг 10).

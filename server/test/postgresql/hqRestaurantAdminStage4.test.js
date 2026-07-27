@@ -309,21 +309,22 @@ test('B: полный HTTP-цикл управления рестораном + 
     page = await getPage(base, cookie, restaurantPath);
     assert.match(page.html, />Открыт</);
 
-    // --- Пауза ---
-    res = await postForm(base, cookie, `${restaurantPath}/pause`, { _csrf: page.csrf, preset: 'short' });
-    assert.equal(res.status, 302);
+    // --- Пауза (Stage 5A.1: HQ больше не управляет паузой — это функция
+    // ресторана через Telegram, server/bot/postgresql/index.js — здесь
+    // паузу ставит напрямую orderService, ровно тем же вызовом, что и
+    // реальная команда /pause бота; HQ должен только честно ПОКАЗАТЬ статус,
+    // без единой кнопки управления паузой) ---
+    const orderService = require('../../services/postgresql/orderService');
+    await orderService.pauseRestaurant(restaurantId, 'short');
     page = await getPage(base, cookie, restaurantPath);
-    assert.match(page.html, /Пауза до/);
-    const auditAfterPause = await db.query("SELECT action FROM hq_audit_log WHERE action = 'restaurant_paused'");
-    assert.equal(auditAfterPause.length, 1);
+    assert.match(page.html, /Пауза до/, 'HQ должен показывать статус паузы, поставленной через Telegram');
+    assert.doesNotMatch(page.html, /Пауза: 33 мин|Пауза: 3 часа|Пауза: 11 часов/, 'в HQ не должно быть кнопок управления временной паузой (задание Stage 5A.1)');
+    assert.doesNotMatch(page.html, />Возобновить</, 'в HQ не должно быть кнопки возобновления паузы (задание Stage 5A.1)');
 
-    // --- Возобновление ---
-    res = await postForm(base, cookie, `${restaurantPath}/resume`, { _csrf: page.csrf });
-    assert.equal(res.status, 302);
+    // --- Возобновление (тоже через Telegram-эквивалент, не HQ) ---
+    await orderService.resumeRestaurant(restaurantId);
     page = await getPage(base, cookie, restaurantPath);
-    assert.match(page.html, /Открыт/);
-    const auditAfterResume = await db.query("SELECT action FROM hq_audit_log WHERE action = 'restaurant_resumed'");
-    assert.equal(auditAfterResume.length, 1);
+    assert.match(page.html, />Открыт</, 'после возобновления через Telegram HQ должен снова показывать "Открыт"');
 
     // --- Архивирование ---
     page = await getPage(base, cookie, `${restaurantPath}/settings`);
@@ -408,10 +409,13 @@ test('C: mutation-маршруты (POST) требуют CSRF', async () => {
     assert.equal(res.status, 302);
     const restaurantPath = res.headers.get('location');
 
-    res = await postForm(base, cookie, `${restaurantPath}/pause`, { preset: 'short' });
-    assert.equal(res.status, 403, 'пауза без CSRF должна быть отклонена');
-    const check = await getPage(base, cookie, restaurantPath);
-    assert.doesNotMatch(check.html, /Пауза до/, 'отклонённый без CSRF запрос не должен был поставить ресторан на паузу');
+    // /pause и /resume Stage 5A.1 убраны из HQ целиком (пауза — только
+    // через Telegram) — CSRF-защита mutation-маршрутов проверяется на
+    // /archive, который остаётся в HQ.
+    res = await postForm(base, cookie, `${restaurantPath}/archive`, {});
+    assert.equal(res.status, 403, 'архивирование без CSRF должно быть отклонено');
+    const check = await getPage(base, cookie, `${restaurantPath}/settings`);
+    assert.doesNotMatch(check.html, /В архиве/, 'отклонённый без CSRF запрос не должен был архивировать ресторан');
   } finally {
     await stopApp(instance);
   }

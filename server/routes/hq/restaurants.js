@@ -659,20 +659,18 @@ function createRestaurantsRouter({ linkBasePath }) {
     await logAuditEvent({ action: 'restaurant_updated', restaurantId: req.restaurant.id, details: 'is_open: 1 -> 0', ip: req.ip });
   }));
 
-  // --- Пауза / возобновление / архивирование / восстановление ---
-  router.post('/:id/pause', requireCsrf, handleLifecycleAction(async (req) => {
-    const until = await svc.pauseRestaurant(req.restaurant.id, req.body.preset);
-    await logAuditEvent({
-      action: 'restaurant_paused', restaurantId: req.restaurant.id,
-      details: `preset: ${req.body.preset}, until: ${until instanceof Date ? until.toISOString() : until}`,
-      ip: req.ip,
-    });
-  }));
-
-  router.post('/:id/resume', requireCsrf, handleLifecycleAction(async (req) => {
-    await svc.resumeRestaurant(req.restaurant.id);
-    await logAuditEvent({ action: 'restaurant_resumed', restaurantId: req.restaurant.id, ip: req.ip });
-  }));
+  // --- Пауза (Stage 5A.1) ---
+  // Временная пауза (33 мин/3 часа/11 часов) НЕ управляется из HQ — это
+  // исключительно функция ресторана через Telegram (server/bot/postgresql/
+  // index.js: /pause, /open, оба вызывают services/postgresql/orderService.js
+  // напрямую, минуя HQ вовсе). HQ только ЧИТАЕТ и показывает статус
+  // ("Пауза до HH:MM" — hq/restaurantsViews.js:statusBadge, не тронуто) —
+  // здесь намеренно нет ни /pause, ни /resume маршрутов: HQ — инструмент
+  // владельца YAAM, Telegram-бот — инструмент ресторана, роли не смешиваются.
+  // services/hq/restaurantAdminService.js:pauseRestaurant/resumeRestaurant
+  // (guarded-обёртки над orderService для HQ) намеренно ОСТАВЛЕНЫ в коде,
+  // хотя теперь не вызываются ни отсюда, ни ботом — бизнес-логика/lifecycle
+  // этим этапом не менялась, удалены только HQ-действия.
 
   router.post('/:id/archive', requireCsrf, async (req, res, next) => {
     try {

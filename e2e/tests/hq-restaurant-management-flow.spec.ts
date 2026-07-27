@@ -168,17 +168,26 @@ test('YAAM HQ: полный цикл управления рестораном �
   await page.getByRole('button', { name: 'Сохранить' }).click();
   await expect(page.getByText('Изменения сохранены.')).toBeVisible();
 
-  // 14. Поставить на паузу.
+  // 14. Поставить на паузу — Stage 5A.1: временная пауза исключительно
+  // функция ресторана через Telegram (server/bot/postgresql/index.js:
+  // /pause), в HQ для этого нет ни кнопки, ни маршрута. Пауза ставится
+  // тем же вызовом, что использует реальная команда бота, HQ должен только
+  // честно ПОКАЗАТЬ статус, без единой кнопки управления.
+  await orderService.pauseRestaurant(restaurantId, 'short');
   await page.goto(restaurantUrl);
-  await page.getByRole('button', { name: /Пауза: 33 мин/ }).click();
   await expect(page.getByText(/Пауза до/)).toBeVisible();
+  await expect(page.getByRole('button', { name: /Пауза:/ })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Возобновить' })).toHaveCount(0);
 
-  // 15. Вернуть из паузы (Stage 4.1: кнопка «Возобновить» — снятие паузы,
-  // отдельно от «Открыть», см. services/hq/restaurantLifecycle.js).
-  await page.getByRole('button', { name: 'Возобновить' }).click();
+  // 15. Вернуть из паузы — тоже через Telegram-эквивалент, не HQ.
+  await orderService.resumeRestaurant(restaurantId);
+  await page.reload();
   await expect(page.getByText('Открыт', { exact: true })).toBeVisible();
 
-  // 16. Проверить audit log в БД.
+  // 16. Проверить audit log в БД. restaurant_paused/restaurant_resumed НЕ
+  // ожидаются — Stage 5A.1 убрал управление паузой из HQ, а orderService
+  // (Telegram-эквивалент) не пишет в hq_audit_log (этот журнал — только
+  // административные действия HQ, не операционные действия ресторана).
   const auditRows = await db.query(
     'SELECT action FROM hq_audit_log WHERE restaurant_id = $1 ORDER BY id',
     [restaurantId],
@@ -186,8 +195,8 @@ test('YAAM HQ: полный цикл управления рестораном �
   const actions = auditRows.map((r: { action: string }) => r.action);
   expect(actions).toContain('restaurant_created');
   expect(actions).toContain('restaurant_updated');
-  expect(actions).toContain('restaurant_paused');
-  expect(actions).toContain('restaurant_resumed');
+  expect(actions).not.toContain('restaurant_paused');
+  expect(actions).not.toContain('restaurant_resumed');
 
   // 17. Публичный API не содержит приватных полей.
   const publicRes = await page.request.get(`${API_BASE_URL}/api/restaurants/${restaurantId}`);
