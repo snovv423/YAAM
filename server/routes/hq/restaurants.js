@@ -121,18 +121,16 @@ function createRestaurantsRouter({ linkBasePath, mediaProvider = null }) {
     }
   });
 
-  // YAAM HQ Stage 5B — данные для панели «Фотографии ресторана» (вкладка
+  // YAAM HQ Stage 5B/5B.1 — данные для панели «Фотографии ресторана» (вкладка
   // «Настройки»). mediaConfigured=false, если MEDIA_PROVIDER не задан на
-  // этом окружении (задание, раздел 4) — сама вкладка Настроек продолжает
-  // работать, просто без раздела фотографий.
+  // этом окружении — сама вкладка Настроек продолжает работать, просто без
+  // раздела фотографий. Stage 5B.1: нет архивированных фотографий вовсе
+  // (удаление необратимо) — список всегда один, без раздельного active/archived.
   async function restaurantPhotoViewData(restaurantId) {
-    if (!mediaProvider) return { photos: [], archivedPhotos: [], mediaConfigured: false, maxPhotos: photoService.MAX_PHOTOS_PER_OWNER };
-    const all = await photoService.listRestaurantPhotos(restaurantId, { includeArchived: true });
-    const active = all.filter((p) => !p.archived_at);
-    const archived = all.filter((p) => p.archived_at);
+    if (!mediaProvider) return { photos: [], mediaConfigured: false, maxPhotos: photoService.MAX_PHOTOS_PER_OWNER };
+    const all = await photoService.listRestaurantPhotos(restaurantId);
     return {
-      photos: active.map((p) => ({ ...p, urls: photoService.photoVariantUrls(mediaProvider, p) })),
-      archivedPhotos: archived.map((p) => ({ ...p, urls: photoService.photoVariantUrls(mediaProvider, p) })),
+      photos: all.map((p) => ({ ...p, urls: photoService.photoVariantUrls(mediaProvider, p) })),
       mediaConfigured: true,
       maxPhotos: photoService.MAX_PHOTOS_PER_OWNER,
     };
@@ -252,16 +250,13 @@ function createRestaurantsRouter({ linkBasePath, mediaProvider = null }) {
     res.redirect(`${linkBasePath}/restaurants/${restaurantId}/menu${qs}`);
   }
 
-  // YAAM HQ Stage 5B — данные для панели «Фотографии блюда» (карточка
+  // YAAM HQ Stage 5B/5B.1 — данные для панели «Фотографии блюда» (карточка
   // блюда). Тот же принцип, что и restaurantPhotoViewData выше.
   async function menuItemPhotoViewData(restaurantId, itemId) {
-    if (!mediaProvider) return { photos: [], archivedPhotos: [], mediaConfigured: false, maxPhotos: photoService.MAX_PHOTOS_PER_OWNER };
-    const all = await photoService.listMenuItemPhotos(restaurantId, itemId, { includeArchived: true });
-    const active = all.filter((p) => !p.archived_at);
-    const archived = all.filter((p) => p.archived_at);
+    if (!mediaProvider) return { photos: [], mediaConfigured: false, maxPhotos: photoService.MAX_PHOTOS_PER_OWNER };
+    const all = await photoService.listMenuItemPhotos(restaurantId, itemId);
     return {
-      photos: active.map((p) => ({ ...p, urls: photoService.photoVariantUrls(mediaProvider, p) })),
-      archivedPhotos: archived.map((p) => ({ ...p, urls: photoService.photoVariantUrls(mediaProvider, p) })),
+      photos: all.map((p) => ({ ...p, urls: photoService.photoVariantUrls(mediaProvider, p) })),
       mediaConfigured: true,
       maxPhotos: photoService.MAX_PHOTOS_PER_OWNER,
     };
@@ -519,21 +514,6 @@ function createRestaurantsRouter({ linkBasePath, mediaProvider = null }) {
     }
   });
 
-  router.post('/:id/menu/items/:itemId/photos/:dishPhotoId/move', requireCsrf, async (req, res, next) => {
-    try {
-      const direction = req.body.direction === 'up' ? 'up' : 'down';
-      await photoService.moveMenuItemPhoto(req.restaurant.id, req.menuItem.id, req.dishPhoto.id, direction);
-      await logAuditEvent({
-        action: 'menu_item_photo_moved', restaurantId: req.restaurant.id,
-        details: `${summarizePhotoDetails(req.dishPhoto)}; direction: ${direction}`, ip: req.ip,
-      });
-      dishPhotoActionRedirect(res, req.restaurant.id, req.menuItem.id);
-    } catch (err) {
-      if (err instanceof svc.ValidationError) return dishPhotoActionRedirect(res, req.restaurant.id, req.menuItem.id, { error: err.message });
-      next(err);
-    }
-  });
-
   router.post('/:id/menu/items/:itemId/photos/:dishPhotoId/alt', requireCsrf, async (req, res, next) => {
     try {
       await photoService.updateMenuItemPhotoAlt(req.restaurant.id, req.menuItem.id, req.dishPhoto.id, req.body.alt_text);
@@ -544,29 +524,16 @@ function createRestaurantsRouter({ linkBasePath, mediaProvider = null }) {
     }
   });
 
-  router.post('/:id/menu/items/:itemId/photos/:dishPhotoId/archive', requireCsrf, async (req, res, next) => {
+  // Удаление — необратимо (Stage 5B.1), поэтому клиентская форма
+  // (hq/photosViews.js) обязательно подтверждает через confirm().
+  router.post('/:id/menu/items/:itemId/photos/:dishPhotoId/delete', requireCsrf, async (req, res, next) => {
     try {
-      const archived = await photoService.archiveMenuItemPhoto(req.restaurant.id, req.menuItem.id, req.dishPhoto.id);
-      if (archived) {
+      if (!mediaProvider) throw new svc.ValidationError('Хранилище фотографий не настроено.');
+      const deleted = await photoService.deleteMenuItemPhoto(req.restaurant.id, req.menuItem.id, req.dishPhoto.id, mediaProvider);
+      if (deleted) {
         await logAuditEvent({
-          action: 'menu_item_photo_archived', restaurantId: req.restaurant.id,
-          details: summarizePhotoDetails(archived), ip: req.ip,
-        });
-      }
-      dishPhotoActionRedirect(res, req.restaurant.id, req.menuItem.id);
-    } catch (err) {
-      if (err instanceof svc.ValidationError) return dishPhotoActionRedirect(res, req.restaurant.id, req.menuItem.id, { error: err.message });
-      next(err);
-    }
-  });
-
-  router.post('/:id/menu/items/:itemId/photos/:dishPhotoId/restore', requireCsrf, async (req, res, next) => {
-    try {
-      const restored = await photoService.restoreMenuItemPhoto(req.restaurant.id, req.menuItem.id, req.dishPhoto.id);
-      if (restored) {
-        await logAuditEvent({
-          action: 'menu_item_photo_restored', restaurantId: req.restaurant.id,
-          details: summarizePhotoDetails(restored), ip: req.ip,
+          action: 'menu_item_photo_deleted', restaurantId: req.restaurant.id,
+          details: summarizePhotoDetails(deleted), ip: req.ip,
         });
       }
       dishPhotoActionRedirect(res, req.restaurant.id, req.menuItem.id);
@@ -878,25 +845,10 @@ function createRestaurantsRouter({ linkBasePath, mediaProvider = null }) {
     }
   });
 
-  router.post('/:id/photos/:photoId/move', requireCsrf, async (req, res, next) => {
-    try {
-      const direction = req.body.direction === 'up' ? 'up' : 'down';
-      await photoService.moveRestaurantPhoto(req.restaurant.id, req.photo.id, direction);
-      await logAuditEvent({
-        action: 'restaurant_photo_moved', restaurantId: req.restaurant.id,
-        details: `${summarizePhotoDetails(req.photo)}; direction: ${direction}`, ip: req.ip,
-      });
-      photoActionRedirect(res, req.restaurant.id);
-    } catch (err) {
-      if (err instanceof svc.ValidationError) return photoActionRedirect(res, req.restaurant.id, { error: err.message });
-      next(err);
-    }
-  });
-
   router.post('/:id/photos/:photoId/alt', requireCsrf, async (req, res, next) => {
     try {
-      // Правка описания — не входит в список 10 audit-событий (задание,
-      // раздел 12: закрытый список), поэтому не логируется.
+      // Правка описания — не входит в закрытый список audit-событий,
+      // поэтому не логируется.
       await photoService.updateRestaurantPhotoAlt(req.restaurant.id, req.photo.id, req.body.alt_text);
       photoActionRedirect(res, req.restaurant.id);
     } catch (err) {
@@ -905,29 +857,16 @@ function createRestaurantsRouter({ linkBasePath, mediaProvider = null }) {
     }
   });
 
-  router.post('/:id/photos/:photoId/archive', requireCsrf, async (req, res, next) => {
+  // Удаление — необратимо (Stage 5B.1), поэтому клиентская форма
+  // (hq/photosViews.js) обязательно подтверждает через confirm().
+  router.post('/:id/photos/:photoId/delete', requireCsrf, async (req, res, next) => {
     try {
-      const archived = await photoService.archiveRestaurantPhoto(req.restaurant.id, req.photo.id);
-      if (archived) {
+      if (!mediaProvider) throw new svc.ValidationError('Хранилище фотографий не настроено.');
+      const deleted = await photoService.deleteRestaurantPhoto(req.restaurant.id, req.photo.id, mediaProvider);
+      if (deleted) {
         await logAuditEvent({
-          action: 'restaurant_photo_archived', restaurantId: req.restaurant.id,
-          details: summarizePhotoDetails(archived), ip: req.ip,
-        });
-      }
-      photoActionRedirect(res, req.restaurant.id);
-    } catch (err) {
-      if (err instanceof svc.ValidationError) return photoActionRedirect(res, req.restaurant.id, { error: err.message });
-      next(err);
-    }
-  });
-
-  router.post('/:id/photos/:photoId/restore', requireCsrf, async (req, res, next) => {
-    try {
-      const restored = await photoService.restoreRestaurantPhoto(req.restaurant.id, req.photo.id);
-      if (restored) {
-        await logAuditEvent({
-          action: 'restaurant_photo_restored', restaurantId: req.restaurant.id,
-          details: summarizePhotoDetails(restored), ip: req.ip,
+          action: 'restaurant_photo_deleted', restaurantId: req.restaurant.id,
+          details: summarizePhotoDetails(deleted), ip: req.ip,
         });
       }
       photoActionRedirect(res, req.restaurant.id);

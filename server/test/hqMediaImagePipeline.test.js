@@ -15,6 +15,7 @@ const {
   MAX_SOURCE_BYTES,
   MAX_SOURCE_DIMENSION_PX,
   VARIANTS,
+  PUBLIC_VARIANT_NAMES,
 } = require('../services/hq/media/imagePipeline');
 
 async function makeJpeg(width, height) {
@@ -83,10 +84,10 @@ test('validateSourceImage: принимает нормальное изобра�
   assert.equal(result.height, 480);
 });
 
-test('processImage: создаёт ровно 3 WebP-варианта (thumb/card/full) с корректными размерами', async () => {
+test('processImage: создаёт ровно 4 WebP-варианта (thumb/card/full/master) с корректными размерами', async () => {
   const src = await makeJpeg(2000, 1000);
   const result = await processImage(src);
-  assert.deepEqual(Object.keys(result.variants).sort(), ['card', 'full', 'thumb']);
+  assert.deepEqual(Object.keys(result.variants).sort(), ['card', 'full', 'master', 'thumb']);
   for (const [name, opts] of Object.entries(VARIANTS)) {
     const v = result.variants[name];
     assert.ok(v.buffer.toString('ascii', 8, 12) === 'WEBP', `${name} должен быть настоящим WebP`);
@@ -123,3 +124,115 @@ test('processImage: результат не содержит EXIF/метадан
   const meta = await sharp(result.variants.full.buffer).metadata();
   assert.equal(meta.exif, undefined, 'обработанный вариант не должен содержать EXIF исходника');
 });
+
+// --- Stage 5B.1: master-вариант (сохранение для будущей повторной генерации) ---
+
+test('PUBLIC_VARIANT_NAMES: содержит ровно thumb/card/full, БЕЗ master (не публичный вариант)', () => {
+  assert.deepEqual(PUBLIC_VARIANT_NAMES.sort(), ['card', 'full', 'thumb']);
+  assert.ok(!PUBLIC_VARIANT_NAMES.includes('master'));
+});
+
+test('master-вариант: заметно выше разрешение и качество, чем у full (задание: "future re-generation")', async () => {
+  const src = await makeJpeg(3000, 1500);
+  const result = await processImage(src);
+  assert.ok(result.variants.master.width > result.variants.full.width);
+  assert.ok(VARIANTS.master.quality >= VARIANTS.full.quality);
+  assert.equal(VARIANTS.master.public, false);
+});
+
+test('качество WebP-вариантов приведено к диапазону 88-95 (Stage 5B.1: приоритет качества фото еды)', () => {
+  for (const [name, opts] of Object.entries(VARIANTS)) {
+    assert.ok(opts.quality >= 88 && opts.quality <= 95, `${name}: quality=${opts.quality} вне ожидаемого диапазона`);
+  }
+});
+
+// --- Stage 5B.1: минимальный набор сценариев из задания (яркое блюдо с
+// мелкими деталями / тёмное мясное блюдо / суп / выпечка / vertical/
+// horizontal/square) — синтетические изображения (нет доступа к реальной
+// фотографии еды), приближающие соответствующие характеристики (высокая
+// частота деталей, низкая яркость, гладкий градиент, разные пропорции).
+// Автоматическая проверка: корректное декодирование, сохранение пропорций,
+// разумное соотношение размер/качество (не переразжато). Итоговое
+// визуальное сравнение (заметна ли потеря фактуры на глаз) сделано отдельно
+// через Chrome DevTools — см. финальный отчёт Stage 5B.1, раздел про
+// визуальную проверку качества.
+async function makeDetailedTexture(width, height, seed) {
+  // Высокочастотный шум а-ля мелкая текстура (корочка/зелень/специи) —
+  // сложнее всего сжимать без артефактов, поэтому лучший прокси для "яркое
+  // блюдо с мелкими деталями".
+  return sharp({ create: { width, height, channels: 3, background: { r: 220, g: 190, b: 120 } } })
+    .composite([{
+      input: Buffer.from(
+        `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">
+          <filter id="n"><feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="3" seed="${seed}"/></filter>
+          <rect width="100%" height="100%" filter="url(#n)" opacity="0.5"/>
+        </svg>`,
+      ),
+    }])
+    .jpeg({ quality: 95 })
+    .toBuffer();
+}
+async function makeDarkMeat(width, height) {
+  return sharp({ create: { width, height, channels: 3, background: { r: 45, g: 22, b: 18 } } })
+    .composite([{
+      input: Buffer.from(
+        `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">
+          <filter id="n"><feTurbulence type="fractalNoise" baseFrequency="0.15" numOctaves="2"/></filter>
+          <rect width="100%" height="100%" filter="url(#n)" opacity="0.35"/>
+        </svg>`,
+      ),
+    }])
+    .jpeg({ quality: 95 })
+    .toBuffer();
+}
+async function makeSmoothGradient(width, height) {
+  // Гладкий градиент а-ля поверхность супа — уязвим к banding при низком
+  // качестве/агрессивной цветовой субдискретизации.
+  const svg = Buffer.from(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">
+      <defs><radialGradient id="g"><stop offset="0%" stop-color="#e8b050"/><stop offset="100%" stop-color="#7a3c10"/></radialGradient></defs>
+      <rect width="100%" height="100%" fill="url(#g)"/>
+    </svg>`,
+  );
+  return sharp(svg).jpeg({ quality: 95 }).toBuffer();
+}
+async function makePastry(width, height) {
+  return sharp({ create: { width, height, channels: 3, background: { r: 195, g: 150, b: 90 } } })
+    .composite([{
+      input: Buffer.from(
+        `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">
+          <filter id="n"><feTurbulence type="fractalNoise" baseFrequency="0.4" numOctaves="4"/></filter>
+          <rect width="100%" height="100%" filter="url(#n)" opacity="0.4"/>
+        </svg>`,
+      ),
+    }])
+    .jpeg({ quality: 95 })
+    .toBuffer();
+}
+
+const FOOD_SCENARIOS = [
+  { name: 'яркое блюдо с мелкими деталями', make: makeDetailedTexture, width: 1600, height: 1200 },
+  { name: 'тёмное мясное блюдо', make: makeDarkMeat, width: 1600, height: 1200 },
+  { name: 'суп (гладкий градиент)', make: makeSmoothGradient, width: 1600, height: 1200 },
+  { name: 'выпечка', make: makePastry, width: 1600, height: 1200 },
+  { name: 'вертикальная фотография', make: makeDetailedTexture, width: 1200, height: 1600 },
+  { name: 'горизонтальная фотография', make: makeDetailedTexture, width: 1920, height: 1080 },
+  { name: 'квадратная фотография', make: makeDetailedTexture, width: 1400, height: 1400 },
+];
+
+for (const scenario of FOOD_SCENARIOS) {
+  test(`processImage: ${scenario.name} — корректно обрабатывается, пропорции сохранены, разумный размер файла`, async () => {
+    const src = await scenario.make(scenario.width, scenario.height, 1);
+    const result = await processImage(src);
+    const srcRatio = scenario.width / scenario.height;
+    for (const [name, v] of Object.entries(result.variants)) {
+      const decoded = await sharp(v.buffer).metadata();
+      assert.equal(decoded.format, 'webp', `${scenario.name}/${name}: должен декодироваться как webp`);
+      const ratio = v.width / v.height;
+      assert.ok(Math.abs(ratio - srcRatio) < 0.02, `${scenario.name}/${name}: пропорции искажены (${ratio} vs ${srcRatio})`);
+      // Не переразжато: даже thumb детализированной текстуры не должен
+      // схлопываться в единицы байт (был бы явный признак деградации).
+      assert.ok(v.buffer.length > 200, `${scenario.name}/${name}: подозрительно маленький файл (${v.buffer.length} байт) — возможна чрезмерная потеря качества`);
+    }
+  });
+}

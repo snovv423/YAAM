@@ -147,8 +147,7 @@ function layout({ title, active, body, csrfToken, linkBasePath = '/hq' }) {
      хромированности "CMS-таблицы файлов". */
   .photo-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;margin-top:14px}
   .photo-card{position:relative;border:1px solid var(--bord);border-radius:12px;overflow:hidden;background:rgba(255,255,255,.03)}
-  .photo-card.archived{opacity:.5}
-  .photo-card img{display:block;width:100%;aspect-ratio:4/3;object-fit:cover;background:rgba(255,255,255,.04)}
+  .photo-card img{display:block;width:100%;aspect-ratio:4/3;object-fit:cover;object-position:center;background:rgba(255,255,255,.04)}
   .photo-badge{position:absolute;top:8px;left:8px;background:var(--amber);color:#3a1c00;font-size:10px;font-weight:800;padding:2px 8px;border-radius:999px;letter-spacing:.02em;text-transform:uppercase}
   .photo-body{padding:10px}
   .photo-alt-form{display:flex;gap:6px;margin-top:8px}
@@ -160,7 +159,6 @@ function layout({ title, active, body, csrfToken, linkBasePath = '/hq' }) {
   .photo-upload{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;margin-top:14px}
   .photo-upload .field{flex:1;min-width:180px}
   .photo-meta{font-size:12px;color:var(--txt2);margin-top:10px}
-  details.photo-archived summary{cursor:pointer;font-size:13px;color:var(--txt2);font-weight:600;margin-top:16px}
 
   /* Мобильный responsive-table: превращает строки в компактные карточки без
      дублирования разметки (задание, раздел 14 — "на mobile строки заказов

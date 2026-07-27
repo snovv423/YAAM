@@ -216,18 +216,20 @@ CREATE INDEX IF NOT EXISTS ix_menu_items_archived_at ON menu_items (archived_at)
 -- он всегда выводится на чтении из storage_key через активный провайдер
 -- (getPublicUrl), чтобы смена домена/провайдера в будущем не требовала
 -- миграции данных. storage_key — базовый ключ одной загруженной фотографии;
--- три обработанных варианта (thumb/card/full) адресуются детерминированными
--- суффиксами поверх этого же базового ключа (imagePipeline.js), поэтому
--- отдельная колонка/JSON под варианты не нужна.
+-- четыре обработанных варианта (thumb/card/full/master) адресуются
+-- детерминированными суффиксами поверх этого же базового ключа
+-- (imagePipeline.js), поэтому отдельная колонка/JSON под варианты не нужна.
 --
--- archived_at — архивирование вместо физического DELETE строки (тот же
--- принцип, что и menu_items.archived_at выше): история заказов и HQ audit
--- log не должны зависеть от фотографий, а реальное удаление объекта из
--- хранилища выполняется отдельным шагом сервисного слоя ПОСЛЕ успешной
--- транзакции архивирования, не самим DELETE строки.
+-- Stage 5B.1 — фотографиям не нужен lifecycle ресторана/блюда: раздел
+-- «Фотографии» упрощён до upload/primary/alt/delete, поэтому здесь,
+-- в отличие от restaurants.archived_at/menu_items.archived_at, УДАЛЕНИЕ
+-- СТРОКИ РЕАЛЬНОЕ (services/hq/media/photoService.js: deletePhoto) — нет
+-- ни order_items, ни какой-либо другой истории, которая ссылалась бы на
+-- фотографию и требовала бы её сохранения после удаления. archived_at
+-- Stage 5B здесь сознательно НЕ используется (см. ниже DROP COLUMN).
 --
 -- is_primary — не BOOLEAN, а тот же INTEGER 0/1 в стиле остальных булевых
--- колонок этой схемы (is_popular, is_available и т.д.). Ровно одна активная
+-- колонок этой схемы (is_popular, is_available и т.д.). Ровно одна
 -- primary-фотография на владельца обеспечивается partial unique индексом
 -- ниже на уровне БД, а не только проверкой в JavaScript.
 --
@@ -243,15 +245,14 @@ CREATE TABLE IF NOT EXISTS restaurant_photos (
   alt_text TEXT NOT NULL DEFAULT '',
   sort_order INTEGER NOT NULL DEFAULT 0,
   is_primary INTEGER NOT NULL DEFAULT 0,    -- 0/1
-  archived_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_restaurant_photos_one_primary
-  ON restaurant_photos (restaurant_id) WHERE is_primary = 1 AND archived_at IS NULL;
-CREATE INDEX IF NOT EXISTS ix_restaurant_photos_active
-  ON restaurant_photos (restaurant_id, sort_order) WHERE archived_at IS NULL;
+  ON restaurant_photos (restaurant_id) WHERE is_primary = 1;
+CREATE INDEX IF NOT EXISTS ix_restaurant_photos_owner
+  ON restaurant_photos (restaurant_id, sort_order);
 
 CREATE TABLE IF NOT EXISTS menu_item_photos (
   id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -262,15 +263,30 @@ CREATE TABLE IF NOT EXISTS menu_item_photos (
   alt_text TEXT NOT NULL DEFAULT '',
   sort_order INTEGER NOT NULL DEFAULT 0,
   is_primary INTEGER NOT NULL DEFAULT 0,    -- 0/1
-  archived_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_menu_item_photos_one_primary
-  ON menu_item_photos (menu_item_id) WHERE is_primary = 1 AND archived_at IS NULL;
-CREATE INDEX IF NOT EXISTS ix_menu_item_photos_active
-  ON menu_item_photos (menu_item_id, sort_order) WHERE archived_at IS NULL;
+  ON menu_item_photos (menu_item_id) WHERE is_primary = 1;
+CREATE INDEX IF NOT EXISTS ix_menu_item_photos_owner
+  ON menu_item_photos (menu_item_id, sort_order);
+
+-- Stage 5B.1 — идемпотентный upgrade для любой локальной БД, где уже
+-- применялся исходный Stage 5B schema.sql (archived_at существовал,
+-- partial-индексы фильтровали по нему). На свежей базе всё это — no-op:
+-- колонки уже нет (CREATE TABLE выше её не создаёт), а DROP INDEX + CREATE
+-- пересоздают идентичные индексы под тем же именем.
+ALTER TABLE restaurant_photos DROP COLUMN IF EXISTS archived_at;
+ALTER TABLE menu_item_photos DROP COLUMN IF EXISTS archived_at;
+DROP INDEX IF EXISTS ux_restaurant_photos_one_primary;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_restaurant_photos_one_primary
+  ON restaurant_photos (restaurant_id) WHERE is_primary = 1;
+DROP INDEX IF EXISTS ux_menu_item_photos_one_primary;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_menu_item_photos_one_primary
+  ON menu_item_photos (menu_item_id) WHERE is_primary = 1;
+DROP INDEX IF EXISTS ix_restaurant_photos_active;
+DROP INDEX IF EXISTS ix_menu_item_photos_active;
 
 -- =========================================================================
 -- orders
@@ -654,11 +670,13 @@ CREATE TABLE IF NOT EXISTS hq_audit_log (
     'menu_item_created', 'menu_item_updated', 'menu_item_available',
     'menu_item_unavailable', 'menu_item_archived', 'menu_item_restored',
     'menu_item_moved',
-    -- Stage 5B — медиа-система (10 событий, задание, раздел 12).
-    'restaurant_photo_uploaded', 'restaurant_photo_primary_changed',
-    'restaurant_photo_moved', 'restaurant_photo_archived', 'restaurant_photo_restored',
-    'menu_item_photo_uploaded', 'menu_item_photo_primary_changed',
-    'menu_item_photo_moved', 'menu_item_photo_archived', 'menu_item_photo_restored'
+    -- Stage 5B.1 — медиа-система, упрощённый набор (6 событий): у фотографий
+    -- нет reorder/archive/restore, только upload/primary/delete (задание
+    -- Stage 5B.1, раздел 0). Исходные Stage 5B moved/archived/restored
+    -- значения намеренно убраны из allowlist — эта функциональность
+    -- перестала существовать в коде, а не просто скрыта в UI.
+    'restaurant_photo_uploaded', 'restaurant_photo_primary_changed', 'restaurant_photo_deleted',
+    'menu_item_photo_uploaded', 'menu_item_photo_primary_changed', 'menu_item_photo_deleted'
   )),
   restaurant_id INTEGER REFERENCES restaurants(id),
   details TEXT,
@@ -668,9 +686,10 @@ CREATE TABLE IF NOT EXISTS hq_audit_log (
 CREATE INDEX IF NOT EXISTS ix_hq_audit_log_restaurant_id ON hq_audit_log (restaurant_id);
 CREATE INDEX IF NOT EXISTS ix_hq_audit_log_created_at ON hq_audit_log (created_at);
 
--- YAAM HQ Stage 4.1/5A/5B — расширения allowlist выше ('restaurant_published'/
--- 'restaurant_unpublished', затем 12 событий раздела «Меню», затем 10
--- событий медиа-системы). Таблица уже существует на любой БД, где применялся
+-- YAAM HQ Stage 4.1/5A/5B/5B.1 — расширения allowlist выше
+-- ('restaurant_published'/'restaurant_unpublished', затем 12 событий раздела
+-- «Меню», затем упрощённый набор из 6 событий медиа-системы, Stage 5B.1).
+-- Таблица уже существует на любой БД, где применялся
 -- Stage 4 (`CREATE TABLE IF NOT EXISTS` тогда — no-op), поэтому CHECK нужно
 -- расширить отдельно, идемпотентно: DROP старого constraint'а (стандартное
 -- имя Postgres для inline column CHECK — "<таблица>_<колонка>_check") и ADD
@@ -688,10 +707,8 @@ ALTER TABLE hq_audit_log ADD CONSTRAINT hq_audit_log_action_check CHECK (action 
   'menu_item_created', 'menu_item_updated', 'menu_item_available',
   'menu_item_unavailable', 'menu_item_archived', 'menu_item_restored',
   'menu_item_moved',
-  'restaurant_photo_uploaded', 'restaurant_photo_primary_changed',
-  'restaurant_photo_moved', 'restaurant_photo_archived', 'restaurant_photo_restored',
-  'menu_item_photo_uploaded', 'menu_item_photo_primary_changed',
-  'menu_item_photo_moved', 'menu_item_photo_archived', 'menu_item_photo_restored'
+  'restaurant_photo_uploaded', 'restaurant_photo_primary_changed', 'restaurant_photo_deleted',
+  'menu_item_photo_uploaded', 'menu_item_photo_primary_changed', 'menu_item_photo_deleted'
 ));
 
 COMMIT;

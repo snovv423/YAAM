@@ -237,11 +237,14 @@ function toPublicMenuItemDTO(row) {
 // список ресторанов/блюд одного ответа, независимо от того, сколько их.
 // mediaProvider === null (MEDIA_PROVIDER не задан) -> пустая карта, публичный
 // API продолжает работать через legacy photo_url (см. buildPhotoFields).
+// Stage 5B.1 — у фотографий больше нет archived_at (удаление необратимо,
+// см. services/hq/media/photoService.js) — все строки в этих таблицах уже
+// "активны" по определению.
 async function fetchActiveRestaurantPhotos(restaurantIds) {
   const map = new Map();
   if (!mediaProvider || !restaurantIds.length) return map;
   const rows = await db.query(
-    'SELECT * FROM restaurant_photos WHERE restaurant_id = ANY($1::int[]) AND archived_at IS NULL ORDER BY restaurant_id, sort_order, id',
+    'SELECT * FROM restaurant_photos WHERE restaurant_id = ANY($1::int[]) ORDER BY restaurant_id, sort_order, id',
     [restaurantIds],
   );
   for (const row of rows) {
@@ -255,7 +258,7 @@ async function fetchActiveMenuItemPhotos(menuItemIds) {
   const map = new Map();
   if (!mediaProvider || !menuItemIds.length) return map;
   const rows = await db.query(
-    'SELECT * FROM menu_item_photos WHERE menu_item_id = ANY($1::int[]) AND archived_at IS NULL ORDER BY menu_item_id, sort_order, id',
+    'SELECT * FROM menu_item_photos WHERE menu_item_id = ANY($1::int[]) ORDER BY menu_item_id, sort_order, id',
     [menuItemIds],
   );
   for (const row of rows) {

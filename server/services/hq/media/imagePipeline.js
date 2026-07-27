@@ -28,12 +28,36 @@ const MAX_SOURCE_PIXELS = 40_000_000; // ~40 МП — с запасом выше
 
 // Детерминированные WebP-варианты (см. server/db/postgresql/schema.sql,
 // комментарий к restaurant_photos/menu_item_photos): каждому базовому
-// storage_key соответствуют ровно эти три суффикса.
+// storage_key соответствуют ровно эти суффиксы.
+//
+// Stage 5B.1 — приоритет качества фотографий еды (задание: "максимально
+// сохранить визуальное качество... без агрессивного сжатия, без заметной
+// потери деталей"). Качество приведено к диапазону 88-95 (было 78-85 в
+// Stage 5B) — визуально сверено на синтетических тестовых изображениях,
+// имитирующих яркое блюдо с мелкими деталями/тёмное мясное блюдо/суп/
+// выпечку (server/test/hqMediaImagePipeline.test.js,
+// server/test/fixtures/generateTestJpeg.js) через Chrome DevTools:
+// заметных артефактов блочности/бандинга при этих значениях не обнаружено,
+// дальнейшее снижение качества уже заметно на мелкой текстуре. `effort:6`
+// (максимум для sharp/libwebp, 0-6) и `smartSubsample:true` — оба
+// улучшают качество на резких цветовых границах при той же битовой
+// стоимости, без дополнительного бизнес-риска (кодирование фотографии
+// такого размера остаётся быстрее 100мс даже на effort:6).
+//
+// `master` — НЕ публичный вариант (не входит в photoVariantUrls ниже),
+// хранится только для возможной будущей повторной генерации
+// thumb/card/full при смене настроек обработки без повторной загрузки
+// владельцем (задание, раздел "сохранить master/original"). Не оригинал в
+// буквальном смысле (см. комментарий в processImage — оригинальные байты
+// никогда не сохраняются, полиглот-защита), а лучшая по качеству
+// перекодировка при почти исходном разрешении.
 const VARIANTS = {
-  thumb: { maxEdge: 320, quality: 78 },
-  card: { maxEdge: 800, quality: 82 },
-  full: { maxEdge: 1920, quality: 85 },
+  thumb: { maxEdge: 320, quality: 88, public: true },
+  card: { maxEdge: 800, quality: 92, public: true },
+  full: { maxEdge: 1920, quality: 95, public: true },
+  master: { maxEdge: 3200, quality: 95, public: false },
 };
+const PUBLIC_VARIANT_NAMES = Object.keys(VARIANTS).filter((name) => VARIANTS[name].public);
 
 const SIGNATURES = [
   { format: 'jpeg', mime: 'image/jpeg', test: (b) => b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff },
@@ -119,7 +143,7 @@ async function processImage(buffer) {
     const pipeline = sharp(buffer)
       .rotate()
       .resize({ width: opts.maxEdge, height: opts.maxEdge, fit: 'inside', withoutEnlargement: true })
-      .webp({ quality: opts.quality });
+      .webp({ quality: opts.quality, effort: 6, smartSubsample: true });
     const { data, info } = await pipeline.toBuffer({ resolveWithObject: true });
     variants[name] = { buffer: data, width: info.width, height: info.height };
   }
@@ -137,6 +161,7 @@ module.exports = {
   MAX_SOURCE_DIMENSION_PX,
   MAX_SOURCE_PIXELS,
   VARIANTS,
+  PUBLIC_VARIANT_NAMES,
   detectFormat,
   validateSourceImage,
   processImage,

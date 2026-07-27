@@ -147,7 +147,7 @@
   .card:active{transform:scale(.982)}
   .card.closed{filter:grayscale(.55) brightness(.82)}
   .photo{position:relative;height:190px;background:#13402a}
-  .photo>img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:1}
+  .photo>img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:center;z-index:1}
   .photo::before{content:"";position:absolute;inset:0;z-index:2;background:linear-gradient(180deg,rgba(0,0,0,.1) 0%,transparent 30%,transparent 50%,rgba(4,18,11,.5) 100%)}
   .chip{position:absolute;top:12px;z-index:3;display:flex;align-items:center;gap:6px;padding:6px 11px;border-radius:999px;font-size:11.5px;font-weight:800;color:#fff;border:1px solid rgba(255,255,255,.18);box-shadow:var(--spec);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px)}
   .chip.st{left:14px}.chip.rt{right:14px}
@@ -195,7 +195,7 @@
   .screen{display:none}.screen.active{display:block;animation:scrIn .55s ease}
   @keyframes scrIn{from{opacity:0}to{opacity:1}}
   .hero{position:relative;height:190px;background:#13402a;overflow:hidden}
-  .hero>img{position:absolute;inset:-20% 0;width:100%;height:140%;object-fit:cover;z-index:0;will-change:transform}
+  .hero>img{position:absolute;inset:-20% 0;width:100%;height:140%;object-fit:cover;object-position:center;z-index:0;will-change:transform}
   .hero::after{content:"";position:absolute;inset:0;z-index:1;pointer-events:none;background:linear-gradient(180deg,rgba(0,0,0,.3),transparent 45%,rgba(6,28,17,.75))}
   .back{position:absolute;top:16px;left:16px;z-index:3;display:inline-flex;align-items:center;gap:6px;font-size:14px;font-weight:700;color:#fff;background:rgba(8,26,17,.5);border:1px solid rgba(255,255,255,.2);padding:10px 15px;border-radius:999px;cursor:pointer;font-family:inherit;box-shadow:var(--spec);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px)}
   .hero-info{position:absolute;left:18px;right:18px;bottom:16px;z-index:3;color:#fff}
@@ -214,7 +214,7 @@
   .cat-h{font-weight:800;font-size:17px;padding:20px 18px 8px;position:relative;z-index:2}
   .dish{position:relative;z-index:2;margin:0 14px 16px;border-radius:24px;overflow:hidden;box-shadow:var(--shadow);isolation:isolate;background:#13402a}
   .dphoto{position:relative;height:176px}
-  .dphoto>img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:1}
+  .dphoto>img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:center;z-index:1}
   .dphoto::before{content:"";position:absolute;inset:0;z-index:2;background:linear-gradient(180deg,rgba(0,0,0,.05),transparent 40%,rgba(4,18,11,.55) 100%)}
   .dplate{position:absolute;left:10px;right:auto;max-width:58%;bottom:10px;z-index:3;border-radius:16px;padding:9px 12px;color:#fff;background:var(--glass);border:1px solid var(--gbord);box-shadow:var(--spec),0 8px 18px rgba(0,0,0,.25);backdrop-filter:blur(18px) saturate(170%);-webkit-backdrop-filter:blur(18px) saturate(170%)}
   .dname{font-weight:800;font-size:14.5px}
@@ -234,16 +234,28 @@
   .photo.nophoto,.dphoto.nophoto{background:linear-gradient(135deg,#3a423e,#242b28)!important}
   .photo.nophoto::after,.dphoto.nophoto::after{content:"Фото недоступно";position:absolute;inset:0;z-index:1;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:rgba(255,255,255,.4)}
   .hero.nophoto,.dhero.nophoto{background:linear-gradient(135deg,#3a423e,#242b28)!important}
-  .hero.nophoto::before,.dhero.nophoto::before{content:"Фото недоступно";position:absolute;inset:0;z-index:0;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:rgba(255,255,255,.4)}
-  /* dish detail */
-  .dhero{position:relative;height:300px;background:#13402a}
-  .dhero>img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:0}
-  .dhero::after{content:"";position:absolute;inset:0;z-index:1;background:linear-gradient(180deg,rgba(0,0,0,.28),transparent 40%,rgba(6,28,17,.85))}
+  .hero.nophoto::before,.dhero.nophoto::before{content:"Фото недоступно";position:absolute;inset:0;z-index:0;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:rgba(255,255,255,.4);background-image:none!important}
+  /* dish detail — YAAM HQ Stage 5B.1: "большая галерея" не обрезает блюдо
+     (object-fit:contain, задание: "не обрезать блюдо без необходимости"),
+     пустые поля по бокам/сверху-снизу заполняет размытая увеличенная копия
+     того же фото (::before, задание: "фон галереи должен выглядеть
+     аккуратно при несовпадении пропорций") — тот же приём, что Apple Music/
+     Spotify используют для леттербоксинга обложек. --dhero-bg выставляется
+     из JS (gallerySet() в app.js) тем же URL, что и сам <img>, через
+     кастомное CSS-свойство — оно наследуется псевдоэлементом того же узла,
+     поэтому не требует второго <img>. Ресторан (#m-hero) сознательно
+     остался object-fit:cover — это ambient-баннер с текстом поверх, не
+     "большая галерея" в смысле задания.
+  */
+  .dhero{position:relative;height:300px;background:#13402a;overflow:hidden}
+  .dhero::before{content:"";position:absolute;inset:-24px;z-index:0;background-image:var(--dhero-bg,none);background-size:cover;background-position:center;filter:blur(28px) brightness(.55);transform:scale(1.15)}
+  .dhero>img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;object-position:center;z-index:1}
+  .dhero::after{content:"";position:absolute;inset:0;z-index:2;background:linear-gradient(180deg,rgba(0,0,0,.28),transparent 40%,rgba(6,28,17,.85))}
   .gallery{display:flex;gap:9px;padding:14px 16px 2px;overflow-x:auto;scrollbar-width:none;margin-top:-44px;position:relative;z-index:3}
   .gallery::-webkit-scrollbar{display:none}
   .thumb{flex:0 0 64px;width:64px;height:64px;border-radius:14px;overflow:hidden;cursor:pointer;border:2px solid transparent;background:#13402a;padding:0}
   .thumb.on{border-color:var(--amber)}
-  .thumb img{width:100%;height:100%;object-fit:cover}
+  .thumb img{width:100%;height:100%;object-fit:cover;object-position:center}
   /* YAAM HQ Stage 5B — явные стрелки + счётчик поверх hero (задание, раздел
      9/10: swipe не единственный способ листать фото; счётчик виден; ничего
      из этого не показывается, если фото одна — см. galleryStep()/renderGallery()

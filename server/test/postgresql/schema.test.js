@@ -39,8 +39,11 @@ const EXPECTED_INDEXES = {
   // YAAM HQ Stage 5B — ровно одна активная primary-фотография на владельца.
   ux_restaurant_photos_one_primary: { unique: true, partial: true },
   ux_menu_item_photos_one_primary: { unique: true, partial: true },
-  ix_restaurant_photos_active: { unique: false, partial: true },
-  ix_menu_item_photos_active: { unique: false, partial: true },
+  // Stage 5B.1 — фотографиям больше не нужен archived_at (удаление
+  // необратимо), поэтому "active"-индексы переименованы в "owner" и
+  // перестали быть partial (нет WHERE archived_at IS NULL).
+  ix_restaurant_photos_owner: { unique: false, partial: false },
+  ix_menu_item_photos_owner: { unique: false, partial: false },
 };
 
 // Таблицы, где по схеме есть колонка created_at (categories/menu_items/order_items — нет).

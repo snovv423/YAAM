@@ -1,24 +1,26 @@
 'use strict';
 
-// YAAM HQ Stage 5B — интеграционные тесты медиа-системы против настоящего
-// embedded PostgreSQL (задание, раздел 14B). Тот же harness-паттерн, что и
+// YAAM HQ Stage 5B/5B.1 — интеграционные тесты медиа-системы против
+// настоящего embedded PostgreSQL. Тот же harness-паттерн, что и
 // hqMenuAdminStage5A.test.js (Stage 5A).
 //
 // M — идемпотентность повторного применения schema.sql (старые фотографии
 //     переживают повторный apply, как и остальные Stage-additive колонки).
 // A — upload metadata: реальная загрузка через photoService формирует
 //     корректные width/height/storage_key/is_primary.
-// B — ровно один активный primary на владельца (partial unique index),
-//     setPrimary/archive/restore не могут его нарушить.
-// C — reorder: атомарный SWAP sort_order, соседи по активным фото.
-// D — archive/restore: soft-delete, storage не трогается, invariant держится.
+// B — ровно один primary на владельца (partial unique index), setPrimary
+//     не может его нарушить.
+// D — Stage 5B.1: удаление необратимо — DB-строка и объекты в хранилище
+//     реально исчезают; удаление primary-фотографии авто-переносит флаг на
+//     следующую по sort_order.
 // E — ownership: блюдо из чужого ресторана недоступно ни сервису, ни HTTP.
 // F — public API: primary_photo/gallery по HTTP, allowlist полей.
 // G — storage failure: upload() провайдера падает — не остаётся ни файла,
 //     ни строки в БД.
 // H — DB failure после успешной загрузки в хранилище -> компенсирующее
 //     удаление всех вариантов (no orphan objects).
-// I — audit log: все 10 событий реально пишутся с ожидаемым action.
+// I — audit log: все 6 событий (Stage 5B.1: upload/primary/delete на
+//     ресторан и на блюдо) реально пишутся с ожидаемым action.
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -200,7 +202,7 @@ test('M1: повторное применение schema.sql не теряет �
 // ---------------------------------------------------------------------------
 // A/B/C/D — photoService напрямую (LocalMediaProvider, без HTTP)
 // ---------------------------------------------------------------------------
-test('A/B/C/D: upload metadata, primary invariant, reorder, archive/restore — через photoService', async () => {
+test('A/B/D: upload metadata, primary invariant, permanent delete — через photoService', async () => {
   const databaseUrl = await freshDatabase('media_service_direct');
   process.env.DATABASE_URL = databaseUrl;
   delete require.cache[require.resolve('../../db/postgresql')];
@@ -214,58 +216,47 @@ test('A/B/C/D: upload metadata, primary invariant, reorder, archive/restore — 
     const rest = await db.execute("INSERT INTO restaurants (name, cities) VALUES ('Media Direct','[]') RETURNING id");
     const restaurantId = rest.rows[0].id;
 
-    // A — upload metadata
+    // A — upload metadata (включая непубличный master-вариант, Stage 5B.1)
     const photo1 = await photoService.uploadRestaurantPhoto(provider, restaurantId, await makeJpeg({ r: 10, g: 20, b: 30 }), 'Первое фото');
     assert.equal(photo1.is_primary, 1, 'первая загруженная фотография становится primary автоматически');
     assert.ok(photo1.storage_key.startsWith(`restaurants/${restaurantId}/`));
     assert.equal(photo1.width, 900);
     assert.equal(photo1.height, 600);
     assert.equal(photo1.alt_text, 'Первое фото');
+    const masterBuf = await provider.readFileForTest(photoService.variantObjectKey(photo1.storage_key, 'master'));
+    assert.ok(masterBuf.length > 0, 'master-вариант должен физически существовать в хранилище');
+    assert.deepEqual(Object.keys(photoService.photoVariantUrls(provider, photo1)).sort(), ['card', 'full', 'thumb'], 'master не должен попадать в публичные URL');
 
     const photo2 = await photoService.uploadRestaurantPhoto(provider, restaurantId, await makeJpeg({ r: 40, g: 50, b: 60 }), '');
     assert.equal(photo2.is_primary, 0);
 
-    // B — ровно один активный primary; setPrimary переносит флаг атомарно
+    // B — ровно один primary; setPrimary переносит флаг атомарно
     await photoService.setRestaurantPhotoPrimary(restaurantId, photo2.id);
     const afterSetPrimary = await photoService.listRestaurantPhotos(restaurantId);
     assert.equal(afterSetPrimary.filter((p) => p.is_primary === 1).length, 1);
     assert.equal(afterSetPrimary.find((p) => p.id === photo2.id).is_primary, 1);
     // DB-уровень: partial unique index физически не даёт вставить вторую
-    // активную primary мимо сервисного слоя.
+    // primary мимо сервисного слоя.
     await assert.rejects(() => db.execute(
       'INSERT INTO restaurant_photos (restaurant_id, storage_key, width, height, is_primary) VALUES ($1,$2,$3,$4,1)',
       [restaurantId, 'restaurants/x/manual-bypass', 10, 10],
     ));
 
-    // C — reorder: атомарный swap sort_order
-    const beforeMove = await photoService.listRestaurantPhotos(restaurantId);
-    const [first, second] = beforeMove;
-    await photoService.moveRestaurantPhoto(restaurantId, second.id, 'up');
-    const afterMove = await photoService.listRestaurantPhotos(restaurantId);
-    assert.equal(afterMove[0].id, second.id, 'второе фото должно встать первым после move up');
-    assert.equal(afterMove[1].id, first.id);
-    // крайний элемент — move за пределы диапазона не ошибка, просто no-op
-    await assert.doesNotReject(() => photoService.moveRestaurantPhoto(restaurantId, afterMove[0].id, 'up'));
+    // D — удаление необратимо (Stage 5B.1): удаляем ТЕКУЩУЮ primary (photo2)
+    // -> оставшаяся (photo1) должна быть авто-назначена primary, строка и
+    // объекты в хранилище должны реально исчезнуть.
+    const cardKey2 = photoService.variantObjectKey(photo2.storage_key, 'card');
+    const deleted = await photoService.deleteRestaurantPhoto(restaurantId, photo2.id, provider);
+    assert.equal(deleted.id, photo2.id);
+    const afterDelete = await photoService.listRestaurantPhotos(restaurantId);
+    assert.equal(afterDelete.length, 1, 'удалённая фотография должна физически исчезнуть из списка (hard delete, не soft)');
+    assert.equal(afterDelete[0].id, photo1.id);
+    assert.equal(afterDelete[0].is_primary, 1, 'оставшаяся фотография должна быть авто-назначена primary');
+    await assert.rejects(() => provider.readFileForTest(cardKey2), 'объект удалённой фотографии должен физически исчезнуть из хранилища');
 
-    // D — archive/restore: soft-delete, объект в хранилище не трогается
-    const primaryNow = (await photoService.listRestaurantPhotos(restaurantId)).find((p) => p.is_primary === 1);
-    const cardKey = photoService.variantObjectKey(primaryNow.storage_key, 'card');
-    const bytesBeforeArchive = await provider.readFileForTest(cardKey);
-    await photoService.archiveRestaurantPhoto(restaurantId, primaryNow.id);
-    const activeAfterArchive = await photoService.listRestaurantPhotos(restaurantId);
-    assert.equal(activeAfterArchive.length, 1, 'архивированное фото не входит в active-список');
-    // fallback: resolvePrimaryPhoto среди активных возвращает оставшееся,
-    // даже если оно формально не is_primary (задание, раздел 6/8).
-    const resolved = photoService.resolvePrimaryPhoto(activeAfterArchive);
-    assert.equal(resolved.id, activeAfterArchive[0].id);
-    const bytesStillThere = await provider.readFileForTest(cardKey);
-    assert.deepEqual(bytesStillThere, bytesBeforeArchive, 'archive НЕ удаляет объект из хранилища');
-
-    const restored = await photoService.restoreRestaurantPhoto(restaurantId, primaryNow.id);
-    assert.equal(restored.archived_at, null);
-    const activeAfterRestore = await photoService.listRestaurantPhotos(restaurantId);
-    assert.equal(activeAfterRestore.length, 2);
-    assert.equal(activeAfterRestore.filter((p) => p.is_primary === 1).length, 1, 'invariant держится и после restore');
+    // Повторное удаление того же (уже несуществующего) id — не ошибка, просто no-op.
+    const secondDelete = await photoService.deleteRestaurantPhoto(restaurantId, photo2.id, provider);
+    assert.equal(secondDelete, null);
   } finally {
     await provider.cleanup();
     await db.close();
@@ -373,7 +364,7 @@ test('G1: upload() провайдера падает на втором вари�
   }
 });
 
-test('H1: DB-транзакция падает ПОСЛЕ успешной загрузки в хранилище — все 3 варианта удаляются компенсирующим действием (no orphan objects)', async () => {
+test('H1: DB-транзакция падает ПОСЛЕ успешной загрузки в хранилище — все варианты (включая master) удаляются компенсирующим действием (no orphan objects)', async () => {
   const databaseUrl = await freshDatabase('media_db_failure');
   process.env.DATABASE_URL = databaseUrl;
   delete require.cache[require.resolve('../../db/postgresql')];
@@ -395,7 +386,7 @@ test('H1: DB-транзакция падает ПОСЛЕ успешной за�
   try {
     const before = countFiles(provider.baseDir);
     // Несуществующий restaurant_id -> FK violation при INSERT, ПОСЛЕ того,
-    // как все 3 WebP-варианта уже успешно загружены в LocalMediaProvider.
+    // как все WebP-варианты (включая master) уже успешно загружены в LocalMediaProvider.
     const sourceBuf = await makeJpeg({ r: 2, g: 2, b: 2 });
     await assert.rejects(() => photoService.uploadRestaurantPhoto(provider, 999999, sourceBuf, ''));
     const after = countFiles(provider.baseDir);
@@ -410,7 +401,7 @@ test('H1: DB-транзакция падает ПОСЛЕ успешной за�
 // ---------------------------------------------------------------------------
 // I — audit log: все 10 событий
 // ---------------------------------------------------------------------------
-test('I1: все 10 audit-событий реально пишутся с ожидаемым action', async () => {
+test('I1: все 6 audit-событий (Stage 5B.1) реально пишутся с ожидаемым action', async () => {
   const databaseUrl = await freshDatabase('media_audit_log');
   const { instance, base } = await startApp(databaseUrl);
   try {
@@ -424,20 +415,14 @@ test('I1: все 10 audit-событий реально пишутся с ожи
     await uploadPhoto(base, cookie, `${rest.restaurantPath}/photos`, page.csrf, { altText: 'Р2', color: { r: 8, g: 8, b: 8 } });
 
     page = await getPage(base, cookie, `${rest.restaurantPath}/settings`);
-    const photoIdMatch = page.html.match(/\/photos\/(\d+)\/archive/);
+    const photoIdMatch = page.html.match(/\/photos\/(\d+)\/delete/);
     const photoId = photoIdMatch[1];
 
     // restaurant_photo_primary_changed
     await postForm(base, cookie, `${rest.restaurantPath}/photos/${photoId}/primary`, { _csrf: page.csrf });
-    // restaurant_photo_moved
+    // restaurant_photo_deleted
     page = await getPage(base, cookie, `${rest.restaurantPath}/settings`);
-    await postForm(base, cookie, `${rest.restaurantPath}/photos/${photoId}/move`, { _csrf: page.csrf, direction: 'down' });
-    // restaurant_photo_archived
-    page = await getPage(base, cookie, `${rest.restaurantPath}/settings`);
-    await postForm(base, cookie, `${rest.restaurantPath}/photos/${photoId}/archive`, { _csrf: page.csrf });
-    // restaurant_photo_restored
-    page = await getPage(base, cookie, `${rest.restaurantPath}/settings`);
-    await postForm(base, cookie, `${rest.restaurantPath}/photos/${photoId}/restore`, { _csrf: page.csrf });
+    await postForm(base, cookie, `${rest.restaurantPath}/photos/${photoId}/delete`, { _csrf: page.csrf });
 
     // menu_item_photo_uploaded
     page = await getPage(base, cookie, `${rest.restaurantPath}/menu/items/${rest.itemId}`);
@@ -446,32 +431,29 @@ test('I1: все 10 audit-событий реально пишутся с ожи
     await uploadPhoto(base, cookie, `${rest.restaurantPath}/menu/items/${rest.itemId}/photos`, page.csrf, { altText: 'Б2', color: { r: 6, g: 6, b: 6 } });
 
     page = await getPage(base, cookie, `${rest.restaurantPath}/menu/items/${rest.itemId}`);
-    const dishPhotoIdMatch = page.html.match(/\/photos\/(\d+)\/archive/);
+    const dishPhotoIdMatch = page.html.match(/\/photos\/(\d+)\/delete/);
     const dishPhotoId = dishPhotoIdMatch[1];
 
     // menu_item_photo_primary_changed
     await postForm(base, cookie, `${rest.restaurantPath}/menu/items/${rest.itemId}/photos/${dishPhotoId}/primary`, { _csrf: page.csrf });
-    // menu_item_photo_moved
+    // menu_item_photo_deleted
     page = await getPage(base, cookie, `${rest.restaurantPath}/menu/items/${rest.itemId}`);
-    await postForm(base, cookie, `${rest.restaurantPath}/menu/items/${rest.itemId}/photos/${dishPhotoId}/move`, { _csrf: page.csrf, direction: 'down' });
-    // menu_item_photo_archived
-    page = await getPage(base, cookie, `${rest.restaurantPath}/menu/items/${rest.itemId}`);
-    await postForm(base, cookie, `${rest.restaurantPath}/menu/items/${rest.itemId}/photos/${dishPhotoId}/archive`, { _csrf: page.csrf });
-    // menu_item_photo_restored
-    page = await getPage(base, cookie, `${rest.restaurantPath}/menu/items/${rest.itemId}`);
-    await postForm(base, cookie, `${rest.restaurantPath}/menu/items/${rest.itemId}/photos/${dishPhotoId}/restore`, { _csrf: page.csrf });
+    await postForm(base, cookie, `${rest.restaurantPath}/menu/items/${rest.itemId}/photos/${dishPhotoId}/delete`, { _csrf: page.csrf });
 
     const db = require('../../db/postgresql');
     const rows = await db.query('SELECT action FROM hq_audit_log WHERE restaurant_id = $1 ORDER BY id', [rest.restaurantId]);
     const actions = rows.map((r) => r.action);
     const expected = [
-      'restaurant_photo_uploaded', 'restaurant_photo_primary_changed', 'restaurant_photo_moved',
-      'restaurant_photo_archived', 'restaurant_photo_restored',
-      'menu_item_photo_uploaded', 'menu_item_photo_primary_changed', 'menu_item_photo_moved',
-      'menu_item_photo_archived', 'menu_item_photo_restored',
+      'restaurant_photo_uploaded', 'restaurant_photo_primary_changed', 'restaurant_photo_deleted',
+      'menu_item_photo_uploaded', 'menu_item_photo_primary_changed', 'menu_item_photo_deleted',
     ];
     for (const action of expected) {
       assert.ok(actions.includes(action), `ожидали событие "${action}" в audit log, получили: ${actions.join(', ')}`);
+    }
+    // Убраны вместе с самой функциональностью (Stage 5B.1), не просто
+    // перестали вызываться — не должны появляться в CHECK/логе вовсе.
+    for (const removed of ['restaurant_photo_moved', 'restaurant_photo_archived', 'restaurant_photo_restored', 'menu_item_photo_moved', 'menu_item_photo_archived', 'menu_item_photo_restored']) {
+      assert.ok(!actions.includes(removed), `событие "${removed}" не должно существовать в Stage 5B.1`);
     }
     // Никаких секретов/URL/storage_key в details.
     const details = await db.query('SELECT details FROM hq_audit_log WHERE restaurant_id = $1 AND details IS NOT NULL', [rest.restaurantId]);

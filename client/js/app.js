@@ -955,6 +955,7 @@ function openDish(k){
   if(dishHasSrc){
     const heroSrc=dGallery.length?dGallery[0].full:(d.photoUrl||U(d.im,1000));
     const img=new Image();img.src=heroSrc;img.alt=dGallery.length?(dGallery[0].alt||''):'';img.onerror=function(){h.classList.add('nophoto');this.remove()};h.insertBefore(img,h.firstChild);
+    h.style.setProperty('--dhero-bg','url("'+heroSrc+'")');
   }
   renderGallery('d',dGallery);
   if(!dGallery.length){
@@ -982,7 +983,12 @@ function renderDishAdd(){document.getElementById('d-qty').textContent=dishQty;do
 function dishQtyPlus(){dishQty++;renderDishAdd();}
 function dishQtyMinus(){if(dishQty>1){dishQty--;renderDishAdd();}}
 function addFromDish(){const it=findItem(curDishKey);cart[curDishKey]={n:it.n,p:it.p,q:dishQty,menuItemId:it.id};refreshAll(curDishKey);go('menu');}
-function swapHero(id,i){const img=document.querySelector('#d-hero img');if(img)img.src=U(id,1000);document.querySelectorAll('#d-gallery .thumb').forEach((t,j)=>t.classList.toggle('on',j===i));}
+function swapHero(id,i){
+  const src=U(id,1000);
+  const img=document.querySelector('#d-hero img');if(img)img.src=src;
+  const heroEl=document.getElementById('d-hero');if(heroEl)heroEl.style.setProperty('--dhero-bg','url("'+src+'")');
+  document.querySelectorAll('#d-gallery .thumb').forEach((t,j)=>t.classList.toggle('on',j===i));
+}
 
 // YAAM HQ Stage 5B — реальная многофотографийная галерея (ресторан/блюдо),
 // без сторонних библиотек: тумб-стрип с горизонтальным нативным скроллом
@@ -1027,6 +1033,11 @@ function gallerySet(prefix,i){
   const photo=st.photos[idx];
   const heroImg=document.querySelector('#'+prefix+'-hero img');
   if(heroImg){heroImg.src=photo.full;heroImg.alt=photo.alt||'';}
+  // Размытый фон "большой галереи" (только у блюда — #d-hero, задание:
+  // "фон галереи должен выглядеть аккуратно при несовпадении пропорций") —
+  // тот же URL, что и сам <img>, через CSS custom property (см. .dhero::before).
+  const heroEl=document.getElementById(prefix+'-hero');
+  if(heroEl)heroEl.style.setProperty('--dhero-bg','url("'+photo.full+'")');
   const stripEl=document.getElementById(prefix+'-gallery');
   if(stripEl)stripEl.querySelectorAll('.thumb').forEach((t,j)=>t.classList.toggle('on',j===idx));
   const countEl=document.getElementById(prefix+'-gcount');

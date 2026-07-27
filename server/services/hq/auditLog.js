@@ -30,17 +30,17 @@ const ACTIONS = [
   'menu_item_archived',
   'menu_item_restored',
   'menu_item_moved',
-  // Stage 5B — медиа-система (задание, раздел 12: ровно 10 новых событий).
+  // Stage 5B.1 — медиа-система, упрощённый набор (задание, раздел 0: у
+  // фотографий нет reorder/archive/restore) — ровно 6 событий: upload/
+  // primary/delete на ресторан и на блюдо. Stage 5B изначально вводил 10
+  // событий (с moved/archived/restored) — они убраны вместе с самой
+  // функциональностью, а не просто перестали вызываться.
   'restaurant_photo_uploaded',
   'restaurant_photo_primary_changed',
-  'restaurant_photo_moved',
-  'restaurant_photo_archived',
-  'restaurant_photo_restored',
+  'restaurant_photo_deleted',
   'menu_item_photo_uploaded',
   'menu_item_photo_primary_changed',
-  'menu_item_photo_moved',
-  'menu_item_photo_archived',
-  'menu_item_photo_restored',
+  'menu_item_photo_deleted',
 ];
 
 // Единственные поля ресторана, которые вообще могут попасть в текст лога —

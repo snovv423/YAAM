@@ -32,10 +32,18 @@ function makeFakeElement(id) {
     // хранит значения — существующие тесты этого не касались (ни один
     // test/*.test.js до Stage 5B не читал .style.*), так что это чистое
     // расширение возможностей, не смена уже проверяемого поведения.
+    // YAAM HQ Stage 5B.1 — setProperty/getPropertyValue добавлены как
+    // настоящие методы (не свойства style.<name>=...) — .dhero::before
+    // читает CSS custom property --dhero-bg, которую app.js выставляет
+    // через style.setProperty(), а не прямым присваиванием.
     style: (() => {
       const store = {};
       return new Proxy(store, {
-        get: (target, key) => (key in target ? target[key] : ''),
+        get: (target, key) => {
+          if (key === 'setProperty') return (name, value) => { target[name] = value; };
+          if (key === 'getPropertyValue') return (name) => (name in target ? target[name] : '');
+          return key in target ? target[key] : '';
+        },
         set: (target, key, value) => { target[key] = value; return true; },
       });
     })(),

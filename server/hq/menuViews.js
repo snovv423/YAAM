@@ -225,7 +225,7 @@ function renderCategoryEditForm({ restaurant, category, error, csrfToken, linkBa
 
 function renderMenuItemForm({
   restaurant, item, categories, error, csrfToken, linkBasePath, isNew,
-  photos = [], archivedPhotos = [], mediaConfigured = false, maxPhotos = 0,
+  photos = [], mediaConfigured = false, maxPhotos = 0,
 }) {
   const v = item || {};
   const action = isNew
@@ -285,7 +285,7 @@ function renderMenuItemForm({
     </div>
     ${!isNew ? renderPhotoManager({
       title: 'Фотографии блюда',
-      photos, archivedPhotos, mediaConfigured, maxPhotos,
+      photos, mediaConfigured, maxPhotos,
       uploadAction: `${linkBasePath}/restaurants/${restaurant.id}/menu/items/${v.id}/photos`,
       actionBase: `${linkBasePath}/restaurants/${restaurant.id}/menu/items/${v.id}/photos`,
       csrfToken,

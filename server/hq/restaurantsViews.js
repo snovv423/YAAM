@@ -589,7 +589,7 @@ function renderStatisticsTab({ restaurant, statistics: s, periodOptions, linkBas
 
 function renderRestaurantSettingsTab({
   restaurant: r, linkBasePath, csrfToken, error, notice,
-  photos = [], archivedPhotos = [], mediaConfigured = false, maxPhotos = 0,
+  photos = [], mediaConfigured = false, maxPhotos = 0,
 }) {
   const archiveAction = r.archived_at
     ? `<form method="post" action="${linkBasePath}/restaurants/${r.id}/restore" onsubmit="return confirm('Восстановить «${esc(r.name)}» из архива?')">
@@ -630,7 +630,7 @@ function renderRestaurantSettingsTab({
 
     ${renderPhotoManager({
       title: 'Фотографии ресторана',
-      photos, archivedPhotos, mediaConfigured, maxPhotos,
+      photos, mediaConfigured, maxPhotos,
       uploadAction: `${linkBasePath}/restaurants/${r.id}/photos`,
       actionBase: `${linkBasePath}/restaurants/${r.id}/photos`,
       csrfToken,

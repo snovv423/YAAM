@@ -4,14 +4,17 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { test, expect } from '@playwright/test';
 
-// YAAM HQ Stage 5B — полный браузерный сценарий медиа-системы (задание,
-// раздел 14D, 18 шагов): войти -> создать ресторан -> загрузить главное фото
-// -> добавить ещё 2 -> переставить порядок -> выбрать другую основную ->
-// открыть публичную карточку ресторана -> проверить галерею -> создать
-// категорию+блюдо -> загрузить 3 фото блюда -> выбрать основную -> открыть
-// публичную карточку блюда -> проверить галерею -> архивировать основную ->
-// подтвердить, что fallback подхватывает следующую -> восстановить ->
-// проверить audit log -> подтвердить, что хранилище подчищено после теста.
+// YAAM HQ Stage 5B/5B.1 — полный браузерный сценарий медиа-системы: войти ->
+// создать ресторан -> загрузить главное фото -> добавить ещё 2 -> выбрать
+// другую основную -> опубликовать/открыть -> публичная карточка ресторана ->
+// проверить галерею -> создать категорию+блюдо -> загрузить 3 фото блюда ->
+// выбрать основную -> публичная карточка блюда -> проверить галерею ->
+// удалить основную (необратимо, Stage 5B.1) -> подтвердить авто-перенос
+// primary на оставшуюся -> проверить audit log -> подтвердить, что удалённый
+// объект физически исчез из хранилища, а хранилище подчищено после теста.
+//
+// Stage 5B.1: у фотографий больше нет reorder/archive/restore (задание,
+// раздел 0 — минимализм) — сценарий проверяет ТОЛЬКО upload/primary/delete.
 //
 // Использует ТОЛЬКО LocalMediaProvider (см. e2e/global-setup.ts:
 // MEDIA_PROVIDER=local, MEDIA_LOCAL_DIR — известный временный каталог,
@@ -44,7 +47,7 @@ function countFilesRecursive(dir: string): number {
   return n;
 }
 
-test('YAAM HQ: полный цикл медиа-системы — фото ресторана и блюда, порядок, основная, архив/восстановление, публичная галерея, audit log', async ({ page }) => {
+test('YAAM HQ: полный цикл медиа-системы — фото ресторана и блюда, основная, необратимое удаление, публичная галерея, audit log', async ({ page }) => {
   const restaurantName = `E2E Media ${crypto.randomBytes(4).toString('hex')}`;
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'yaam-e2e-media-fixtures-'));
 
@@ -66,7 +69,6 @@ test('YAAM HQ: полный цикл медиа-системы — фото ре
   await expect(page).toHaveURL(new RegExp(`${API_BASE_URL}/hq/restaurants/\\d+$`));
   const restaurantUrl = page.url();
   const restaurantId = Number(restaurantUrl.split('/').pop());
-  const restaurantPath = restaurantUrl.replace(API_BASE_URL!, '');
 
   async function uploadRestaurantPhoto(alt: string, color: { r: number; g: number; b: number }) {
     await page.goto(`${restaurantUrl}/settings`);
@@ -74,42 +76,34 @@ test('YAAM HQ: полный цикл медиа-системы — фото ре
     const filePath = path.join(tmpDir, `${alt.replace(/\s+/g, '_')}.jpg`);
     await generateTestJpeg(filePath, { color });
     await page.locator('input[type="file"][name="photo"]').setInputFiles(filePath);
-    await page.locator(".photo-upload input[name=\"alt_text\"]").fill(alt);
+    await page.locator('.photo-upload input[name="alt_text"]').fill(alt);
     await page.getByRole('button', { name: 'Загрузить' }).click();
     await expect(page).toHaveURL(`${restaurantUrl}/settings`);
   }
 
-  // 3. Загрузить главное (первое) фото ресторана.
+  // 3. Загрузить главное (первое) фото ресторана — становится основным автоматически.
   await uploadRestaurantPhoto('Фасад ресторана', { r: 200, g: 60, b: 30 });
   await expect(page.locator('.photo-card').filter({ has: page.locator('img[alt="Фасад ресторана"]') })).toBeVisible();
   await expect(page.locator('.photo-badge')).toHaveText('Основная');
 
-  // 4. Добавить ещё 2 фотографии.
+  // 4. Добавить ещё 2 фотографии. Никакого reorder в Stage 5B.1 — только
+  // upload/primary/alt/delete (задание, раздел 0).
   await uploadRestaurantPhoto('Зал ресторана', { r: 30, g: 200, b: 60 });
   await uploadRestaurantPhoto('Терраса', { r: 30, g: 60, b: 200 });
   await expect(page.locator('.photo-card')).toHaveCount(3);
   await expect(page.locator('.photo-meta').first()).toHaveText('3 / 20');
+  await expect(page.getByRole('button', { name: 'Выше' })).toHaveCount(0);
+  // "Архивировать" целиком (не substring) — на Настройках есть НЕсвязанная
+  // кнопка "Архивировать ресторан" (lifecycle ресторана, не фото).
+  await expect(page.locator('.photo-actions').getByRole('button', { name: 'Архивировать', exact: true })).toHaveCount(0);
 
-  // 5. Переставить порядок — поднять «Терраса» на самый верх.
-  const terraceCard = page.locator('.photo-card').filter({ has: page.locator('img[alt="Терраса"]') });
-  await terraceCard.getByRole('button', { name: 'Выше' }).click();
-  await expect(page).toHaveURL(`${restaurantUrl}/settings`);
-  await terraceCard.getByRole('button', { name: 'Выше' }).click();
-  const firstCardImgAlt = await page.locator('.photo-card').first().locator('img').getAttribute('alt');
-  expect(firstCardImgAlt).toBe('Терраса');
-
-  // 6. Выбрать другую основную фотографию («Зал ресторана»).
+  // 5. Выбрать другую основную фотографию («Зал ресторана»).
   const hallCard = page.locator('.photo-card').filter({ has: page.locator('img[alt="Зал ресторана"]') });
   await hallCard.getByRole('button', { name: 'Сделать основной' }).click();
   await expect(page).toHaveURL(`${restaurantUrl}/settings`);
   await expect(hallCard.locator('.photo-badge')).toHaveText('Основная');
 
-  // 7-8. Открыть публичную карточку ресторана и проверить галерею.
-  const publicListRes = await page.request.get(`${API_BASE_URL}/api/restaurants`);
-  // Ресторан ещё не опубликован — публичный список его не содержит, но
-  // primary_photo/gallery уже можно проверить напрямую по restaurantId.
-  expect(publicListRes.status()).toBe(200);
-
+  // 6-7. Опубликовать/открыть, проверить публичную карточку ресторана и галерею.
   await page.goto(restaurantUrl);
   await page.getByRole('button', { name: 'Опубликовать' }).click();
 
@@ -122,12 +116,11 @@ test('YAAM HQ: полный цикл медиа-системы — фото ре
   let publicOne = await (await page.request.get(`${API_BASE_URL}/api/restaurants/${restaurantId}`)).json();
   expect(publicOne.primary_photo.alt).toBe('Зал ресторана');
   expect(publicOne.gallery).toHaveLength(3);
-  expect(publicOne.gallery.map((p: { alt: string }) => p.alt)).toEqual(['Терраса', 'Фасад ресторана', 'Зал ресторана']);
-  for (const key of ['storage_key', 'archived_at', 'bucket']) {
+  for (const key of ['storage_key', 'master', 'bucket']) {
     expect(JSON.stringify(publicOne)).not.toContain(key);
   }
 
-  // 9. Создать категорию + блюдо (через HQ, реальное, не временное для открытия).
+  // 8. Создать категорию + блюдо (через HQ, реальное, не временное для открытия).
   await page.goto(`${restaurantUrl}/menu`);
   await page.locator('input[name="name"]').first().fill('Основное меню');
   await page.getByRole('button', { name: '+ Добавить категорию' }).click();
@@ -148,75 +141,80 @@ test('YAAM HQ: полный цикл медиа-системы — фото ре
     const filePath = path.join(tmpDir, `dish-${alt.replace(/\s+/g, '_')}.jpg`);
     await generateTestJpeg(filePath, { color });
     await page.locator('input[type="file"][name="photo"]').setInputFiles(filePath);
-    await page.locator(".photo-upload input[name=\"alt_text\"]").fill(alt);
+    await page.locator('.photo-upload input[name="alt_text"]').fill(alt);
     await page.getByRole('button', { name: 'Загрузить' }).click();
     await expect(page).toHaveURL(itemUrl);
   }
 
-  // 10. Загрузить 3 фотографии блюда.
+  // 9. Загрузить 3 фотографии блюда.
   await uploadDishPhoto('Хинкали крупным планом', { r: 210, g: 150, b: 40 });
   await uploadDishPhoto('Хинкали на тарелке', { r: 90, g: 40, b: 20 });
   await uploadDishPhoto('Соус к хинкали', { r: 20, g: 130, b: 90 });
   await expect(page.locator('.photo-card')).toHaveCount(3);
 
-  // 11. Выбрать основную фотографию блюда («Хинкали на тарелке»).
+  // 10. Выбрать основную фотографию блюда («Хинкали на тарелке»).
   const plateCard = page.locator('.photo-card').filter({ has: page.locator('img[alt="Хинкали на тарелке"]') });
   await plateCard.getByRole('button', { name: 'Сделать основной' }).click();
   await expect(page).toHaveURL(itemUrl);
   await expect(plateCard.locator('.photo-badge')).toHaveText('Основная');
 
-  // 12-13. Открыть публичную карточку блюда и проверить галерею.
+  // 11-12. Публичная карточка блюда и галерея.
   publicOne = await (await page.request.get(`${API_BASE_URL}/api/restaurants/${restaurantId}`)).json();
   const dish = publicOne.menu.find((c: { name: string }) => c.name === 'Основное меню').items.find((i: { name: string }) => i.name === 'Хинкали с бараниной');
   expect(dish.primary_photo.alt).toBe('Хинкали на тарелке');
   expect(dish.gallery).toHaveLength(3);
 
-  // 14. Архивировать основную фотографию блюда.
+  // 13. Удалить основную фотографию блюда — НЕОБРАТИМО (Stage 5B.1: нет
+  // архивирования, только permanent delete с confirm()).
   await page.goto(itemUrl);
+  page.once('dialog', (dialog) => dialog.accept());
   const activePlateCard = page.locator('.photo-card').filter({ has: page.locator('img[alt="Хинкали на тарелке"]') });
-  await activePlateCard.getByRole('button', { name: 'Архивировать' }).click();
+  await activePlateCard.getByRole('button', { name: 'Удалить' }).click();
   await expect(page).toHaveURL(itemUrl);
-  await expect(page.locator('.photo-card:not(.archived)')).toHaveCount(2);
+  await expect(page.locator('.photo-card')).toHaveCount(2);
+  await expect(page.getByText('Хинкали на тарелке')).toHaveCount(0);
 
-  // 15. Подтвердить, что fallback на публичном API подхватывает следующую
-  // активную фотографию (первую по sort_order), а не падает/показывает null.
+  // 14. Подтвердить, что публичный API авто-перенёс primary на оставшуюся
+  // фотографию (не null, не падает).
   publicOne = await (await page.request.get(`${API_BASE_URL}/api/restaurants/${restaurantId}`)).json();
-  const dishAfterArchive = publicOne.menu.find((c: { name: string }) => c.name === 'Основное меню').items.find((i: { name: string }) => i.name === 'Хинкали с бараниной');
-  expect(dishAfterArchive.primary_photo).not.toBeNull();
-  expect(dishAfterArchive.primary_photo.alt).not.toBe('Хинкали на тарелке');
-  expect(['Хинкали крупным планом', 'Соус к хинкали']).toContain(dishAfterArchive.primary_photo.alt);
-  expect(dishAfterArchive.gallery).toHaveLength(2);
+  const dishAfterDelete = publicOne.menu.find((c: { name: string }) => c.name === 'Основное меню').items.find((i: { name: string }) => i.name === 'Хинкали с бараниной');
+  expect(dishAfterDelete.primary_photo).not.toBeNull();
+  expect(dishAfterDelete.primary_photo.alt).not.toBe('Хинкали на тарелке');
+  expect(['Хинкали крупным планом', 'Соус к хинкали']).toContain(dishAfterDelete.primary_photo.alt);
+  expect(dishAfterDelete.gallery).toHaveLength(2);
 
-  // 16. Восстановить архивированную фотографию.
-  await page.locator('details.photo-archived summary').click();
-  await page.locator('.photo-card.archived').filter({ has: page.locator('img[alt="Хинкали на тарелке"]') }).getByRole('button', { name: 'Восстановить' }).click();
-  await expect(page).toHaveURL(itemUrl);
-  await expect(page.locator('.photo-card:not(.archived)')).toHaveCount(3);
-
-  // 17. Проверить audit log — все 10 событий медиа-системы реально записаны.
+  // 15. Проверить audit log — все 6 событий медиа-системы (Stage 5B.1).
   const auditRows = await db.query('SELECT action FROM hq_audit_log WHERE restaurant_id = $1 ORDER BY id', [restaurantId]);
   const actions = auditRows.map((r: { action: string }) => r.action);
   const expectedActions = [
-    'restaurant_photo_uploaded', 'restaurant_photo_primary_changed', 'restaurant_photo_moved',
-    'menu_item_photo_uploaded', 'menu_item_photo_primary_changed', 'menu_item_photo_archived', 'menu_item_photo_restored',
+    'restaurant_photo_uploaded', 'restaurant_photo_primary_changed',
+    'menu_item_photo_uploaded', 'menu_item_photo_primary_changed', 'menu_item_photo_deleted',
   ];
   for (const action of expectedActions) {
     expect(actions).toContain(action);
   }
+  expect(actions).not.toContain('restaurant_photo_moved');
+  expect(actions).not.toContain('restaurant_photo_archived');
+  expect(actions).not.toContain('menu_item_photo_archived');
 
-  // 18. Подтвердить, что физические файлы реально существуют в известном
-  // временном каталоге LocalMediaProvider (не пустой, файлов не меньше, чем
-  // активных фотографий × 3 варианта) — сам каталог целиком удаляется и
-  // проверяется в globalTeardown (e2e/global-setup.ts) ПОСЛЕ завершения
-  // всего прогона; здесь же подтверждаем, что во время теста в нём нет
-  // orphan-объектов сверх того, что реально отражено в БД.
+  // 16. Подтвердить необратимость на уровне БД (ровно 2 строки блюда, ровно
+  // 3 строки ресторана — удалённая физически отсутствует, не архивирована).
   const dbPhotoCountRows = await db.query(
     `SELECT
        (SELECT COUNT(*)::int FROM restaurant_photos WHERE restaurant_id = $1) AS restaurant_photos,
        (SELECT COUNT(*)::int FROM menu_item_photos WHERE menu_item_id = $2) AS dish_photos`,
     [restaurantId, itemId],
   );
-  const expectedFileCount = (dbPhotoCountRows[0].restaurant_photos + dbPhotoCountRows[0].dish_photos) * 3; // thumb+card+full
+  expect(dbPhotoCountRows[0].restaurant_photos).toBe(3);
+  expect(dbPhotoCountRows[0].dish_photos).toBe(2);
+
+  // 17. Подтвердить, что физические файлы реально существуют в известном
+  // временном каталоге LocalMediaProvider для ВСЕХ оставшихся фотографий (4
+  // варианта каждая: thumb/card/full/master — Stage 5B.1) — сам каталог
+  // целиком удаляется и проверяется в globalTeardown (e2e/global-setup.ts)
+  // ПОСЛЕ завершения всего прогона; здесь же подтверждаем отсутствие
+  // orphan-объектов сверх того, что реально отражено в БД.
+  const expectedFileCount = (dbPhotoCountRows[0].restaurant_photos + dbPhotoCountRows[0].dish_photos) * 4; // thumb+card+full+master
   const actualFileCount = countFilesRecursive(MEDIA_LOCAL_DIR!);
   expect(actualFileCount).toBeGreaterThanOrEqual(expectedFileCount);
 

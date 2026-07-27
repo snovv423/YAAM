@@ -1,53 +1,51 @@
 'use strict';
 
-// YAAM HQ Stage 5B — CRUD фотографий ресторанов и блюд (задание, разделы
-// 3-4, 6-7, 11). Единственное место в кодовой базе, которое пишет в таблицы
-// restaurant_photos/menu_item_photos И одновременно вызывает media provider
-// (upload()/delete()) — тот же принцип "один сервис = единственный источник
-// SQL для своего раздела", что и menuAdminService.js/restaurantAdminService.js.
+// YAAM HQ Stage 5B/5B.1 — CRUD фотографий ресторанов и блюд. Единственное
+// место в кодовой базе, которое пишет в таблицы restaurant_photos/
+// menu_item_photos И одновременно вызывает media provider (upload()/
+// delete()) — тот же принцип "один сервис = единственный источник SQL для
+// своего раздела", что и menuAdminService.js/restaurantAdminService.js.
 //
 // provider (LocalMediaProvider | S3MediaProvider) передаётся явным
 // параметром в каждую функцию, которая реально трогает хранилище — не
 // импортируется здесь как singleton, чтобы:
 //   1) unit/integration-тесты могли передать LocalMediaProvider с временным
-//      каталогом, не трогая ничего внешнего (задание, раздел 17);
+//      каталогом, не трогая ничего внешнего;
 //   2) app-слой (server.postgresql.js) сам решал, монтировать ли медиа-
 //      функциональность вовсе (fail-closed при неполном S3-конфиге —
 //      см. services/hq/media/provider.js).
 //
-// Архивирование/восстановление — как и restaurants.archived_at/
-// menu_items.archived_at — НИКОГДА не удаляет строку физически (задание,
-// раздел 3: "archiving instead of physical row deletion") и НЕ трогает
-// объект в хранилище: восстановление обязано мгновенно вернуть точно ту же
-// фотографию, без повторной загрузки. Единственное место, где эта служба
-// реально удаляет объекты из хранилища — компенсация при неудачной
-// транзакции ПОСЛЕ уже успешной загрузки (задание, раздел 11: "no orphan
-// objects"), не пользовательское действие.
+// Stage 5B.1 — фотографиям не нужен lifecycle ресторана/блюда (задание,
+// раздел 0): убраны ручной reorder, архивирование, восстановление. Удаление
+// фотографии — РЕАЛЬНОЕ: строка физически удаляется из БД, а все варианты
+// (включая непубличный master) — из хранилища. Это сознательное отличие от
+// restaurants.archived_at/menu_items.archived_at (там DELETE запрещён
+// навсегда из-за order_items/audit-истории) — у фотографии такой
+// зависимости нет.
 const crypto = require('node:crypto');
 const db = require('../../../db/postgresql');
 const { ValidationError } = require('../restaurantLifecycle');
 const menuSvc = require('../menuAdminService');
-const { processImage, VARIANTS } = require('./imagePipeline');
+const { processImage, VARIANTS, PUBLIC_VARIANT_NAMES } = require('./imagePipeline');
 
 const ALT_TEXT_MAX = 200;
-// Разумный верхний предел количества АКТИВНЫХ фотографий на одного владельца
-// (задание, раздел 5: "a cap on photo count per restaurant/dish") — защита
-// от абсурдного объёма, не бизнес-ограничение; архивированные фотографии в
-// счётчик не входят.
+// Разумный верхний предел количества фотографий на одного владельца —
+// защита от абсурдного объёма, не бизнес-ограничение.
 const MAX_PHOTOS_PER_OWNER = 20;
 
-const VARIANT_NAMES = Object.keys(VARIANTS); // ['thumb', 'card', 'full']
+const ALL_VARIANT_NAMES = Object.keys(VARIANTS); // ['thumb', 'card', 'full', 'master']
 
 function variantObjectKey(storageKeyBase, variant) {
   return `${storageKeyBase}-${variant}.webp`;
 }
 
 // Публичные URL фотографии — всегда ВЫВОДЯТСЯ из storage_key через активный
-// провайдер, никогда не хранятся в БД (задание, раздел 3/4 — устойчивость к
-// смене домена/провайдера в будущем без миграции данных).
+// провайдер, никогда не хранятся в БД. Только публичные варианты (thumb/
+// card/full) — master никогда не покидает сервер (задание: "master/original
+// for possible future re-generation", не для показа клиенту).
 function photoVariantUrls(provider, photo) {
   const urls = {};
-  for (const variant of VARIANT_NAMES) {
+  for (const variant of PUBLIC_VARIANT_NAMES) {
     urls[variant] = provider.getPublicUrl(variantObjectKey(photo.storage_key, variant));
   }
   return urls;
@@ -62,15 +60,16 @@ function normalizeAltText(value) {
 }
 
 async function deleteAllVariants(provider, storageKeyBase) {
-  for (const variant of VARIANT_NAMES) {
+  for (const variant of ALL_VARIANT_NAMES) {
     try {
       await provider.delete(variantObjectKey(storageKeyBase, variant));
     } catch (err) {
-      // Компенсация — best-effort. Если удаление одного варианта не
-      // удалось, продолжаем удалять остальные и логируем, а не бросаем:
-      // вызывающий код уже находится в error-path (либо DB-транзакция
-      // упала, либо это ручная архивация), падать вторично здесь означало
-      // бы потерять исходную причину ошибки.
+      // Best-effort. Если удаление одного варианта не удалось, продолжаем
+      // удалять остальные и логируем, а не бросаем — вызывающий код уже
+      // либо в error-path (загрузка/транзакция упала), либо это финальный
+      // шаг уже успешного удаления строки из БД (падать здесь означало бы
+      // либо потерять исходную причину ошибки, либо оставить пользователя
+      // с "удалено, но 500" при том, что данные уже честно удалены).
       console.error(`[photoService] не удалось удалить объект ${variant} (${storageKeyBase}):`, err.message);
     }
   }
@@ -84,12 +83,9 @@ async function deleteAllVariants(provider, storageKeyBase) {
 const RESTAURANT_CONFIG = { table: 'restaurant_photos', ownerColumn: 'restaurant_id', keyPrefix: 'restaurants' };
 const MENU_ITEM_CONFIG = { table: 'menu_item_photos', ownerColumn: 'menu_item_id', keyPrefix: 'menu-items' };
 
-async function listPhotos(config, ownerId, { includeArchived = false } = {}) {
-  const where = includeArchived
-    ? `${config.ownerColumn} = $1`
-    : `${config.ownerColumn} = $1 AND archived_at IS NULL`;
+async function listPhotos(config, ownerId) {
   return db.query(
-    `SELECT * FROM ${config.table} WHERE ${where} ORDER BY archived_at NULLS FIRST, sort_order, id`,
+    `SELECT * FROM ${config.table} WHERE ${config.ownerColumn} = $1 ORDER BY sort_order, id`,
     [ownerId],
   );
 }
@@ -104,37 +100,36 @@ async function getPhotoById(config, ownerId, photoId) {
   return rows[0] || null;
 }
 
-// Из активных фотографий владельца выбирает primary; если primary нет (была
-// архивирована) — первую активную по sort_order (задание, раздел 6: "if no
-// primary, use the first active photo"). Работает как на живых строках из
-// БД, так и на уже отфильтрованном active-списке — принимает ТОЛЬКО активные
-// фотографии (archived_at IS NULL), сортированные по sort_order.
-function resolvePrimaryPhoto(activePhotos) {
-  if (!activePhotos.length) return null;
-  return activePhotos.find((p) => p.is_primary === 1) || activePhotos[0];
+// Выбирает primary среди фотографий владельца; если ни одна не помечена
+// (не должно происходить в норме — deletePhoto ниже сразу переназначает
+// primary при удалении текущей — оставлено как defense-in-depth для
+// публичного DTO) — первую по sort_order.
+function resolvePrimaryPhoto(photos) {
+  if (!photos.length) return null;
+  return photos.find((p) => p.is_primary === 1) || photos[0];
 }
 
 async function uploadPhoto(config, provider, ownerId, buffer, altTextRaw) {
   const altText = normalizeAltText(altTextRaw);
 
-  const activeCountRows = await db.query(
-    `SELECT COUNT(*)::int AS n FROM ${config.table} WHERE ${config.ownerColumn} = $1 AND archived_at IS NULL`,
+  const countRows = await db.query(
+    `SELECT COUNT(*)::int AS n FROM ${config.table} WHERE ${config.ownerColumn} = $1`,
     [ownerId],
   );
-  if (activeCountRows[0].n >= MAX_PHOTOS_PER_OWNER) {
-    throw new ValidationError(`Достигнут предел ${MAX_PHOTOS_PER_OWNER} фотографий — сначала архивируйте лишние.`);
+  if (countRows[0].n >= MAX_PHOTOS_PER_OWNER) {
+    throw new ValidationError(`Достигнут предел ${MAX_PHOTOS_PER_OWNER} фотографий — сначала удалите лишние.`);
   }
 
   // Валидация/обработка (сигнатура, размер, decompression bomb, EXIF,
-  // ресайз в WebP-варианты) — ПОЛНОСТЬЮ до того, как хранилище или БД вообще
-  // узнают о загрузке (задание, раздел 5/11).
+  // ресайз в WebP-варианты, включая непубличный master) — ПОЛНОСТЬЮ до
+  // того, как хранилище или БД вообще узнают о загрузке.
   const processed = await processImage(buffer);
 
   const storageKeyBase = `${config.keyPrefix}/${ownerId}/${crypto.randomUUID()}`;
 
   const uploaded = [];
   try {
-    for (const variant of VARIANT_NAMES) {
+    for (const variant of ALL_VARIANT_NAMES) {
       const key = variantObjectKey(storageKeyBase, variant);
       await provider.upload(key, processed.variants[variant].buffer, 'image/webp');
       uploaded.push(key);
@@ -142,7 +137,7 @@ async function uploadPhoto(config, provider, ownerId, buffer, altTextRaw) {
   } catch (err) {
     // Загрузка хотя бы одного варианта не удалась — подчищаем уже
     // загруженные, чтобы не оставить частично загруженный "фантомный"
-    // объект без записи в БД (задание, раздел 11: "interrupted upload").
+    // объект без записи в БД.
     for (const key of uploaded) {
       try {
         await provider.delete(key);
@@ -156,8 +151,7 @@ async function uploadPhoto(config, provider, ownerId, buffer, altTextRaw) {
   try {
     return await db.transaction(async (client) => {
       const existingPrimary = await db.query(
-        `SELECT COUNT(*)::int AS n FROM ${config.table}
-         WHERE ${config.ownerColumn} = $1 AND is_primary = 1 AND archived_at IS NULL`,
+        `SELECT COUNT(*)::int AS n FROM ${config.table} WHERE ${config.ownerColumn} = $1 AND is_primary = 1`,
         [ownerId],
         client,
       );
@@ -177,9 +171,7 @@ async function uploadPhoto(config, provider, ownerId, buffer, altTextRaw) {
     });
   } catch (err) {
     // DB-транзакция не удалась ПОСЛЕ успешной загрузки в хранилище —
-    // компенсирующее удаление всех трёх вариантов (задание, раздел 11:
-    // "storage upload succeeds but the DB insert fails -> the object must
-    // be deleted as a compensating action").
+    // компенсирующее удаление всех вариантов (no orphan objects).
     await deleteAllVariants(provider, storageKeyBase);
     throw err;
   }
@@ -188,13 +180,12 @@ async function uploadPhoto(config, provider, ownerId, buffer, altTextRaw) {
 async function setPrimary(config, ownerId, photoId) {
   const photo = await getPhotoById(config, ownerId, photoId);
   if (!photo) return null;
-  if (photo.archived_at) throw new ValidationError('Архивированную фотографию нельзя сделать основной.');
   if (photo.is_primary === 1) return photo; // уже основная — не ошибка
 
   return db.transaction(async (client) => {
     await db.execute(
       `UPDATE ${config.table} SET is_primary = 0, updated_at = NOW()
-       WHERE ${config.ownerColumn} = $1 AND is_primary = 1 AND archived_at IS NULL`,
+       WHERE ${config.ownerColumn} = $1 AND is_primary = 1`,
       [ownerId],
       client,
     );
@@ -207,32 +198,6 @@ async function setPrimary(config, ownerId, photoId) {
   });
 }
 
-// Атомарный SWAP sort_order с соседней активной фотографией — тот же
-// принцип, что moveCategory/moveMenuItem (menuAdminService.js).
-async function movePhoto(config, ownerId, photoId, direction) {
-  const photo = await getPhotoById(config, ownerId, photoId);
-  if (!photo) return null;
-  if (photo.archived_at) throw new ValidationError('Архивированную фотографию нельзя перемещать.');
-  const comparator = direction === 'up' ? '<' : '>';
-  const order = direction === 'up' ? 'DESC' : 'ASC';
-  return db.transaction(async (client) => {
-    const neighborRows = await db.query(
-      `SELECT * FROM ${config.table}
-       WHERE ${config.ownerColumn} = $1 AND archived_at IS NULL AND id != $2
-         AND sort_order ${comparator} $3
-       ORDER BY sort_order ${order}, id ${order}
-       LIMIT 1`,
-      [ownerId, photoId, photo.sort_order],
-      client,
-    );
-    const neighbor = neighborRows[0];
-    if (!neighbor) return photo; // уже крайняя — нечего делать, не ошибка
-    await db.execute(`UPDATE ${config.table} SET sort_order = $1, updated_at = NOW() WHERE id = $2`, [neighbor.sort_order, photo.id], client);
-    await db.execute(`UPDATE ${config.table} SET sort_order = $1, updated_at = NOW() WHERE id = $2`, [photo.sort_order, neighbor.id], client);
-    return { ...photo, sort_order: neighbor.sort_order };
-  });
-}
-
 async function updateAltText(config, ownerId, photoId, altTextRaw) {
   const altText = normalizeAltText(altTextRaw);
   const updated = await db.execute(
@@ -242,69 +207,60 @@ async function updateAltText(config, ownerId, photoId, altTextRaw) {
   return updated.rows[0] || null;
 }
 
-async function archivePhoto(config, ownerId, photoId) {
+// Удаление — необратимо (задание Stage 5B.1: "Permanent Photo Deletion").
+// Порядок: сначала DELETE строки в транзакции (с авто-переносом primary на
+// следующую по sort_order фотографию, если удалялась именно основная —
+// владельцу не нужно вручную выбирать новую основную после удаления), и
+// только ПОСЛЕ успешного commit — удаление объектов из хранилища. Такой
+// порядок гарантирует: если удаление из хранилища не удастся, в системе
+// останется max нежелательный orphan-объект в хранилище (безопасно,
+// логируется), а не БД-строка, указывающая на уже несуществующий файл.
+async function deletePhoto(config, ownerId, photoId, provider) {
   const photo = await getPhotoById(config, ownerId, photoId);
   if (!photo) return null;
-  if (photo.archived_at) throw new ValidationError('Фотография уже архивирована.');
-  const updated = await db.execute(
-    `UPDATE ${config.table} SET archived_at = NOW(), updated_at = NOW() WHERE id = $1 RETURNING *`,
-    [photo.id],
-  );
-  return updated.rows[0] || null;
-}
 
-// Восстановление обязано мгновенно вернуть фотографию БЕЗ повторной
-// загрузки (storage не трогается). is_primary у архивированной строки мог
-// сохраниться с момента архивации — если к моменту восстановления у
-// владельца уже есть ДРУГАЯ активная primary-фотография, восстановленная
-// строка не может стать второй primary (partial unique index это бы и не
-// позволил) — снимаем флаг явно, владелец при необходимости выберет
-// primary заново одним кликом.
-async function restorePhoto(config, ownerId, photoId) {
-  const photo = await getPhotoById(config, ownerId, photoId);
-  if (!photo) return null;
-  if (!photo.archived_at) throw new ValidationError('Фотография не архивирована.');
-
-  return db.transaction(async (client) => {
-    let becomesPrimary = photo.is_primary === 1;
-    if (becomesPrimary) {
-      const existingPrimary = await db.query(
-        `SELECT COUNT(*)::int AS n FROM ${config.table}
-         WHERE ${config.ownerColumn} = $1 AND is_primary = 1 AND archived_at IS NULL`,
+  const deleted = await db.transaction(async (client) => {
+    const result = await db.execute(
+      `DELETE FROM ${config.table} WHERE id = $1 AND ${config.ownerColumn} = $2 RETURNING *`,
+      [photo.id, ownerId],
+      client,
+    );
+    const row = result.rows[0];
+    if (row && row.is_primary === 1) {
+      await db.execute(
+        `UPDATE ${config.table} SET is_primary = 1, updated_at = NOW()
+         WHERE id = (SELECT id FROM ${config.table} WHERE ${config.ownerColumn} = $1 ORDER BY sort_order, id LIMIT 1)`,
         [ownerId],
         client,
       );
-      if (existingPrimary[0].n > 0) becomesPrimary = false;
     }
-    const updated = await db.execute(
-      `UPDATE ${config.table} SET archived_at = NULL, is_primary = $1, updated_at = NOW() WHERE id = $2 RETURNING *`,
-      [becomesPrimary ? 1 : 0, photo.id],
-      client,
-    );
-    return updated.rows[0];
+    return row;
   });
+
+  if (deleted) {
+    await deleteAllVariants(provider, deleted.storage_key);
+  }
+  return deleted;
 }
 
 // ---------------------------------------------------------------------------
 // Публичные обёртки — рестораны
 // ---------------------------------------------------------------------------
 
-const listRestaurantPhotos = (restaurantId, opts) => listPhotos(RESTAURANT_CONFIG, restaurantId, opts);
+const listRestaurantPhotos = (restaurantId) => listPhotos(RESTAURANT_CONFIG, restaurantId);
 const getRestaurantPhotoById = (restaurantId, photoId) => getPhotoById(RESTAURANT_CONFIG, restaurantId, photoId);
 const uploadRestaurantPhoto = (provider, restaurantId, buffer, altText) =>
   uploadPhoto(RESTAURANT_CONFIG, provider, restaurantId, buffer, altText);
 const setRestaurantPhotoPrimary = (restaurantId, photoId) => setPrimary(RESTAURANT_CONFIG, restaurantId, photoId);
-const moveRestaurantPhoto = (restaurantId, photoId, direction) => movePhoto(RESTAURANT_CONFIG, restaurantId, photoId, direction);
 const updateRestaurantPhotoAlt = (restaurantId, photoId, altText) => updateAltText(RESTAURANT_CONFIG, restaurantId, photoId, altText);
-const archiveRestaurantPhoto = (restaurantId, photoId) => archivePhoto(RESTAURANT_CONFIG, restaurantId, photoId);
-const restoreRestaurantPhoto = (restaurantId, photoId) => restorePhoto(RESTAURANT_CONFIG, restaurantId, photoId);
+const deleteRestaurantPhoto = (restaurantId, photoId, provider) => deletePhoto(RESTAURANT_CONFIG, restaurantId, photoId, provider);
 
 // ---------------------------------------------------------------------------
 // Публичные обёртки — блюда. menuItemId ДОЛЖЕН реально принадлежать
 // restaurantId — тот же принцип, что assertCategoryBelongsToRestaurant в
-// menuAdminService.js (задание, раздел 11: ownership checks), поэтому все
-// обёртки блюда принимают restaurantId первым аргументом и проверяют его
-// через menuSvc.getMenuItemById (уже фильтрует по restaurant_id).
+// menuAdminService.js (ownership checks), поэтому все обёртки блюда
+// принимают restaurantId первым аргументом и проверяют его через
+// menuSvc.getMenuItemById (уже фильтрует по restaurant_id).
 // ---------------------------------------------------------------------------
 
 async function assertMenuItemOwnership(restaurantId, menuItemId) {
@@ -313,9 +269,9 @@ async function assertMenuItemOwnership(restaurantId, menuItemId) {
   return item;
 }
 
-async function listMenuItemPhotos(restaurantId, menuItemId, opts) {
+async function listMenuItemPhotos(restaurantId, menuItemId) {
   await assertMenuItemOwnership(restaurantId, menuItemId);
-  return listPhotos(MENU_ITEM_CONFIG, menuItemId, opts);
+  return listPhotos(MENU_ITEM_CONFIG, menuItemId);
 }
 
 async function getMenuItemPhotoById(restaurantId, menuItemId, photoId) {
@@ -333,24 +289,14 @@ async function setMenuItemPhotoPrimary(restaurantId, menuItemId, photoId) {
   return setPrimary(MENU_ITEM_CONFIG, menuItemId, photoId);
 }
 
-async function moveMenuItemPhoto(restaurantId, menuItemId, photoId, direction) {
-  await assertMenuItemOwnership(restaurantId, menuItemId);
-  return movePhoto(MENU_ITEM_CONFIG, menuItemId, photoId, direction);
-}
-
 async function updateMenuItemPhotoAlt(restaurantId, menuItemId, photoId, altText) {
   await assertMenuItemOwnership(restaurantId, menuItemId);
   return updateAltText(MENU_ITEM_CONFIG, menuItemId, photoId, altText);
 }
 
-async function archiveMenuItemPhoto(restaurantId, menuItemId, photoId) {
+async function deleteMenuItemPhoto(restaurantId, menuItemId, photoId, provider) {
   await assertMenuItemOwnership(restaurantId, menuItemId);
-  return archivePhoto(MENU_ITEM_CONFIG, menuItemId, photoId);
-}
-
-async function restoreMenuItemPhoto(restaurantId, menuItemId, photoId) {
-  await assertMenuItemOwnership(restaurantId, menuItemId);
-  return restorePhoto(MENU_ITEM_CONFIG, menuItemId, photoId);
+  return deletePhoto(MENU_ITEM_CONFIG, menuItemId, photoId, provider);
 }
 
 module.exports = {
@@ -365,17 +311,13 @@ module.exports = {
   getRestaurantPhotoById,
   uploadRestaurantPhoto,
   setRestaurantPhotoPrimary,
-  moveRestaurantPhoto,
   updateRestaurantPhotoAlt,
-  archiveRestaurantPhoto,
-  restoreRestaurantPhoto,
+  deleteRestaurantPhoto,
   // блюда
   listMenuItemPhotos,
   getMenuItemPhotoById,
   uploadMenuItemPhoto,
   setMenuItemPhotoPrimary,
-  moveMenuItemPhoto,
   updateMenuItemPhotoAlt,
-  archiveMenuItemPhoto,
-  restoreMenuItemPhoto,
+  deleteMenuItemPhoto,
 };
