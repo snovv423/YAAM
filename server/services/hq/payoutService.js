@@ -228,7 +228,15 @@ async function requireAttemptForUpdate(attemptId, client) {
 // комментарий у payout_attempt_requisites.recipient_kpp, за полным
 // обоснованием, почему трансформация не отложена до mapper'а).
 async function buildAndInsertAttemptRequisites(client, payout, attemptId) {
-  const yaamDetails = await yaamBankDetailsService.getYaamBankDetails();
+  // Stage 9.8 (аудит Stage 9.7, находка F1): ВСЕ три чтения ниже теперь
+  // явно передают `client` — до этого исправления они уходили на ОТДЕЛЬНЫЕ
+  // соединения из пула (getYaamBankDetails/getBankDetails/getContract не
+  // принимали client вообще), что означало два одновременно занятых
+  // соединения пула на один createPayoutAttempt() и разрыв единой границы
+  // транзакции для этих чтений. Теперь все чтения этой функции происходят
+  // строго на клиенте ОДНОЙ транзакции createPayoutAttempt — как и
+  // settlement_periods-чтение ниже, которое всегда было корректным.
+  const yaamDetails = await yaamBankDetailsService.getYaamBankDetails(client);
   if (!yaamDetails) {
     throw new ValidationError('Реквизиты YAAM не заполнены — создать попытку нельзя.');
   }
@@ -236,7 +244,7 @@ async function buildAndInsertAttemptRequisites(client, payout, attemptId) {
     throw new ValidationError('Реквизиты YAAM некорректны — создать попытку нельзя.');
   }
 
-  const restaurantDetails = await restaurantBankDetailsService.getBankDetails(payout.restaurant_id);
+  const restaurantDetails = await restaurantBankDetailsService.getBankDetails(payout.restaurant_id, client);
   if (!restaurantDetails) {
     throw new ValidationError('Банковские реквизиты ресторана не заполнены — создать попытку нельзя.');
   }
@@ -244,7 +252,7 @@ async function buildAndInsertAttemptRequisites(client, payout, attemptId) {
     throw new ValidationError('Банковские реквизиты ресторана некорректны — создать попытку нельзя.');
   }
 
-  const contract = await restaurantContractService.getContract(payout.restaurant_id);
+  const contract = await restaurantContractService.getContract(payout.restaurant_id, client);
   if (!contract || contract.status !== 'signed') {
     throw new ValidationError('Договор с рестораном не подписан — создать попытку нельзя.');
   }
@@ -677,6 +685,24 @@ async function checkPayoutInvariants() {
   // единственная цель — обнаружить порчу данных В ОБХОД сервисного слоя
   // (прямой SQL, ручное вмешательство, будущий баг).
   // -------------------------------------------------------------------------
+
+  // Stage 9.8 (аудит Stage 9.7, находка F7): processing БЕЗ processing_at —
+  // обязательство утверждает "попытка сейчас в обработке с такого-то
+  // момента", но сам момент не записан. Схема больше не требует этого
+  // жёстко (Stage 9.5 сознательно ослабила старый строгий Stage 9 CHECK,
+  // см. комментарий у restaurant_payouts_status_completed_at_check) — но
+  // при нормальной работе сервисного слоя processing_at ВСЕГДА
+  // проставляется атомарно с переходом в processing (markAttemptSubmitting:
+  // transitionPayoutStatus(..., ', processing_at = NOW()')), поэтому
+  // отсутствие processing_at при processing достижимо только в обход
+  // сервисного слоя (прямой SQL) — та же цель, что и у остальных проверок
+  // этого раздела.
+  const processingWithoutProcessingAt = await db.query(
+    "SELECT id FROM restaurant_payouts WHERE status = 'processing' AND processing_at IS NULL",
+  );
+  if (processingWithoutProcessingAt.length > 0) {
+    violations.push({ kind: 'processing_without_processing_at', count: processingWithoutProcessingAt.length });
+  }
 
   // processing БЕЗ единой активной попытки — обязательство утверждает, что
   // "попытка сейчас отправляется/обрабатывается", но в payout_attempts нет

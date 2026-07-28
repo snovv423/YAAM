@@ -98,6 +98,10 @@ const EXPECTED_FUNCTIONS = [
   // YAAM HQ Stage 9.6 — безусловная immutability на payout_attempt_requisites
   // (одна функция обслуживает и UPDATE-, и DELETE-триггер — см. schema.sql).
   'fn_payout_attempt_requisites_immutable',
+  // YAAM HQ Stage 9.8 (аудит Stage 9.7, находка F2) — amount неизменяем с
+  // момента создания restaurant_payouts, отдельная функция/триггер, не
+  // встроено в fn_restaurant_payouts_valid_transition.
+  'fn_restaurant_payouts_amount_immutable',
 ];
 
 // event — массив (не строка): некоторые Stage 8 триггеры объявлены как
@@ -123,6 +127,7 @@ const EXPECTED_TRIGGERS = {
   trg_payout_attempts_block_delete_after_terminal: ['DELETE'],
   trg_payout_attempt_requisites_block_update: ['UPDATE'],
   trg_payout_attempt_requisites_block_delete: ['DELETE'],
+  trg_restaurant_payouts_amount_immutable: ['UPDATE'],
 };
 
 // hq_owner НЕ входит: его id — фиксированная константа (DEFAULT 1 CHECK
@@ -219,7 +224,7 @@ async function runSchemaAndInspect(t, databaseName) {
       assert.equal(partialUniqueCount, 7, 'ожидали ровно 7 partial UNIQUE индексов');
     });
 
-    await t.test('создаются 13 PL/pgSQL-функций', async () => {
+    await t.test('создаются 14 PL/pgSQL-функций', async () => {
       const { rows } = await client.query(`
         SELECT routine_name, external_language
         FROM information_schema.routines
@@ -233,7 +238,7 @@ async function runSchemaAndInspect(t, databaseName) {
       }
     });
 
-    await t.test('создаются 16 триггеров (refunds + Stage 8 settlement-immutability + Stage 9/9.5/9.6 payout state machine) с ожидаемыми событиями', async () => {
+    await t.test('создаются 17 триггеров (refunds + Stage 8 settlement-immutability + Stage 9/9.5/9.6/9.8 payout state machine) с ожидаемыми событиями', async () => {
       const { rows } = await client.query(`
         SELECT trigger_name, event_manipulation, event_object_table
         FROM information_schema.triggers
@@ -251,7 +256,7 @@ async function runSchemaAndInspect(t, databaseName) {
         eventsByName.get(r.trigger_name).add(r.event_manipulation);
         tableByName.set(r.trigger_name, r.event_object_table);
       }
-      assert.equal(eventsByName.size, 16, `ожидали 16 различных триггеров, получили: ${[...eventsByName.keys()].join(', ')}`);
+      assert.equal(eventsByName.size, 17, `ожидали 17 различных триггеров, получили: ${[...eventsByName.keys()].join(', ')}`);
 
       const EXPECTED_TABLE_BY_TRIGGER = {
         trg_refunds_amount_matches_payment: 'refunds',
@@ -265,6 +270,7 @@ async function runSchemaAndInspect(t, databaseName) {
         trg_restaurant_payouts_valid_transition: 'restaurant_payouts',
         trg_restaurant_payouts_block_update_after_terminal: 'restaurant_payouts',
         trg_restaurant_payouts_block_delete_after_terminal: 'restaurant_payouts',
+        trg_restaurant_payouts_amount_immutable: 'restaurant_payouts',
         trg_payout_attempts_valid_transition: 'payout_attempts',
         trg_payout_attempts_block_update_after_terminal: 'payout_attempts',
         trg_payout_attempts_block_delete_after_terminal: 'payout_attempts',

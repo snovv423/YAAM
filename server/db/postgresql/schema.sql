@@ -1671,4 +1671,80 @@ ALTER TABLE hq_audit_log ADD CONSTRAINT hq_audit_log_action_check CHECK (action 
   'yaam_bank_details_created', 'yaam_bank_details_updated'
 ));
 
+-- =========================================================================
+-- YAAM HQ Stage 9.8 — Final Payout Architecture Audit fixes (Stage 9.7
+-- нашёл эти пробелы; здесь ТОЛЬКО их точечное исправление — архитектура,
+-- сущности и UI не менялись, T-Bank по-прежнему не подключён).
+-- =========================================================================
+
+-- -------------------------------------------------------------------------
+-- Находка F2 (аудит Stage 9.7): restaurant_payouts.amount не был защищён НИ
+-- ОДНИМ триггером до достижения 'succeeded' — существующий
+-- fn_restaurant_payouts_immutable_after_terminal защищает ВСЮ строку
+-- целиком, но только ПОСЛЕ terminal-статуса; до этого момента прямой SQL
+-- (в обход сервисного слоя, который сам никогда не пишет amount после
+-- INSERT) мог тихо изменить сумму prepared/processing/unknown/blocked
+-- обязательства без единой ошибки. Задание: "Закрытый расчётный период
+-- фиксирует долг YAAM перед рестораном" — эта сумма должна быть
+-- неизменяемой С МОМЕНТА СОЗДАНИЯ строки, а не только после оплаты.
+--
+-- Реализовано ОТДЕЛЬНЫМ, самостоятельным триггером (не встроено в уже
+-- протестированный fn_restaurant_payouts_valid_transition), тот же принцип
+-- "один триггер — одна ответственность", что уже применён к трём
+-- существующим триггерам restaurant_payouts/payout_attempts — минимизирует
+-- риск случайно задеть уже работающую логику переходов статуса.
+CREATE OR REPLACE FUNCTION fn_restaurant_payouts_amount_immutable()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF NEW.amount <> OLD.amount THEN
+    RAISE EXCEPTION 'restaurant_payouts: amount is immutable after creation (id=%, old=%, new=%)', OLD.id, OLD.amount, NEW.amount;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_restaurant_payouts_amount_immutable ON restaurant_payouts;
+CREATE TRIGGER trg_restaurant_payouts_amount_immutable
+BEFORE UPDATE ON restaurant_payouts
+FOR EACH ROW
+EXECUTE FUNCTION fn_restaurant_payouts_amount_immutable();
+
+-- -------------------------------------------------------------------------
+-- Находка F3 (аудит Stage 9.7): payout_attempts требовал failed_at NOT
+-- NULL при status='failed' (существующий CHECK), но НЕ требовал того же
+-- для error_message/retryable — прямой SQL мог создать "failed" попытку
+-- без единой причины и без признака retryable, оставляя историю операции
+-- неполной (не влияет на факт оплаты/сумму, но противоречит собственному
+-- правилу сервисного слоя: markAttemptFailed() ВСЕГДА требует оба поля).
+--
+-- Безопасно добавлять напрямую (не NOT VALID): markAttemptFailed() уже
+-- гарантирует оба поля для каждой строки, созданной сервисным слоем
+-- (errorMessage.trim() проверяется до записи, см. валидацию в начале
+-- markAttemptFailed()), и sanitizeErrorMessage() никогда не возвращает
+-- пустую/пробельную строку; единственная историческая 'failed'-попытка,
+-- синтезированная Stage 9.5 backfill'ом (см. секцию Stage 9.5 выше), тоже
+-- всегда получает непустой error_message (из failure_reason, который
+-- Stage 9's CHECK уже требовал NOT NULL для failed-строк, а сервисный код
+-- Stage 9, задававший его, никогда не писал туда пустую строку) и
+-- retryable=FALSE — обе схемы данных уже соответствуют этому ограничению
+-- до его добавления.
+--
+-- Усилено (доп. правка после первой версии): помимо failed_at/error_message/
+-- retryable NOT NULL, теперь дополнительно требуется btrim(error_message) <> ''
+-- и явное failed_at IS NOT NULL в самом CHECK (ранее полагались только на
+-- существующий соседний CHECK payout_attempts_status_dates_check) — прямой
+-- SQL больше не может создать "failed" попытку с error_message из одних
+-- пробелов.
+ALTER TABLE payout_attempts DROP CONSTRAINT IF EXISTS payout_attempts_failed_requires_reason_check;
+ALTER TABLE payout_attempts ADD CONSTRAINT payout_attempts_failed_requires_reason_check
+  CHECK (
+    status <> 'failed'
+    OR (
+      failed_at IS NOT NULL
+      AND error_message IS NOT NULL
+      AND btrim(error_message) <> ''
+      AND retryable IS NOT NULL
+    )
+  );
+
 COMMIT;

@@ -77,8 +77,12 @@ function parseBankDetailsInput(body) {
   };
 }
 
-async function getBankDetails(restaurantId) {
-  const rows = await db.query('SELECT * FROM restaurant_bank_details WHERE restaurant_id = $1', [restaurantId]);
+// Stage 9.8 (аудит Stage 9.7, находка F1): опциональный `client` — см.
+// комментарий у yaamBankDetailsService.getYaamBankDetails() за полным
+// обоснованием. client=null сохраняет прежнее поведение для вызовов вне
+// транзакции (routes/hq/restaurants.js).
+async function getBankDetails(restaurantId, client = null) {
+  const rows = await db.query('SELECT * FROM restaurant_bank_details WHERE restaurant_id = $1', [restaurantId], client);
   return rows[0] || null;
 }
 

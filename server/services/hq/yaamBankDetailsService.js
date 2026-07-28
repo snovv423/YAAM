@@ -70,8 +70,14 @@ function parseYaamBankDetailsInput(body) {
 }
 
 // Singleton read — всегда id=1 либо ничего (задание: "заполнено/не заполнено").
-async function getYaamBankDetails() {
-  const rows = await db.query('SELECT * FROM yaam_bank_details WHERE id = 1');
+// Stage 9.8 (аудит Stage 9.7, находка F1): опциональный `client` — если
+// вызывающий код уже находится внутри db.transaction(), он ОБЯЗАН передать
+// сюда свой `client`, иначе чтение уходит на ОТДЕЛЬНОЕ соединение из пула
+// (см. services/hq/payoutService.js: buildAndInsertAttemptRequisites).
+// client=null (по умолчанию) сохраняет прежнее поведение для всех
+// существующих вызовов вне транзакции (routes/hq/pages.js: Settings).
+async function getYaamBankDetails(client = null) {
+  const rows = await db.query('SELECT * FROM yaam_bank_details WHERE id = 1', [], client);
   return rows[0] || null;
 }
 
