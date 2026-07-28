@@ -6,6 +6,7 @@
 // и routes/hq/pages.js renderFinancePage (Stage 7) — не изобретён заново.
 const { esc } = require('./layout');
 const { READINESS_LABELS } = require('../services/hq/restaurantPayoutService');
+const { STATUS_LABELS: PAYOUT_STATUS_LABELS } = require('../services/hq/payoutService');
 
 const STATUS_LABELS = { draft: 'Черновик', closed: 'Закрыт' };
 
@@ -91,7 +92,7 @@ function renderSettlementPeriodCreateForm({ linkBasePath, csrfToken, error, valu
 // ---------------------------------------------------------------------------
 // Страница периода (задание, раздел 10).
 // ---------------------------------------------------------------------------
-function renderSettlementPeriodDetail({ period, lines, preview, linkBasePath, csrfToken }) {
+function renderSettlementPeriodDetail({ period, lines, preview, payoutsByRestaurantId = new Map(), linkBasePath, csrfToken, error }) {
   const totals = lines.reduce((acc, l) => ({
     orders: acc.orders + Number(l.delivered_paid_orders),
     turnover: acc.turnover + Number(l.turnover),
@@ -101,6 +102,27 @@ function renderSettlementPeriodDetail({ period, lines, preview, linkBasePath, cs
     refundsAmount: acc.refundsAmount + Number(l.successful_refunds_amount),
     payable: acc.payable + Number(l.payable_amount),
   }), { orders: 0, turnover: 0, commission: 0, earnings: 0, refundsCount: 0, refundsAmount: 0, payable: 0 });
+
+  // Индикатор выплаты (задание, раздел Settlement: "если payout уже
+  // существует — «Выплата создана» со ссылкой; если нет — «Не создана». Но
+  // никаких кнопок оплаты."). "Подготовить выплату" — НЕ кнопка оплаты: она
+  // ничего не переводит и не отправляет, только создаёт внутреннюю запись
+  // со статусом 'prepared' (см. services/hq/payoutService.js) — разрешённое
+  // действие, отдельное от запрещённых "Выплатить"/"Отправить".
+  function renderPayoutCell(l) {
+    const payout = payoutsByRestaurantId.get(l.restaurant_id);
+    if (payout) {
+      return `Выплата создана — <a href="${linkBasePath}/payouts/${payout.id}">${esc(PAYOUT_STATUS_LABELS[payout.status] || payout.status)}</a>`;
+    }
+    if (preview || Number(l.payable_amount) <= 0) {
+      return 'Не создана';
+    }
+    return `Не создана<br>
+      <form method="post" action="${linkBasePath}/finance/settlements/${period.id}/payouts/${l.restaurant_id}/prepare" style="display:inline">
+        <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
+        <button type="submit" class="ghost">Подготовить выплату</button>
+      </form>`;
+  }
 
   const rows = lines.length
     ? lines.map((l) => {
@@ -120,9 +142,10 @@ function renderSettlementPeriodDetail({ period, lines, preview, linkBasePath, cs
           <td data-label="Сумма ресторана" style="text-align:right">${money(l.restaurant_earnings)}</td>
           <td data-label="Возвращено клиентам" style="text-align:right">${l.successful_refunds_count} шт · ${money(l.successful_refunds_amount)}</td>
           <td data-label="К выплате" style="text-align:right">${money(l.payable_amount)}</td>
+          <td data-label="Выплата">${renderPayoutCell(l)}</td>
         </tr>`;
       }).join('')
-    : `<tr><td colspan="10" class="empty-state">Активности в этом периоде нет.</td></tr>`;
+    : `<tr><td colspan="11" class="empty-state">Активности в этом периоде нет.</td></tr>`;
 
   const statusNotice = preview
     ? `<div class="panel"><div class="empty-state" style="margin-top:0">Предварительный расчёт, суммы ещё могут измениться.</div></div>`
@@ -141,6 +164,7 @@ function renderSettlementPeriodDetail({ period, lines, preview, linkBasePath, cs
 
   return `
     <h1>Расчётный период: ${esc(formatDateOnly(period.period_from))} — ${esc(formatDateOnly(period.period_to))}</h1>
+    ${error ? `<div class="panel"><div class="error" style="margin-top:0">${esc(error)}</div></div>` : ''}
     <div class="panel">
       <table>
         <tr><td>Статус</td><td style="text-align:right"><span class="badge ${period.status === 'closed' ? 'open' : 'closed'}">${esc(STATUS_LABELS[period.status] || period.status)}</span></td></tr>
@@ -164,7 +188,7 @@ function renderSettlementPeriodDetail({ period, lines, preview, linkBasePath, cs
           <th>Ресторан</th><th>Договор</th><th>Комиссия, %</th><th>Готовность</th><th>Заказов</th>
           <th style="text-align:right">Оборот</th><th style="text-align:right">Комиссия YAAM</th>
           <th style="text-align:right">Сумма ресторана</th><th style="text-align:right">Возвращено клиентам</th>
-          <th style="text-align:right">К выплате</th>
+          <th style="text-align:right">К выплате</th><th>Выплата</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>

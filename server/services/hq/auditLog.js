@@ -57,6 +57,13 @@ const ACTIONS = [
   'settlement_period_created',
   'settlement_period_closed',
   'settlement_period_draft_deleted',
+  // Stage 9 — payout entity (задание, раздел "Audit"). В отличие от
+  // settlement-событий выше, restaurantId ЗАДАН — выплата всегда привязана
+  // к одному конкретному ресторану.
+  'payout_created',
+  'payout_processing',
+  'payout_succeeded',
+  'payout_failed',
 ];
 
 // Единственные поля ресторана, которые вообще могут попасть в текст лога —

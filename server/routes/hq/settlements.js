@@ -6,6 +6,7 @@
 // см. index.js).
 const express = require('express');
 const settlementService = require('../../services/hq/settlementService');
+const payoutService = require('../../services/hq/payoutService');
 const { ValidationError } = require('../../services/hq/restaurantLifecycle');
 const { logAuditEvent } = require('../../services/hq/auditLog');
 const { ensureCsrfToken, requireCsrf } = require('../../services/hq/csrf');
@@ -81,15 +82,61 @@ function createSettlementsRouter({ linkBasePath }) {
     }
   });
 
+  // draft-периоды физически не могут иметь выплат (FOREIGN KEY
+  // restaurant_payouts(settlement_period_id, restaurant_id) ->
+  // settlement_restaurant_lines требует существующую строку, а она
+  // появляется только при закрытии, Stage 8) — для draft просто пустая
+  // Map, без лишнего запроса.
+  async function fetchPayoutsMap(period) {
+    if (period.status !== 'closed') return new Map();
+    return payoutService.listPayoutsForPeriod(period.id);
+  }
+
   router.get('/:id', async (req, res, next) => {
     try {
       const detail = await settlementService.getSettlementPeriodDetail(req.settlementPeriod.id);
+      const payoutsByRestaurantId = await fetchPayoutsMap(detail.period);
       const csrfToken = ensureCsrfToken(req);
       const body = views.renderSettlementPeriodDetail({
-        period: detail.period, lines: detail.lines, preview: detail.preview, linkBasePath, csrfToken,
+        period: detail.period, lines: detail.lines, preview: detail.preview, payoutsByRestaurantId, linkBasePath, csrfToken,
       });
       res.send(layout({ title: 'Расчётный период', active: 'finance', csrfToken, linkBasePath, body }));
     } catch (err) {
+      next(err);
+    }
+  });
+
+  // Единственное write-действие Stage 9 внутри /finance/settlements
+  // (задание: "Settlement... но никаких кнопок оплаты" — это НЕ оплата,
+  // деньги никуда не переводятся, только создаётся внутренняя запись со
+  // статусом 'prepared'; см. services/hq/payoutService.js и итоговый отчёт
+  // за полным обоснованием, почему это разрешённое действие, а не "кнопка
+  // Выплатить").
+  router.post('/:id/payouts/:restaurantId/prepare', requireCsrf, async (req, res, next) => {
+    try {
+      const createdBy = (req.session && req.session.hqUser) || '';
+      const payout = await payoutService.prepareRestaurantPayout(
+        req.settlementPeriod.id, req.params.restaurantId, { createdBy, notes: req.body.notes },
+      );
+      await logAuditEvent({
+        action: 'payout_created', restaurantId: payout.restaurant_id,
+        details: `payout_id=${payout.id}; period_id=${payout.settlement_period_id}; amount=${payout.amount}`,
+        ip: req.ip,
+      });
+      res.redirect(`${linkBasePath}/payouts/${payout.id}`);
+    } catch (err) {
+      // payoutService.ValidationError — та же самая, буквально реэкспортированная
+      // ссылка на restaurantLifecycle.ValidationError (см. payoutService.js) —
+      // одна проверка instanceof покрывает оба случая.
+      if (err instanceof ValidationError) {
+        const csrfToken = ensureCsrfToken(req);
+        const detail = await settlementService.getSettlementPeriodDetail(req.settlementPeriod.id);
+        const payoutsByRestaurantId = await fetchPayoutsMap(detail.period);
+        const body = views.renderSettlementPeriodDetail({
+          period: detail.period, lines: detail.lines, preview: detail.preview, payoutsByRestaurantId, linkBasePath, csrfToken, error: err.message,
+        });
+        return res.status(400).send(layout({ title: 'Расчётный период', active: 'finance', csrfToken, linkBasePath, body }));
+      }
       next(err);
     }
   });
@@ -109,8 +156,9 @@ function createSettlementsRouter({ linkBasePath }) {
       if (err instanceof ValidationError) {
         const csrfToken = ensureCsrfToken(req);
         const detail = await settlementService.getSettlementPeriodDetail(req.settlementPeriod.id);
+        const payoutsByRestaurantId = await fetchPayoutsMap(detail.period);
         const body = views.renderSettlementPeriodDetail({
-          period: detail.period, lines: detail.lines, preview: detail.preview, linkBasePath, csrfToken,
+          period: detail.period, lines: detail.lines, preview: detail.preview, payoutsByRestaurantId, linkBasePath, csrfToken,
         });
         return res.status(400).send(layout({ title: 'Расчётный период', active: 'finance', csrfToken, linkBasePath, body }));
       }
@@ -131,8 +179,9 @@ function createSettlementsRouter({ linkBasePath }) {
       if (err instanceof ValidationError) {
         const csrfToken = ensureCsrfToken(req);
         const detail = await settlementService.getSettlementPeriodDetail(req.settlementPeriod.id);
+        const payoutsByRestaurantId = await fetchPayoutsMap(detail.period);
         const body = views.renderSettlementPeriodDetail({
-          period: detail.period, lines: detail.lines, preview: detail.preview, linkBasePath, csrfToken,
+          period: detail.period, lines: detail.lines, preview: detail.preview, payoutsByRestaurantId, linkBasePath, csrfToken,
         });
         return res.status(400).send(layout({ title: 'Расчётный период', active: 'finance', csrfToken, linkBasePath, body }));
       }

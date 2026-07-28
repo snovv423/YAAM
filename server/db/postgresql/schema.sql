@@ -1025,4 +1025,171 @@ ALTER TABLE hq_audit_log ADD CONSTRAINT hq_audit_log_action_check CHECK (action 
   'settlement_period_created', 'settlement_period_closed', 'settlement_period_draft_deleted'
 ));
 
+-- =========================================================================
+-- YAAM HQ Stage 9 — restaurant_payouts (Payout Entity Foundation, NO bank
+-- integration)
+-- =========================================================================
+--
+-- Аудит перед разработкой (см. итоговый отчёт Stage 9, раздел 2): эта
+-- таблица — НЕ services/hq/restaurantPayoutService.js (Stage 6, "готовность
+-- ресторана к выплате" — legal/bank/contract completeness, ни одного
+-- денежного факта). Совпадение слова "payout" в имени намеренно НЕ
+-- переиспользовано для новой сущности — см. новый, отдельный
+-- services/hq/payoutService.js за полным разделением ответственности.
+--
+-- Главное правило задания: "Закрытый расчётный период фиксирует долг YAAM
+-- перед рестораном. Выплата — это отдельная сущность." — restaurant_payouts
+-- НЕ пересчитывает суммы: amount копируется РОВНО ОДИН РАЗ, в момент
+-- подготовки, из settlement_restaurant_lines.payable_amount (Stage 8,
+-- уже immutable snapshot) — settlement остаётся единственным источником
+-- истины, эта таблица лишь ОТСЛЕЖИВАЕТ судьбу уже зафиксированной суммы.
+--
+-- АРХИТЕКТУРНОЕ РЕШЕНИЕ, отклоняющееся от буквальной формулировки задания
+-- (задокументировано явно, не молча): задание говорит "один закрытый период
+-- — максимум одна выплата". Буквально это не может быть верно — один период
+-- (Stage 8) содержит СТРОКИ ОБЯЗАТЕЛЬСТВ ПО КАЖДОМУ РЕСТОРАНУ
+-- (settlement_restaurant_lines: UNIQUE(settlement_period_id, restaurant_id),
+-- не один агрегат на период), и каждый ресторан должен получить СВОЮ
+-- собственную выплату на СВОИ банковские реквизиты. Верная интерпретация
+-- инварианта — "максимум одна выплата НА ПАРУ (период, ресторан)": именно
+-- она реализована ниже как UNIQUE(settlement_period_id, restaurant_id) —
+-- тот же режим, что и на самой settlement_restaurant_lines. Дополнительно
+-- составной FOREIGN KEY на settlement_restaurant_lines(settlement_period_id,
+-- restaurant_id) физически не даёт создать выплату для пары, у которой
+-- вообще нет зафиксированной строки обязательства (период не закрыт, или
+-- ресторан не имел активности в этом периоде) — сильнее, чем просто
+-- проверка в коде.
+CREATE TABLE IF NOT EXISTS restaurant_payouts (
+  id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  restaurant_id INTEGER NOT NULL REFERENCES restaurants(id),
+  settlement_period_id INTEGER NOT NULL REFERENCES settlement_periods(id),
+  amount INTEGER NOT NULL CHECK (amount > 0),
+  status TEXT NOT NULL DEFAULT 'prepared'
+    CHECK (status IN ('prepared', 'processing', 'succeeded', 'failed')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  -- Каждый переход — своя собственная дата (задание, раздел "Время": "Никаких
+  -- универсальных timestamp"). prepared_at заполняется атомарно с INSERT
+  -- (момент создания ВСЕГДА равен моменту входа в 'prepared' — это
+  -- единственный статус, доступный при создании строки).
+  prepared_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  processing_at TIMESTAMPTZ,
+  completed_at TIMESTAMPTZ,
+  failed_at TIMESTAMPTZ,
+  failure_reason TEXT,
+  external_payout_id TEXT,
+  notes TEXT NOT NULL DEFAULT '',
+  created_by TEXT NOT NULL DEFAULT '',
+  UNIQUE (settlement_period_id, restaurant_id),
+  FOREIGN KEY (settlement_period_id, restaurant_id)
+    REFERENCES settlement_restaurant_lines (settlement_period_id, restaurant_id),
+  -- Консистентность timestamp'ов ПО СТАТУСУ — DB-уровневая, не только
+  -- проверка в сервисном коде: succeeded СТРУКТУРНО НЕВОЗМОЖЕН без
+  -- processing_at (задание: "нельзя prepared -> succeeded без processing" —
+  -- это буквально СХЕМА, а не просто код). failed допускает processing_at
+  -- и NULL, и NOT NULL — provider/pre-flight отказ может произойти либо ДО
+  -- захода в processing (валидация реквизитов), либо ВО ВРЕМЯ него
+  -- (реальный сетевой отказ провайдера) — оба случая реальны и не должны
+  -- считаться нарушением.
+  CHECK (
+    (status = 'prepared'   AND processing_at IS NULL     AND completed_at IS NULL     AND failed_at IS NULL     AND failure_reason IS NULL) OR
+    (status = 'processing' AND processing_at IS NOT NULL AND completed_at IS NULL     AND failed_at IS NULL     AND failure_reason IS NULL) OR
+    (status = 'succeeded'  AND processing_at IS NOT NULL AND completed_at IS NOT NULL AND failed_at IS NULL     AND failure_reason IS NULL) OR
+    (status = 'failed'     AND completed_at IS NULL      AND failed_at IS NOT NULL    AND failure_reason IS NOT NULL)
+  )
+);
+CREATE INDEX IF NOT EXISTS ix_restaurant_payouts_restaurant ON restaurant_payouts (restaurant_id);
+CREATE INDEX IF NOT EXISTS ix_restaurant_payouts_status ON restaurant_payouts (status);
+
+-- Полный граф переходов состояний (задание: "Продумай корректную state
+-- machine") — DB-уровневая проверка КАЖДОГО перехода, а не только "нельзя
+-- редактировать после terminal" (тот отдельный триггер ниже). Разрешено:
+-- prepared->processing, prepared->failed, processing->succeeded,
+-- processing->failed, и "no-op" UPDATE того же статуса (например, правка
+-- notes/external_payout_id без смены статуса). ВСЁ остальное — включая
+-- prepared->succeeded (задание: "нельзя prepared -> succeeded без
+-- processing", дословно) и failed->processing (задание: "нельзя failed ->
+-- processing", дословно) — отклоняется здесь, на уровне PostgreSQL, даже
+-- если бы сервисный код почему-то допустил такую попытку.
+CREATE OR REPLACE FUNCTION fn_restaurant_payouts_valid_transition()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF OLD.status = NEW.status THEN
+    RETURN NEW;
+  END IF;
+  IF OLD.status = 'prepared' AND NEW.status IN ('processing', 'failed') THEN
+    RETURN NEW;
+  END IF;
+  IF OLD.status = 'processing' AND NEW.status IN ('succeeded', 'failed') THEN
+    RETURN NEW;
+  END IF;
+  RAISE EXCEPTION 'restaurant_payouts: invalid status transition % -> % (id=%)', OLD.status, NEW.status, OLD.id;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_restaurant_payouts_valid_transition ON restaurant_payouts;
+CREATE TRIGGER trg_restaurant_payouts_valid_transition
+BEFORE UPDATE ON restaurant_payouts
+FOR EACH ROW
+EXECUTE FUNCTION fn_restaurant_payouts_valid_transition();
+
+-- Immutable после terminal (задание: "После succeeded или failed выплата
+-- становится неизменяемой. Это должно защищаться не только кодом, но и
+-- PostgreSQL") — блокирует АБСОЛЮТНО любой UPDATE/DELETE, если OLD.status
+-- уже terminal, включая правку notes/external_payout_id "заодно" — тот же
+-- принцип, что и fn_settlement_snapshot_row_immutable (Stage 8).
+CREATE OR REPLACE FUNCTION fn_restaurant_payouts_immutable_after_terminal()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF OLD.status IN ('succeeded', 'failed') THEN
+    RAISE EXCEPTION 'restaurant_payouts: payout in terminal status % is immutable (id=%)', OLD.status, OLD.id;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_restaurant_payouts_block_update_after_terminal ON restaurant_payouts;
+CREATE TRIGGER trg_restaurant_payouts_block_update_after_terminal
+BEFORE UPDATE ON restaurant_payouts
+FOR EACH ROW
+EXECUTE FUNCTION fn_restaurant_payouts_immutable_after_terminal();
+
+CREATE OR REPLACE FUNCTION fn_restaurant_payouts_block_delete_after_terminal()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF OLD.status IN ('succeeded', 'failed') THEN
+    RAISE EXCEPTION 'restaurant_payouts: payout in terminal status % cannot be deleted (id=%)', OLD.status, OLD.id;
+  END IF;
+  RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_restaurant_payouts_block_delete_after_terminal ON restaurant_payouts;
+CREATE TRIGGER trg_restaurant_payouts_block_delete_after_terminal
+BEFORE DELETE ON restaurant_payouts
+FOR EACH ROW
+EXECUTE FUNCTION fn_restaurant_payouts_block_delete_after_terminal();
+
+-- Аудит-события этого этапа (задание, раздел "Audit"). restaurant_id ЗАДАН
+-- (в отличие от settlement-событий выше) — payout всегда привязан к одному
+-- конкретному ресторану.
+ALTER TABLE hq_audit_log DROP CONSTRAINT IF EXISTS hq_audit_log_action_check;
+ALTER TABLE hq_audit_log ADD CONSTRAINT hq_audit_log_action_check CHECK (action IN (
+  'restaurant_created', 'restaurant_updated', 'restaurant_paused',
+  'restaurant_resumed', 'restaurant_archived', 'restaurant_restored',
+  'restaurant_published', 'restaurant_unpublished',
+  'category_created', 'category_updated', 'category_archived',
+  'category_restored', 'category_moved',
+  'menu_item_created', 'menu_item_updated', 'menu_item_available',
+  'menu_item_unavailable', 'menu_item_archived', 'menu_item_restored',
+  'menu_item_moved',
+  'restaurant_photo_uploaded', 'restaurant_photo_primary_changed', 'restaurant_photo_deleted',
+  'menu_item_photo_uploaded', 'menu_item_photo_primary_changed', 'menu_item_photo_deleted',
+  'restaurant_legal_details_created', 'restaurant_legal_details_updated',
+  'restaurant_bank_details_created', 'restaurant_bank_details_updated',
+  'restaurant_contract_created', 'restaurant_contract_updated', 'restaurant_contract_status_changed',
+  'settlement_period_created', 'settlement_period_closed', 'settlement_period_draft_deleted',
+  'payout_created', 'payout_processing', 'payout_succeeded', 'payout_failed'
+));
+
 COMMIT;

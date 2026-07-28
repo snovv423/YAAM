@@ -18,6 +18,11 @@ const payoutService = require('../../services/hq/restaurantPayoutService');
 const financeService = require('../../services/hq/restaurantFinanceService');
 const settlementService = require('../../services/hq/settlementService');
 const settlementViews = require('../../hq/settlementViews');
+// Stage 9 — payoutRecordService (НЕ payoutService выше, который про
+// готовность к выплате, Stage 6): реальная сущность выплаты (создана/в
+// обработке/успешна/ошибка). Имя переменной намеренно другое — во избежание
+// коллизии с уже существующим "payoutService" (readiness) в этом же файле.
+const payoutRecordService = require('../../services/hq/payoutService');
 const { CONTRACT_STATUS_LABELS } = require('../../services/hq/restaurantContractService');
 const { ValidationError } = require('../../services/hq/restaurantAdminService');
 
@@ -35,7 +40,7 @@ const STATUS_LABELS = {
 // одна проверка длины.
 const MIN_PASSWORD_LENGTH = 8;
 
-function renderOverview({ top, active, restaurants, finance, attentionItems, csrfToken }) {
+function renderOverview({ top, active, restaurants, finance, payoutStats, attentionItems, csrfToken, linkBasePath }) {
   const attentionBlock = attentionItems.length
     ? `<ul style="margin:0;padding-left:18px">${attentionItems.map((i) => `<li class="attention-item">${esc(i.label)}</li>`).join('')}</ul>`
     : `<div class="attention-ok">Всё спокойно. Действий не требуется.</div>`;
@@ -98,6 +103,18 @@ function renderOverview({ top, active, restaurants, finance, attentionItems, csr
         <tr><td>Возвращено клиентам</td><td style="text-align:right">${finance.refundedOrders} шт · ${finance.refundedAmount} ₽</td></tr>
       </table>
       <div class="empty-state" style="margin-top:10px">Возвраты показаны отдельно и не вычитаются повторно из заработка ресторана, если отменённый заказ не входил в доставленный оборот. Банковские выплаты будут доступны после подключения финансового модуля.</div>
+    </div>
+
+    <div class="panel">
+      <div style="font-weight:700;margin-bottom:14px">Выплаты</div>
+      <table>
+        <tr><td>Подготовлено выплат</td><td style="text-align:right">${payoutStats.preparedCount}</td></tr>
+        <tr><td>Успешных выплат</td><td style="text-align:right">${payoutStats.succeededCount}</td></tr>
+        <tr><td>Выплат с ошибкой</td><td style="text-align:right">${payoutStats.failedCount}</td></tr>
+        <tr><td>Сумма подготовленных</td><td style="text-align:right">${payoutStats.preparedAmount} ₽</td></tr>
+        <tr><td>Сумма успешных</td><td style="text-align:right">${payoutStats.succeededAmount} ₽</td></tr>
+      </table>
+      <a class="btn ghost" style="margin-top:14px;display:inline-block" href="${linkBasePath}/payouts">Открыть «Выплаты»</a>
     </div>
 
     <div class="panel">
@@ -265,11 +282,12 @@ function createPagesRouter({ linkBasePath, mediaProvider = null }) {
 
   router.get('/', async (req, res, next) => {
     try {
-      const [top, active, restaurants, finance, attentionItems] = await Promise.all([
+      const [top, active, restaurants, finance, payoutStats, attentionItems] = await Promise.all([
         dashboardMetrics.getTopSummary(db),
         dashboardMetrics.getActiveOrdersBreakdown(db),
         dashboardMetrics.getRestaurantsStatus(db),
         dashboardMetrics.getFinanceSummary(db),
+        payoutRecordService.getPayoutDashboardStats(),
         dashboardMetrics.getAttentionItems(db),
       ]);
       const csrfToken = ensureCsrfToken(req);
@@ -278,7 +296,7 @@ function createPagesRouter({ linkBasePath, mediaProvider = null }) {
         active: 'overview',
         csrfToken,
         linkBasePath,
-        body: renderOverview({ top, active, restaurants, finance, attentionItems, csrfToken }),
+        body: renderOverview({ top, active, restaurants, finance, payoutStats, attentionItems, csrfToken, linkBasePath }),
       }));
     } catch (err) {
       next(err);

@@ -205,13 +205,31 @@ test('YAAM HQ: финансовый учёт по ресторанам — су�
   await expect(rowB).toContainText('70 ₽'); // комиссия fallback 7%
   await expect(rowB).toContainText('930 ₽');
 
+  // Stage 8/9: другие spec-файлы этого прогона делят один и тот же backend/
+  // БД (e2e/global-setup.ts) и тоже могут создавать "сегодня"-датированные
+  // заказы для СВОИХ тестовых ресторанов — общий агрегат "Сводка за период"
+  // суммирует ПО ВСЕМ ресторанам, поэтому может включать чужой вклад. Точные
+  // построчные суммы A/B выше уже доказывают корректность рендера; здесь
+  // проверяем, что общий агрегат КОРРЕКТНО ВКЛЮЧАЕТ вклад A/B (>=), а не
+  // требуем точного равенства глобальному числу, которое зависит от порядка
+  // выполнения остальных spec-файлов.
   const summaryPanel = page.locator('.panel', { hasText: 'Сводка за период' });
-  await expect(summaryPanel).toContainText('4000 ₽'); // общий оборот 3000+1000
-  await expect(summaryPanel).toContainText('370 ₽'); // общая комиссия 300+70
+  async function readPanelAmount(label: string): Promise<number> {
+    const text = await summaryPanel.innerText();
+    const match = text.match(new RegExp(`${label}\\s*([\\d\\s]+)\\s*₽`));
+    if (!match) throw new Error(`не найдено значение "${label}" в панели: ${text}`);
+    return Number(match[1].replace(/\s/g, ''));
+  }
+  expect(await readPanelAmount('Оборот')).toBeGreaterThanOrEqual(4000); // общий оборот >= 3000+1000
+  expect(await readPanelAmount('Комиссия YAAM')).toBeGreaterThanOrEqual(370); // общая комиссия >= 300+70
   // Stage 7.1: реальный возврат отменённого заказа A5 (1000 ₽) корректно
   // виден в «Возвращено клиентам», НЕ влияя на оборот/комиссию/сумму
   // ресторанов выше (заказ никогда не входил в заработок).
-  await expect(summaryPanel).toContainText('1 шт · 1000 ₽');
+  const summaryText = await summaryPanel.innerText();
+  const refundMatch = summaryText.match(/(\d+)\s*шт\s*·\s*([\d\s]+)\s*₽/);
+  if (!refundMatch) throw new Error(`не найдена строка возвратов в панели: ${summaryText}`);
+  expect(Number(refundMatch[1])).toBeGreaterThanOrEqual(1);
+  expect(Number(refundMatch[2].replace(/\s/g, ''))).toBeGreaterThanOrEqual(1000);
 
   // «Остаток к будущим выплатам» явно подписан как временная формула.
   await expect(page.getByText('временная формула')).toBeVisible();

@@ -22,6 +22,7 @@ const { createAuthRouter } = require('./auth');
 const { createPagesRouter } = require('./pages');
 const { createRestaurantsRouter } = require('./restaurants');
 const { createSettlementsRouter } = require('./settlements');
+const { createPayoutsRouter } = require('./payouts');
 const { createRequireHqAuth } = require('./middleware');
 
 // linkBasePath — Stage 2.1 clean-root routing (см. services/hq/basePath.js):
@@ -84,6 +85,9 @@ function createHqRouter({ sessionSecret, isProduction, linkBasePath, mediaProvid
   // ПО СЕБЕ (без /settlements) по-прежнему обрабатывается pagesRouter'ом
   // (существующий Stage 7 live-экран, только дополненный секцией периодов).
   router.use('/finance/settlements', createRequireHqAuth(resolvedLinkBasePath), createSettlementsRouter({ linkBasePath: resolvedLinkBasePath }));
+  // YAAM HQ Stage 9: /payouts — read-only раздел (задание: "Пока Read
+  // Only") + карточка выплаты, тот же принцип монтирования до pagesRouter.
+  router.use('/payouts', createRequireHqAuth(resolvedLinkBasePath), createPayoutsRouter({ linkBasePath: resolvedLinkBasePath }));
   router.use('/', createRequireHqAuth(resolvedLinkBasePath), createPagesRouter({ linkBasePath: resolvedLinkBasePath, mediaProvider }));
 
   return router;

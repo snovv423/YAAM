@@ -31,6 +31,7 @@ function buildNavItems(linkBasePath) {
     { key: 'overview', href: hqRootPath(linkBasePath), label: 'Обзор' },
     { key: 'restaurants', href: `${linkBasePath}/restaurants`, label: 'Рестораны' },
     { key: 'finance', href: `${linkBasePath}/finance`, label: 'Финансы' },
+    { key: 'payouts', href: `${linkBasePath}/payouts`, label: 'Выплаты' },
     { key: 'settings', href: `${linkBasePath}/settings`, label: 'Настройки' },
   ];
 }
