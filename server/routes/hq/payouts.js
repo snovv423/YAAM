@@ -18,6 +18,7 @@
 // listAttemptsForPayout, ничего не создаёт и не меняет.
 const express = require('express');
 const payoutService = require('../../services/hq/payoutService');
+const { getTBankPayoutReadiness } = require('../../services/hq/tbankPayoutReadiness');
 const { ensureCsrfToken } = require('../../services/hq/csrf');
 const { layout } = require('../../hq/layout');
 const views = require('../../hq/payoutViews');
@@ -50,8 +51,14 @@ function createPayoutsRouter({ linkBasePath }) {
         }));
       }
       const attempts = await payoutService.listAttemptsForPayout(payout.id);
+      const requisitesByAttemptId = new Map();
+      for (const attempt of attempts) {
+        const requisites = await payoutService.getAttemptRequisites(attempt.id);
+        if (requisites) requisitesByAttemptId.set(attempt.id, requisites);
+      }
+      const readiness = await getTBankPayoutReadiness(payout.id);
       const csrfToken = ensureCsrfToken(req);
-      const body = views.renderPayoutDetail({ payout, attempts, linkBasePath });
+      const body = views.renderPayoutDetail({ payout, attempts, requisitesByAttemptId, readiness, linkBasePath });
       res.send(layout({ title: `Выплата #${payout.id}`, active: 'payouts', csrfToken, linkBasePath, body }));
     } catch (err) {
       next(err);

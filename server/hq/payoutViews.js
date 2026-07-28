@@ -4,10 +4,32 @@
 // Stage 9.5 добавляет read-only историю попыток на карточке (задание,
 // раздел 10) — БЕЗ каких-либо кнопок управления попытками ("Выплатить" /
 // "Отправить в банк" / "Повторить" / фейковый банк — задание, дословно:
-// "Do NOT add any button that triggers a real or fake payout").
+// "Do NOT add any button that triggers a real or fake payout"). Stage 9.6
+// добавляет блок готовности к Т-Банку и МАСКИРОВАННЫЙ снимок реквизитов
+// каждой попытки (задание, раздел 10) — по-прежнему без единой кнопки
+// отправки/повтора.
 // Тот же общий стиль панелей/таблиц, что и hq/settlementViews.js (Stage 8).
 const { esc } = require('./layout');
 const { STATUS_LABELS, ATTEMPT_STATUS_LABELS } = require('../services/hq/payoutService');
+const { READINESS_REASONS } = require('../services/hq/tbankPayoutReadiness');
+const { maskAccountForUi } = require('../services/hq/ruRequisites');
+
+// Человекочитаемые причины неготовности (задание, раздел 8: "Возвращать
+// понятные machine-readable причины") — machine-readable коды остаются в
+// tbankPayoutReadiness.js; здесь только их представление для оператора.
+const READINESS_REASON_LABELS = {
+  missing_yaam_bank_details: 'Не заполнены реквизиты YAAM (Настройки → Реквизиты YAAM для выплат)',
+  invalid_yaam_bank_details: 'Реквизиты YAAM некорректны — проверьте БИК/счета/ИНН',
+  missing_restaurant_bank_details: 'У ресторана не заполнены банковские реквизиты',
+  invalid_restaurant_bank_details: 'Банковские реквизиты ресторана некорректны — проверьте БИК/счета',
+  contract_not_signed: 'Договор с рестораном не подписан',
+  missing_payment_purpose: 'Не определено назначение платежа — заполните его в реквизитах ресторана',
+  active_attempt_exists: 'У выплаты уже есть активная попытка',
+  payout_already_succeeded: 'Выплата уже успешно завершена',
+  legacy_state_requires_review: 'Обнаружено рассогласование состояния — требуется ручной разбор',
+  ready: 'Готова к отправке',
+};
+void READINESS_REASONS; // импортирован для документируемой связи с источником enum, не используется напрямую в рендере
 
 function money(n) {
   return `${Number(n) || 0} ₽`;
@@ -97,11 +119,50 @@ function renderPayoutsListPage({ payouts, linkBasePath }) {
   `;
 }
 
+// Stage 9.6 — блок готовности к Т-Банку (задание, раздел 10: "«Готовность к
+// отправке через Т-Банк»; причина, если не готово"). readiness — результат
+// tbankPayoutReadiness.getTBankPayoutReadiness(payoutId), { ready, reasons }.
+function renderReadinessSection({ readiness }) {
+  if (!readiness) return '';
+  const badgeClass = readiness.ready ? 'open' : 'closed';
+  const badgeLabel = readiness.ready ? 'Готова к отправке' : 'Не готова';
+  const reasonsList = readiness.ready
+    ? ''
+    : `<ul style="margin:10px 0 0;padding-left:18px">${readiness.reasons.map((r) => `<li>${esc(READINESS_REASON_LABELS[r] || r)}</li>`).join('')}</ul>`;
+  return `
+    <div class="panel">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div style="font-weight:700">Готовность к отправке через Т-Банк</div>
+        <span class="badge ${badgeClass}">${esc(badgeLabel)}</span>
+      </div>
+      ${reasonsList}
+      <div class="empty-state" style="margin-top:10px">Это только предпросмотр готовности — банк ещё не подключён, ничего не отправляется.</div>
+    </div>`;
+}
+
+// Маскированный снимок реквизитов конкретной попытки (задание, раздел 5/10:
+// "snapshot реквизитов попытки в маскированном виде"; раздел 3: "read-only
+// overview показывает маскированные значения"). requisites — строка
+// payout_attempt_requisites либо null (снимка нет — например, историческая
+// Stage 9.5 попытка, созданная до Stage 9.6).
+function renderAttemptRequisites(requisites) {
+  if (!requisites) return '<div class="empty-state">Снимок реквизитов недоступен (попытка создана до Stage 9.6).</div>';
+  return `
+    <table>
+      <tr><td>Получатель</td><td style="text-align:right">${esc(requisites.recipient_name)}</td></tr>
+      <tr><td>Банк получателя</td><td style="text-align:right">${esc(requisites.bank_name)}</td></tr>
+      <tr><td>Счёт получателя</td><td style="text-align:right">${esc(maskAccountForUi(requisites.account_number))}</td></tr>
+      <tr><td>Счёт YAAM (плательщик)</td><td style="text-align:right">${esc(maskAccountForUi(requisites.payer_account_number))}</td></tr>
+      <tr><td>Назначение платежа</td><td style="text-align:right">${esc(requisites.payment_purpose)}</td></tr>
+      <tr><td>Сумма снимка</td><td style="text-align:right">${money(requisites.amount)}</td></tr>
+    </table>`;
+}
+
 // ---------------------------------------------------------------------------
 // Карточка выплаты (задание: "ресторан, период, сумму, статус, все даты,
 // заметки, внешний id (если появится)")
 // ---------------------------------------------------------------------------
-function renderPayoutDetail({ payout, attempts = [], linkBasePath }) {
+function renderPayoutDetail({ payout, attempts = [], requisitesByAttemptId = new Map(), readiness = null, linkBasePath }) {
   const attemptRows = attempts.length
     ? attempts.map((a) => `
       <tr>
@@ -116,6 +177,14 @@ function renderPayoutDetail({ payout, attempts = [], linkBasePath }) {
         <td data-label="Повтор допустим">${esc(retryAllowedLabel(a))}</td>
       </tr>`).join('')
     : `<tr><td colspan="9" class="empty-state">Попыток обращения к банку ещё не было.</td></tr>`;
+
+  const requisitesBlocks = attempts.length
+    ? attempts.map((a) => `
+      <div style="margin-bottom:14px">
+        <div style="font-weight:600;margin-bottom:6px">Попытка #${a.attempt_number} (${esc(a.payment_id)})</div>
+        ${renderAttemptRequisites(requisitesByAttemptId.get(a.id))}
+      </div>`).join('')
+    : `<div class="empty-state">Снимков реквизитов ещё нет — попыток не было.</div>`;
 
   return `
     <h1>Выплата #${payout.id}</h1>
@@ -134,6 +203,7 @@ function renderPayoutDetail({ payout, attempts = [], linkBasePath }) {
         ${payout.notes ? `<tr><td>Заметки</td><td style="text-align:right">${esc(payout.notes)}</td></tr>` : ''}
       </table>
     </div>
+    ${renderReadinessSection({ readiness })}
     <h2>История попыток</h2>
     <div class="empty-state" style="margin-bottom:14px">Только просмотр. Банковская интеграция появится на отдельном следующем этапе — здесь нет и не может быть кнопок отправки в банк.</div>
     <div class="panel">
@@ -144,6 +214,10 @@ function renderPayoutDetail({ payout, attempts = [], linkBasePath }) {
         </tr></thead>
         <tbody>${attemptRows}</tbody>
       </table>
+    </div>
+    <h2>Снимки реквизитов (маскировано)</h2>
+    <div class="panel">
+      ${requisitesBlocks}
     </div>
     <a class="btn ghost" href="${linkBasePath}/payouts">← К выплатам</a>
   `;

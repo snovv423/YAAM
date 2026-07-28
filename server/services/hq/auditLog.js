@@ -79,6 +79,14 @@ const ACTIONS = [
   'payout_attempt_unknown',
   'payout_attempt_succeeded',
   'payout_attempt_failed',
+  // Stage 9.6 — реквизиты YAAM как плательщика (yaam_bank_details, HQ
+  // Settings). В отличие от payout_attempt_*, ЭТИ ДВА реально EMITTED —
+  // единственный write-маршрут этого этапа (POST /hq/settings/
+  // yaam-bank-details) пишет их сразу, restaurantId всегда null (событие не
+  // привязано ни к одному конкретному ресторану — это реквизиты самого
+  // YAAM, не ресторана).
+  'yaam_bank_details_created',
+  'yaam_bank_details_updated',
 ];
 
 // Единственные поля ресторана, которые вообще могут попасть в текст лога —
@@ -119,6 +127,15 @@ const LEGAL_DETAILS_NAME_ONLY_FIELDS = ['legal_address', 'actual_address', 'auth
 const BANK_DETAILS_SAFE_DIFF_FIELDS = ['recipient_name', 'recipient_inn', 'recipient_kpp', 'bik', 'bank_name'];
 const BANK_DETAILS_MASKED_FIELDS = ['account_number', 'correspondent_account'];
 const BANK_DETAILS_NAME_ONLY_FIELDS = ['default_payment_purpose', 'internal_note'];
+
+// Stage 9.6 — реквизиты YAAM как плательщика (задание, раздел 11: "Можно:
+// факт изменения; маскированный счёт; изменившиеся безопасные поля. Нельзя:
+// полный счёт; корреспондентский счёт полностью; token; certificate path;
+// private key"). Тот же трёхкатегорийный принцип, что и BANK_DETAILS_* выше
+// — never в этом списке нет ни одного секрета (yaam_bank_details вообще не
+// хранит токены/сертификаты — см. db/postgresql/schema.sql).
+const YAAM_BANK_DETAILS_SAFE_DIFF_FIELDS = ['legal_name', 'inn', 'kpp', 'bik', 'bank_name'];
+const YAAM_BANK_DETAILS_MASKED_FIELDS = ['account_number', 'correspondent_account'];
 
 // commission_bps сознательно ВНЕ этого списка — логируется отдельно, в
 // процентах (человекочитаемо), не сырыми basis points. status — тоже вне
@@ -218,6 +235,25 @@ function summarizeBankDetailsDiff(before, after) {
   return parts.length ? parts.join('; ') : null;
 }
 
+// Реквизиты YAAM как плательщика (Stage 9.6) — тот же маскированный принцип,
+// что и summarizeBankDetailsDiff выше, применённый к yaam_bank_details
+// (задание, раздел 11). before=null при первом создании (created=true) —
+// вызывающий код (routes/hq/pages.js) не должен вызывать эту функцию в
+// этом случае вообще (нечего сравнивать при первом создании), тот же
+// паттерн, что и все остальные *_created/updated события этого файла.
+function summarizeYaamBankDetailsDiff(before, after) {
+  const maskedParts = [];
+  for (const field of YAAM_BANK_DETAILS_MASKED_FIELDS) {
+    if (String(before[field] ?? '') === String(after[field] ?? '')) continue;
+    maskedParts.push(`${field}: ${maskAccountForAudit(before[field])} -> ${maskAccountForAudit(after[field])}`);
+  }
+  const parts = [
+    ...(summarizeDiff(before, after, YAAM_BANK_DETAILS_SAFE_DIFF_FIELDS)?.split('; ') ?? []),
+    ...maskedParts,
+  ];
+  return parts.length ? parts.join('; ') : null;
+}
+
 // Договор — БЕЗ status (см. summarizeContractStatusChange ниже) и БЕЗ
 // сырых commission_bps (показывается в процентах, человекочитаемо).
 function summarizeContractDiff(before, after) {
@@ -260,6 +296,7 @@ module.exports = {
   summarizePhotoDetails,
   summarizeLegalDetailsDiff,
   summarizeBankDetailsDiff,
+  summarizeYaamBankDetailsDiff,
   summarizeContractDiff,
   summarizeContractStatusChange,
   ACTIONS,
@@ -271,6 +308,8 @@ module.exports = {
   BANK_DETAILS_SAFE_DIFF_FIELDS,
   BANK_DETAILS_MASKED_FIELDS,
   BANK_DETAILS_NAME_ONLY_FIELDS,
+  YAAM_BANK_DETAILS_SAFE_DIFF_FIELDS,
+  YAAM_BANK_DETAILS_MASKED_FIELDS,
   CONTRACT_SAFE_DIFF_FIELDS,
   CONTRACT_NAME_ONLY_FIELDS,
 };

@@ -25,6 +25,11 @@ const settlementViews = require('../../hq/settlementViews');
 const payoutRecordService = require('../../services/hq/payoutService');
 const { CONTRACT_STATUS_LABELS } = require('../../services/hq/restaurantContractService');
 const { ValidationError } = require('../../services/hq/restaurantAdminService');
+// Stage 9.6 — реквизиты YAAM как плательщика (T-Bank T-API from.*), HQ-only
+// (задание, раздел 3: "отсутствует в public API и Telegram").
+const yaamBankDetailsService = require('../../services/hq/yaamBankDetailsService');
+const { logAuditEvent, summarizeYaamBankDetailsDiff } = require('../../services/hq/auditLog');
+const { maskAccountForUi } = require('../../services/hq/ruRequisites');
 
 const STATUS_LABELS = {
   awaiting_payment: 'Ожидают оплаты',
@@ -218,7 +223,72 @@ function formatBytesGb(bytes) {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} ГБ`;
 }
 
-function renderSettings({ hqUser, linkBasePath, csrfToken, loginError, passwordError, mediaDiskUsage }) {
+// Stage 9.6 — «Реквизиты YAAM для выплат» (задание, раздел 10): показывает
+// заполнено/не заполнено, маскированный счёт, ИНН, КПП, банк, кнопку
+// редактирования. Полные значения — только на форме редактирования
+// (задание, раздел 3: "read-only overview показывает маскированные
+// значения; полные значения доступны только на edit form").
+function renderYaamBankDetailsSection({ details, linkBasePath }) {
+  const editUrl = `${linkBasePath}/settings/yaam-bank-details/edit`;
+  if (!details) {
+    return `
+      <div class="panel">
+        <div style="font-weight:700;margin-bottom:10px">Реквизиты YAAM для выплат</div>
+        <div class="empty-state" style="margin-bottom:14px">Не заполнено. Без них ни одна попытка выплаты через Т-Банк не может быть создана.</div>
+        <a class="btn ghost" href="${editUrl}">Заполнить</a>
+      </div>`;
+  }
+  return `
+    <div class="panel">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <div style="font-weight:700">Реквизиты YAAM для выплат</div>
+        <span class="badge open">Заполнено</span>
+      </div>
+      <table>
+        <tr><td>Юридическое название</td><td style="text-align:right">${esc(details.legal_name)}</td></tr>
+        <tr><td>ИНН</td><td style="text-align:right">${esc(details.inn)}</td></tr>
+        <tr><td>КПП</td><td style="text-align:right">${esc(details.kpp)}</td></tr>
+        <tr><td>Банк</td><td style="text-align:right">${esc(details.bank_name)}</td></tr>
+        <tr><td>БИК</td><td style="text-align:right">${esc(details.bik)}</td></tr>
+        <tr><td>Расчётный счёт</td><td style="text-align:right">${esc(maskAccountForUi(details.account_number))}</td></tr>
+        <tr><td>Корр. счёт</td><td style="text-align:right">${esc(maskAccountForUi(details.correspondent_account))}</td></tr>
+      </table>
+      <a class="btn ghost" style="margin-top:14px;display:inline-block" href="${editUrl}">Редактировать</a>
+    </div>`;
+}
+
+function renderYaamBankDetailsEditForm({ details, linkBasePath, csrfToken, error }) {
+  const v = details || {};
+  const action = `${linkBasePath}/settings/yaam-bank-details`;
+  const backUrl = `${linkBasePath}/settings`;
+  return `
+    <h1>Реквизиты YAAM для выплат</h1>
+    <div class="panel">
+      <form method="post" action="${action}">
+        <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
+        <label for="ybd-legal-name">Юридическое название YAAM</label>
+        <input id="ybd-legal-name" name="legal_name" type="text" value="${esc(v.legal_name)}" required autocomplete="off">
+        <label for="ybd-inn">ИНН</label>
+        <input id="ybd-inn" name="inn" type="text" value="${esc(v.inn)}" inputmode="numeric" required autocomplete="off">
+        <label for="ybd-kpp">КПП</label>
+        <input id="ybd-kpp" name="kpp" type="text" value="${esc(v.kpp)}" inputmode="numeric" required autocomplete="off">
+        <label for="ybd-bik">БИК банка</label>
+        <input id="ybd-bik" name="bik" type="text" value="${esc(v.bik)}" inputmode="numeric" required autocomplete="off">
+        <label for="ybd-bank-name">Название банка</label>
+        <input id="ybd-bank-name" name="bank_name" type="text" value="${esc(v.bank_name)}" required autocomplete="off">
+        <label for="ybd-account">Расчётный счёт (20 цифр)</label>
+        <input id="ybd-account" name="account_number" type="text" value="${esc(v.account_number)}" inputmode="numeric" required autocomplete="off">
+        <label for="ybd-correspondent">Корреспондентский счёт (20 цифр)</label>
+        <input id="ybd-correspondent" name="correspondent_account" type="text" value="${esc(v.correspondent_account)}" inputmode="numeric" required autocomplete="off">
+        <button type="submit">Сохранить</button>
+        ${error ? `<div class="error">${esc(error)}</div>` : ''}
+      </form>
+    </div>
+    <a class="btn ghost" href="${backUrl}">← К настройкам</a>
+  `;
+}
+
+function renderSettings({ hqUser, linkBasePath, csrfToken, loginError, passwordError, mediaDiskUsage, yaamBankDetails }) {
   const changeLoginAction = `${linkBasePath}/settings/change-login`;
   const changePasswordAction = `${linkBasePath}/settings/change-password`;
   const mediaPanel = mediaDiskUsage ? `
@@ -239,6 +309,7 @@ function renderSettings({ hqUser, linkBasePath, csrfToken, loginError, passwordE
       </table>
     </div>
     ${mediaPanel}
+    ${renderYaamBankDetailsSection({ details: yaamBankDetails, linkBasePath })}
 
     <div class="panel">
       <div style="font-weight:700;margin-bottom:10px">Безопасность</div>
@@ -351,13 +422,46 @@ function createPagesRouter({ linkBasePath, mediaProvider = null }) {
         console.error('[hq/settings] Не удалось получить статистику диска медиа-хранилища:', err.message);
       }
     }
+    const yaamBankDetails = await yaamBankDetailsService.getYaamBankDetails();
     res.send(layout({
       title: 'Настройки',
       active: 'settings',
       csrfToken,
       linkBasePath,
-      body: renderSettings({ hqUser: req.session.hqUser || '', linkBasePath, csrfToken, mediaDiskUsage }),
+      body: renderSettings({ hqUser: req.session.hqUser || '', linkBasePath, csrfToken, mediaDiskUsage, yaamBankDetails }),
     }));
+  });
+
+  router.get('/settings/yaam-bank-details/edit', async (req, res, next) => {
+    try {
+      const details = await yaamBankDetailsService.getYaamBankDetails();
+      const csrfToken = ensureCsrfToken(req);
+      res.send(layout({
+        title: 'Реквизиты YAAM для выплат', active: 'settings', csrfToken, linkBasePath,
+        body: renderYaamBankDetailsEditForm({ details, linkBasePath, csrfToken }),
+      }));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post('/settings/yaam-bank-details', requireCsrf, async (req, res, next) => {
+    try {
+      const { record, created, before } = await yaamBankDetailsService.saveYaamBankDetails(req.body);
+      const action = created ? 'yaam_bank_details_created' : 'yaam_bank_details_updated';
+      const details = created ? null : summarizeYaamBankDetailsDiff(before, record);
+      await logAuditEvent({ action, restaurantId: null, details, ip: req.ip });
+      res.redirect(`${linkBasePath}/settings`);
+    } catch (err) {
+      if (err instanceof yaamBankDetailsService.ValidationError) {
+        const csrfToken = ensureCsrfToken(req);
+        return res.status(400).send(layout({
+          title: 'Реквизиты YAAM для выплат', active: 'settings', csrfToken, linkBasePath,
+          body: renderYaamBankDetailsEditForm({ details: req.body, linkBasePath, csrfToken, error: err.message }),
+        }));
+      }
+      next(err);
+    }
   });
 
   // После УСПЕШНОЙ смены логина/пароля сессия, из которой сделана смена,
@@ -382,16 +486,18 @@ function createPagesRouter({ linkBasePath, mediaProvider = null }) {
       const currentPasswordOk = owner && await verifyPassword(currentPassword, owner.password_hash);
       if (!owner || !currentPasswordOk) {
         const csrfToken = ensureCsrfToken(req);
+        const yaamBankDetails = await yaamBankDetailsService.getYaamBankDetails();
         return res.status(401).send(layout({
           title: 'Настройки', active: 'settings', csrfToken, linkBasePath,
-          body: renderSettings({ hqUser: req.session.hqUser || '', linkBasePath, csrfToken, loginError: 'Неверный текущий пароль.' }),
+          body: renderSettings({ hqUser: req.session.hqUser || '', linkBasePath, csrfToken, loginError: 'Неверный текущий пароль.', yaamBankDetails }),
         }));
       }
       if (!newLogin) {
         const csrfToken = ensureCsrfToken(req);
+        const yaamBankDetails = await yaamBankDetailsService.getYaamBankDetails();
         return res.status(400).send(layout({
           title: 'Настройки', active: 'settings', csrfToken, linkBasePath,
-          body: renderSettings({ hqUser: req.session.hqUser || '', linkBasePath, csrfToken, loginError: 'Новый логин не может быть пустым.' }),
+          body: renderSettings({ hqUser: req.session.hqUser || '', linkBasePath, csrfToken, loginError: 'Новый логин не может быть пустым.', yaamBankDetails }),
         }));
       }
       await ownerService.changeOwnerLogin(newLogin);
@@ -411,23 +517,26 @@ function createPagesRouter({ linkBasePath, mediaProvider = null }) {
       const currentPasswordOk = owner && await verifyPassword(currentPassword, owner.password_hash);
       if (!owner || !currentPasswordOk) {
         const csrfToken = ensureCsrfToken(req);
+        const yaamBankDetails = await yaamBankDetailsService.getYaamBankDetails();
         return res.status(401).send(layout({
           title: 'Настройки', active: 'settings', csrfToken, linkBasePath,
-          body: renderSettings({ hqUser: req.session.hqUser || '', linkBasePath, csrfToken, passwordError: 'Неверный текущий пароль.' }),
+          body: renderSettings({ hqUser: req.session.hqUser || '', linkBasePath, csrfToken, passwordError: 'Неверный текущий пароль.', yaamBankDetails }),
         }));
       }
       if (newPassword.length < MIN_PASSWORD_LENGTH) {
         const csrfToken = ensureCsrfToken(req);
+        const yaamBankDetails = await yaamBankDetailsService.getYaamBankDetails();
         return res.status(400).send(layout({
           title: 'Настройки', active: 'settings', csrfToken, linkBasePath,
-          body: renderSettings({ hqUser: req.session.hqUser || '', linkBasePath, csrfToken, passwordError: `Новый пароль должен быть не короче ${MIN_PASSWORD_LENGTH} символов.` }),
+          body: renderSettings({ hqUser: req.session.hqUser || '', linkBasePath, csrfToken, passwordError: `Новый пароль должен быть не короче ${MIN_PASSWORD_LENGTH} символов.`, yaamBankDetails }),
         }));
       }
       if (newPassword !== confirmPassword) {
         const csrfToken = ensureCsrfToken(req);
+        const yaamBankDetails = await yaamBankDetailsService.getYaamBankDetails();
         return res.status(400).send(layout({
           title: 'Настройки', active: 'settings', csrfToken, linkBasePath,
-          body: renderSettings({ hqUser: req.session.hqUser || '', linkBasePath, csrfToken, passwordError: 'Пароли не совпадают.' }),
+          body: renderSettings({ hqUser: req.session.hqUser || '', linkBasePath, csrfToken, passwordError: 'Пароли не совпадают.', yaamBankDetails }),
         }));
       }
       const newPasswordHash = await hashPassword(newPassword);

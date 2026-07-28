@@ -39,6 +39,16 @@
 const db = require('../../db/postgresql');
 const crypto = require('node:crypto');
 const { ValidationError } = require('./restaurantLifecycle');
+// Stage 9.6 — снимок реквизитов на попытку (задание, раздел 5). Требуются
+// ДО создания любой попытки (не только для readiness-предпросмотра — сама
+// попытка физически не может быть создана без готового снимка, начиная с
+// этого этапа). tbankPayoutReadiness.js НЕ требует этот файл обратно (нет
+// цикла) — см. комментарий в начале того файла.
+const yaamBankDetailsService = require('./yaamBankDetailsService');
+const restaurantBankDetailsService = require('./restaurantBankDetailsService');
+const restaurantContractService = require('./restaurantContractService');
+const { buildPaymentPurpose } = require('./tbankPayoutReadiness');
+const { normalizeKppForTBank } = require('./tbankRequestMapper');
 
 const OBLIGATION_STATUSES = ['prepared', 'processing', 'unknown', 'succeeded', 'blocked'];
 const OBLIGATION_TERMINAL_STATUSES = ['succeeded'];
@@ -163,6 +173,15 @@ async function listAttemptsForPayout(payoutId) {
   return db.query('SELECT * FROM payout_attempts WHERE payout_id = $1 ORDER BY attempt_number', [payoutId]);
 }
 
+// Stage 9.6 — снимок реквизитов конкретной попытки (задание, раздел 10:
+// "snapshot реквизитов попытки в маскированном виде" на карточке выплаты).
+// Маскировка — забота вызывающего кода (hq/payoutViews.js), не этой функции:
+// она возвращает сырые значения, как и getAttemptById/getPayoutById.
+async function getAttemptRequisites(attemptId) {
+  const rows = await db.query('SELECT * FROM payout_attempt_requisites WHERE attempt_id = $1', [attemptId]);
+  return rows[0] || null;
+}
+
 // ---------------------------------------------------------------------------
 // Внутренний помощник: перевод обязательства строго ИЗ одного из ожидаемых
 // статусов (conditional UPDATE — вторая независимая линия защиты от гонки,
@@ -195,6 +214,74 @@ async function requireAttemptForUpdate(attemptId, client) {
 }
 
 // ---------------------------------------------------------------------------
+// Stage 9.6 — построение и вставка immutable snapshot реквизитов (задание,
+// раздел 5) ВНУТРИ той же транзакции, что и создание самой попытки: если
+// снимок невозможно построить (нет реквизитов YAAM/ресторана, договор не
+// подписан, назначение платежа не определено), ВСЯ попытка не создаётся —
+// откатывается вместе со снимком (задание, раздел 6: "запрещать создание
+// body, если отсутствуют реквизиты YAAM или ресторана" — здесь это уже
+// применено на уровень раньше, к самому созданию попытки, не только к
+// финальной сборке T-Bank request body).
+//
+// recipient_kpp трансформируется в T-Bank представление ('' -> '0' для ИП)
+// ЗДЕСЬ, один раз, в момент создания снимка (см. db/postgresql/schema.sql,
+// комментарий у payout_attempt_requisites.recipient_kpp, за полным
+// обоснованием, почему трансформация не отложена до mapper'а).
+async function buildAndInsertAttemptRequisites(client, payout, attemptId) {
+  const yaamDetails = await yaamBankDetailsService.getYaamBankDetails();
+  if (!yaamDetails) {
+    throw new ValidationError('Реквизиты YAAM не заполнены — создать попытку нельзя.');
+  }
+  if (!yaamBankDetailsService.isStoredRecordValid(yaamDetails)) {
+    throw new ValidationError('Реквизиты YAAM некорректны — создать попытку нельзя.');
+  }
+
+  const restaurantDetails = await restaurantBankDetailsService.getBankDetails(payout.restaurant_id);
+  if (!restaurantDetails) {
+    throw new ValidationError('Банковские реквизиты ресторана не заполнены — создать попытку нельзя.');
+  }
+  if (!restaurantBankDetailsService.isStoredRecordValid(restaurantDetails)) {
+    throw new ValidationError('Банковские реквизиты ресторана некорректны — создать попытку нельзя.');
+  }
+
+  const contract = await restaurantContractService.getContract(payout.restaurant_id);
+  if (!contract || contract.status !== 'signed') {
+    throw new ValidationError('Договор с рестораном не подписан — создать попытку нельзя.');
+  }
+
+  const periodRows = await db.query(
+    'SELECT period_from, period_to FROM settlement_periods WHERE id = $1',
+    [payout.settlement_period_id],
+    client,
+  );
+  const period = periodRows[0] || {};
+  const paymentPurpose = buildPaymentPurpose({
+    defaultPurpose: restaurantDetails.default_payment_purpose,
+    contractNumber: contract.contract_number,
+    periodFrom: period.period_from,
+    periodTo: period.period_to,
+    payoutId: payout.id,
+  });
+  if (!paymentPurpose) {
+    throw new ValidationError('Не удалось определить назначение платежа — заполните его в реквизитах ресторана.');
+  }
+
+  await db.execute(
+    `INSERT INTO payout_attempt_requisites
+       (attempt_id, recipient_name, recipient_inn, recipient_kpp, account_number, bik,
+        bank_name, correspondent_account, payment_purpose, amount, payer_account_number, payer_kpp)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+    [
+      attemptId, restaurantDetails.recipient_name, restaurantDetails.recipient_inn,
+      normalizeKppForTBank(restaurantDetails.recipient_kpp), restaurantDetails.account_number, restaurantDetails.bik,
+      restaurantDetails.bank_name, restaurantDetails.correspondent_account, paymentPurpose, payout.amount,
+      yaamDetails.account_number, yaamDetails.kpp,
+    ],
+    client,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // createPayoutAttempt (задание, раздел 7) — единственный способ создать
 // НОВУЮ попытку. Проверки: обязательство prepared/blocked; если blocked —
 // ПОСЛЕДНЯЯ попытка должна быть retryable=true; активной попытки не должно
@@ -203,6 +290,11 @@ async function requireAttemptForUpdate(attemptId, client) {
 // НЕ меняет статус обязательства (задание, раздел 6: "processing: an active
 // attempt is submitting or processing" — НЕ "created"; обязательство
 // переходит в processing только в markAttemptSubmitting).
+//
+// Stage 9.6: попытка теперь ФИЗИЧЕСКИ не может быть создана без immutable
+// snapshot реквизитов (buildAndInsertAttemptRequisites выше) — обе вставки
+// (payout_attempts + payout_attempt_requisites) происходят в ОДНОЙ
+// транзакции; если снимок невозможен, вся попытка откатывается.
 // ---------------------------------------------------------------------------
 async function createPayoutAttempt(payoutId) {
   return db.transaction(async (client) => {
@@ -250,7 +342,9 @@ async function createPayoutAttempt(payoutId) {
       [payoutId, attemptNumber, paymentId],
       client,
     );
-    return inserted.rows[0];
+    const attempt = inserted.rows[0];
+    await buildAndInsertAttemptRequisites(client, payout, attempt.id);
+    return attempt;
   });
 }
 
@@ -574,6 +668,66 @@ async function checkPayoutInvariants() {
     violations.push({ kind: 'succeeded_attempt_with_non_succeeded_obligation', count: succeededAttemptWithoutObligation.length });
   }
 
+  // -------------------------------------------------------------------------
+  // Stage 9.6 (задание, раздел 2 — "Legacy consistency"): новые проверки
+  // рассогласования между статусом обязательства и реальным набором его
+  // попыток. Ни одна из них НЕ должна срабатывать на данных, созданных
+  // только через сервисный слой (markAttemptSubmitting/Processing/Unknown
+  // всегда атомарно синхронизируют оба статуса в одной транзакции) — их
+  // единственная цель — обнаружить порчу данных В ОБХОД сервисного слоя
+  // (прямой SQL, ручное вмешательство, будущий баг).
+  // -------------------------------------------------------------------------
+
+  // processing БЕЗ единой активной попытки — обязательство утверждает, что
+  // "попытка сейчас отправляется/обрабатывается", но в payout_attempts нет
+  // ни одной строки, подтверждающей это.
+  const processingWithoutActiveAttempt = await db.query(`
+    SELECT rp.id FROM restaurant_payouts rp
+    WHERE rp.status = 'processing'
+      AND NOT EXISTS (SELECT 1 FROM payout_attempts pa WHERE pa.payout_id = rp.id AND pa.status = ANY($1::text[]))
+  `, [ATTEMPT_ACTIVE_STATUSES]);
+  if (processingWithoutActiveAttempt.length > 0) {
+    violations.push({ kind: 'processing_without_active_attempt', count: processingWithoutActiveAttempt.length });
+  }
+
+  // unknown БЕЗ попытки именно в статусе unknown (не просто "какая-то
+  // активная" — конкретно unknown, зеркально статусу родителя).
+  const unknownWithoutUnknownAttempt = await db.query(`
+    SELECT rp.id FROM restaurant_payouts rp
+    WHERE rp.status = 'unknown'
+      AND NOT EXISTS (SELECT 1 FROM payout_attempts pa WHERE pa.payout_id = rp.id AND pa.status = 'unknown')
+  `);
+  if (unknownWithoutUnknownAttempt.length > 0) {
+    violations.push({ kind: 'unknown_without_unknown_attempt', count: unknownWithoutUnknownAttempt.length });
+  }
+
+  // prepared/blocked С активной попыткой — обратное рассогласование:
+  // обязательство утверждает "сейчас нет попытки в работе", но она есть.
+  const preparedOrBlockedWithActiveAttempt = await db.query(`
+    SELECT rp.id FROM restaurant_payouts rp
+    WHERE rp.status IN ('prepared', 'blocked')
+      AND EXISTS (SELECT 1 FROM payout_attempts pa WHERE pa.payout_id = rp.id AND pa.status = ANY($1::text[]))
+  `, [ATTEMPT_ACTIVE_STATUSES]);
+  if (preparedOrBlockedWithActiveAttempt.length > 0) {
+    violations.push({ kind: 'prepared_or_blocked_with_active_attempt', count: preparedOrBlockedWithActiveAttempt.length });
+  }
+
+  // Снимок реквизитов (задание, раздел 5: "snapshot amount должен совпадать
+  // с obligation amount") — проверяется ТОЛЬКО там, где снимок вообще
+  // существует (задание Stage 9.5, раздел 13, тот же принцип: legacy-
+  // попытки/обязательства без снимка — не нарушение, а честная историческая
+  // граница модели, см. комментарий у obligation_succeeded_without_
+  // succeeded_attempt выше).
+  const snapshotAmountMismatch = await db.query(`
+    SELECT par.attempt_id FROM payout_attempt_requisites par
+    JOIN payout_attempts pa ON pa.id = par.attempt_id
+    JOIN restaurant_payouts rp ON rp.id = pa.payout_id
+    WHERE par.amount <> rp.amount
+  `);
+  if (snapshotAmountMismatch.length > 0) {
+    violations.push({ kind: 'attempt_requisites_amount_mismatch', count: snapshotAmountMismatch.length });
+  }
+
   return { ok: violations.length === 0, violations };
 }
 
@@ -598,6 +752,7 @@ module.exports = {
   markAttemptFailed,
   getPayoutById,
   getAttemptById,
+  getAttemptRequisites,
   listAttemptsForPayout,
   getPayoutForSettlementLine,
   listPayoutsForPeriod,

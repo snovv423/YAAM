@@ -47,6 +47,40 @@ const orderService = require(path.join(SERVER_DIR, 'services/postgresql/orderSer
 const menuAdminService = require(path.join(SERVER_DIR, 'services/hq/menuAdminService.js'));
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const payoutService = require(path.join(SERVER_DIR, 'services/hq/payoutService.js'));
+// Stage 9.6 — createPayoutAttempt теперь требует immutable snapshot
+// реквизитов (реквизиты YAAM + ресторана + подписанный договор); этот
+// Stage 9/9.5 сценарий сам про попытки не про реквизиты, поэтому они
+// сидируются напрямую сервисами (не через UI — это отдельный, уже
+// протестированный flow, см. hq-restaurant-legal-bank-flow.spec.ts и
+// hq-tbank-readiness-flow.spec.ts), а не дублируются здесь по шагам.
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const yaamBankDetailsService = require(path.join(SERVER_DIR, 'services/hq/yaamBankDetailsService.js'));
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const restaurantBankDetailsService = require(path.join(SERVER_DIR, 'services/hq/restaurantBankDetailsService.js'));
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const restaurantContractService = require(path.join(SERVER_DIR, 'services/hq/restaurantContractService.js'));
+
+const FICTITIOUS_BIK = '044999225';
+const FICTITIOUS_RS = '40702810938050001238';
+const FICTITIOUS_KS = '30101810400000004565';
+const FICTITIOUS_INN12 = '770912345616';
+const FICTITIOUS_INN10 = '7709123453';
+const FICTITIOUS_KPP = '770101001';
+
+async function seedPayoutAttemptReadiness(restaurantId: number) {
+  await yaamBankDetailsService.saveYaamBankDetails({
+    legal_name: 'ООО YAAM Платформа', inn: FICTITIOUS_INN10, kpp: FICTITIOUS_KPP,
+    account_number: FICTITIOUS_RS, bik: FICTITIOUS_BIK, bank_name: 'ТЕСТБАНК', correspondent_account: FICTITIOUS_KS,
+  });
+  await restaurantBankDetailsService.saveBankDetails(restaurantId, {
+    recipient_name: 'ИП Тестов Тест Тестович', recipient_inn: FICTITIOUS_INN12, recipient_kpp: '',
+    account_number: FICTITIOUS_RS, bik: FICTITIOUS_BIK, bank_name: 'ТЕСТБАНК', correspondent_account: FICTITIOUS_KS,
+    default_payment_purpose: 'Оплата услуг доставки по договору',
+  });
+  await restaurantContractService.saveContract(restaurantId, {
+    contract_number: `Д-${restaurantId}`, status: 'signed', signed_at: '2026-01-01', commission_percent: '7',
+  });
+}
 
 function dateStr(offsetDays: number) {
   const d = new Date(Date.now() + offsetDays * 24 * 60 * 60 * 1000);
@@ -120,6 +154,7 @@ test('YAAM HQ: сущность выплаты — подготовка, кар�
   await expect(page).toHaveURL(new RegExp(`${API_BASE_URL}/hq/restaurants/\\d+$`));
   const restaurantId = Number(page.url().split('/').pop());
   const menuItem = await seedMenuItem(restaurantId, 1000);
+  await seedPayoutAttemptReadiness(restaurantId);
 
   await page.goto(`${API_BASE_URL}/hq/restaurants/${restaurantId}`);
   await page.getByRole('button', { name: 'Опубликовать' }).click();
