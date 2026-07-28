@@ -64,6 +64,21 @@ const ACTIONS = [
   'payout_processing',
   'payout_succeeded',
   'payout_failed',
+  // Stage 9.5 — попытки обращения к банку (payout_attempts). ВСЕ ПЯТЬ здесь
+  // RESERVED, не EMITTED (задание, раздел 12: "if service methods have no
+  // real route/bank caller yet, do not fabricate fake audit events" — тот же
+  // принцип, что уже применён выше к payout_processing/succeeded/failed в
+  // Stage 9: createPayoutAttempt/markAttemptSubmitting/Processing/Unknown/
+  // Succeeded/Failed реальны и полностью протестированы в payoutService.js,
+  // но ни один HQ-маршрут их не вызывает — реальный вызывающий код появится
+  // только вместе с банковским адаптером на Stage 10). Добавлены сюда
+  // заранее, синхронно со schema.sql hq_audit_log_action_check, чтобы Stage
+  // 10 мог начать логировать сразу, без отдельной миграции allowlist'а.
+  'payout_attempt_created',
+  'payout_attempt_processing',
+  'payout_attempt_unknown',
+  'payout_attempt_succeeded',
+  'payout_attempt_failed',
 ];
 
 // Единственные поля ресторана, которые вообще могут попасть в текст лога —

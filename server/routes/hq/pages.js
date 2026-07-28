@@ -108,11 +108,13 @@ function renderOverview({ top, active, restaurants, finance, payoutStats, attent
     <div class="panel">
       <div style="font-weight:700;margin-bottom:14px">Выплаты</div>
       <table>
-        <tr><td>Подготовлено выплат</td><td style="text-align:right">${payoutStats.preparedCount}</td></tr>
+        <tr><td>Подготовлено (ждут попытки)</td><td style="text-align:right">${payoutStats.preparedCount}</td></tr>
+        <tr><td>В обработке</td><td style="text-align:right">${payoutStats.processingCount}</td></tr>
+        <tr><td>Результат неизвестен</td><td style="text-align:right">${payoutStats.unknownCount}</td></tr>
+        <tr><td>Заблокировано (требуют решения)</td><td style="text-align:right">${payoutStats.blockedCount}</td></tr>
         <tr><td>Успешных выплат</td><td style="text-align:right">${payoutStats.succeededCount}</td></tr>
-        <tr><td>Выплат с ошибкой</td><td style="text-align:right">${payoutStats.failedCount}</td></tr>
-        <tr><td>Сумма подготовленных</td><td style="text-align:right">${payoutStats.preparedAmount} ₽</td></tr>
         <tr><td>Сумма успешных</td><td style="text-align:right">${payoutStats.succeededAmount} ₽</td></tr>
+        <tr><td>Сумма к выплате (ещё не оплачено)</td><td style="text-align:right">${payoutStats.owedAmount} ₽</td></tr>
       </table>
       <a class="btn ghost" style="margin-top:14px;display:inline-block" href="${linkBasePath}/payouts">Открыть «Выплаты»</a>
     </div>

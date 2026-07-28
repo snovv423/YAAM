@@ -1,67 +1,115 @@
 'use strict';
 
-// YAAM HQ Stage 9 — Payout Entity Foundation (NO bank integration).
+// YAAM HQ Stage 9.5 — Payout Attempts Foundation for Russian T-Bank
+// Integration (NO bank integration — задание, раздел "Hard restrictions").
 //
-// АУДИТ ПЕРЕД РАЗРАБОТКОЙ (задание: "Работай как Principal Backend Architect
-// ... сначала проведи аудит текущей архитектуры Stage 6 → Stage 8"):
-//   - services/hq/restaurantPayoutService.js (Stage 6) — это НЕ эта сущность.
-//     Тот файл считает READINESS (готовы ли юр.данные/банк.реквизиты/договор
-//     ресторана) — чистая проверка полноты данных, ни одного денежного факта,
-//     ни одной строки в базе. Имя "payout" в нём означает "готовность К
-//     будущей выплате", не саму выплату. Совпадение слов в имени —
-//     НАМЕРЕННО НЕ переиспользовано для этого нового файла (другое имя:
-//     payoutService.js, не restaurantPayoutService.js) — во избежание
-//     путаницы между "готовностью" (Stage 6) и "фактом попытки выплаты"
-//     (Stage 9, эта сущность).
-//   - services/hq/settlementService.js (Stage 8) — остаётся ЕДИНСТВЕННЫМ
-//     источником суммы к выплате: settlement_restaurant_lines.payable_amount
-//     уже immutable (Stage 8 snapshot-триггеры). Этот файл НИКОГДА не читает
-//     orders/payments/refunds и не пересчитывает сумму — только копирует
-//     payable_amount РОВНО ОДИН РАЗ в момент prepareRestaurantPayout().
-//   - Главное правило задания: "Закрытый расчётный период фиксирует долг
-//     YAAM перед рестораном. Выплата — это отдельная сущность. Расчётный
-//     период никогда не означает автоматически, что деньги отправлены." —
-//     ничего в этом файле не переводит деньги ни при каком статусе; статусы
-//     succeeded/failed фиксируют РЕЗУЛЬТАТ будущей (в Stage 10) банковской
-//     операции, не выполняют её сами.
+// АУДИТ ПЕРЕД ИЗМЕНЕНИЕМ (задание, раздел 1) — что именно в Stage 9 стало
+// неверным с появлением реальных попыток обращения к банку:
+//   - Stage 9 смешивал "долг перед рестораном" (обязательство) и "одна
+//     попытка отправить деньги банку" в ОДНОЙ строке restaurant_payouts:
+//     markProcessing/markSucceeded/markFailed мутировали САМО обязательство.
+//     failed был terminal И immutable на уровне обязательства ОДНОВРЕМЕННО —
+//     то есть после первого же провала retry был архитектурно невозможен
+//     без стирания истории первой попытки (было бы нужно либо снять
+//     immutability, либо переиспользовать ту же строку — оба варианта
+//     ломают финансовый аудит).
+//   - Оба независимых исследования после Stage 9 (T-Bank T-API документация
+//     и индустриальное исследование Stripe/Adyen/Wise/PayPal/Razorpay/Open
+//     Banking/Shopify/Kill Bill) независимо подтвердили один и тот же вывод:
+//     нужно РАЗДЕЛИТЬ "обязательство" и "попытку" на две сущности — см.
+//     YAAM-TBank-API-Documentation-Audit.md и
+//     YAAM-Payout-Architecture-Industry-Research.md.
 //
-// АРХИТЕКТУРНОЕ РЕШЕНИЕ (отклонение от буквальной формулировки задания,
-// см. полное обоснование в db/postgresql/schema.sql, комментарий над
-// restaurant_payouts): "один закрытый период — максимум одна выплата"
-// реализовано как "максимум одна выплата НА ПАРУ (период, ресторан)", а не
-// одна выплата на период в целом — settlement_restaurant_lines уже хранит
-// ОТДЕЛЬНОЕ обязательство на каждый ресторан периода, и у каждого ресторана
-// свои банковские реквизиты, так что единая "одна выплата на весь период"
-// была бы архитектурно некорректна для периода с несколькими ресторанами.
+// Что ОСТАЁТСЯ БЕЗ ИЗМЕНЕНИЙ из Stage 9 (задание, раздел 2: "Preserve the
+// obligation model"): restaurant_payouts — единственное обязательство на
+// пару (settlement_period_id, restaurant_id); amount копируется РОВНО ОДИН
+// РАЗ из settlement_restaurant_lines.payable_amount и никогда не
+// пересчитывается; prepareRestaurantPayout() — та же функция, без изменений
+// в проверках создания.
+//
+// Что МЕНЯЕТСЯ (задание, раздел 6): статусы обязательства — prepared /
+// processing / unknown / succeeded / blocked (failed убран — это теперь
+// статус ПОПЫТКИ, не обязательства). succeeded — единственный terminal
+// статус обязательства (задание: "Do not retain obligation-level failed as
+// a permanent dead end").
+//
+// Что ДОБАВЛЯЕТСЯ (задание, раздел 3-7): payout_attempts — новая таблица,
+// каждая РЕАЛЬНАЯ попытка обращения к банку — своя строка со своим
+// payment_id, своей неизменяемой историей после terminal (succeeded/failed).
 const db = require('../../db/postgresql');
+const crypto = require('node:crypto');
 const { ValidationError } = require('./restaurantLifecycle');
 
-const STATUSES = ['prepared', 'processing', 'succeeded', 'failed'];
-const TERMINAL_STATUSES = ['succeeded', 'failed'];
+const OBLIGATION_STATUSES = ['prepared', 'processing', 'unknown', 'succeeded', 'blocked'];
+const OBLIGATION_TERMINAL_STATUSES = ['succeeded'];
+const OBLIGATION_ACTIVE_ATTEMPT_ALLOWED_FROM = ['prepared', 'blocked'];
 
 const STATUS_LABELS = {
   prepared: 'Подготовлена',
   processing: 'В обработке',
+  unknown: 'Неопределённый результат',
+  succeeded: 'Успешно',
+  blocked: 'Заблокирована',
+};
+
+const ATTEMPT_STATUSES = ['created', 'submitting', 'processing', 'unknown', 'succeeded', 'failed'];
+const ATTEMPT_ACTIVE_STATUSES = ['created', 'submitting', 'processing', 'unknown'];
+const ATTEMPT_TERMINAL_STATUSES = ['succeeded', 'failed'];
+
+const ATTEMPT_STATUS_LABELS = {
+  created: 'Создана',
+  submitting: 'Отправляется',
+  processing: 'В обработке банком',
+  unknown: 'Результат неизвестен',
   succeeded: 'Успешно',
   failed: 'Ошибка',
 };
 
+const MAX_ERROR_MESSAGE_LENGTH = 500;
+
 // ---------------------------------------------------------------------------
-// Подготовка выплаты (задание: "prepareRestaurantPayout()")
+// payment_id (задание, раздел 8) — генерируется YAAM (НЕ банком, см. T-Bank
+// audit, раздел 6: поле "id" в запросе создания платежа заполняет ВСЕГДА
+// вызывающая сторона и оно же служит ключом идемпотентности Т-Банка).
+// Формат: детерминированная привязка к (payoutId, attemptNumber) + случайный
+// hex-суффикс (unpredictability поверх уникальности — T-Bank этого не
+// требует, но это дешёвая дополнительная защита, не более). ≤64 символов
+// (T-Bank лимит на поле id), никаких имён ресторанов/счетов/ИНН/ПДн.
+function generatePaymentId(payoutId, attemptNumber) {
+  if (!Number.isInteger(payoutId) || payoutId < 1) {
+    throw new Error('generatePaymentId: payoutId должен быть положительным целым числом');
+  }
+  if (!Number.isInteger(attemptNumber) || attemptNumber < 1) {
+    throw new Error('generatePaymentId: attemptNumber должен быть положительным целым числом');
+  }
+  const suffix = crypto.randomBytes(4).toString('hex');
+  const id = `yaam-po-${payoutId}-a${attemptNumber}-${suffix}`;
+  // Defense-in-depth: если формат когда-нибудь изменят так, что он превысит
+  // лимит T-Bank, тест/вызов должен упасть громко здесь, а не тихо на
+  // будущем HTTP-запросе к банку.
+  if (id.length > 64) {
+    throw new Error(`generatePaymentId: сгенерированный id длиннее 64 символов (${id.length})`);
+  }
+  return id;
+}
+
+// error_message — санитизированное, ОГРАНИЧЕННОЕ поле (задание, раздел 3:
+// "must be safe and bounded, not raw response storage"). Обрезает и
+// нормализует, но НЕ пытается парсить/разбирать сырой ответ банка —
+// ответственность вызывающего кода передать сюда уже безопасную строку
+// (никогда полный raw payload).
+function sanitizeErrorMessage(raw, maxLen = MAX_ERROR_MESSAGE_LENGTH) {
+  if (raw === null || raw === undefined) return null;
+  const str = String(raw).trim();
+  if (!str) return null;
+  return str.slice(0, maxLen);
+}
+
 // ---------------------------------------------------------------------------
-//
-// Проверки (задание, дословно): период закрыт; выплаты ещё нет; сумма > 0.
-// Сумма ЧИТАЕТСЯ, не пересчитывается — единственный SELECT здесь идёт в
-// settlement_restaurant_lines, ни разу в orders/payments/refunds.
-//
-// Гонка (два одновременных вызова prepareRestaurantPayout на одну и ту же
-// пару период+ресторан) закрыта на уровне схемы: UNIQUE(settlement_period_id,
-// restaurant_id) на restaurant_payouts — проигравший INSERT получит SQLSTATE
-// 23505, превращаемую здесь в понятную ValidationError. Отдельная
-// SERIALIZABLE-транзакция для этого не нужна (тот же принцип, что и
-// reserveRefundRow() в orderService.js — "INSERT + partial/обычный UNIQUE
-// как последняя линия защиты" дешевле полной сериализации для простого
-// insert-once сценария).
+// Подготовка обязательства (задание: "The existing «Подготовить выплату»
+// action may remain only for creating the obligation, not an attempt") —
+// БЕЗ ИЗМЕНЕНИЙ по сравнению с Stage 9.
+// ---------------------------------------------------------------------------
 async function prepareRestaurantPayout(settlementPeriodId, restaurantId, { createdBy = null, notes = '' } = {}) {
   const lineRows = await db.query(
     `SELECT srl.*, sp.status AS period_status
@@ -97,22 +145,6 @@ async function prepareRestaurantPayout(settlementPeriodId, restaurantId, { creat
   }
 }
 
-// ---------------------------------------------------------------------------
-// Переходы состояний (задание: "Продумай корректную state machine")
-// ---------------------------------------------------------------------------
-//
-// Каждая функция — явная app-level проверка ДО попытки UPDATE (понятная
-// ValidationError вместо сырой ошибки триггера БД для штатного вызывающего
-// кода), а conditional UPDATE ... WHERE status = ANY(...) — вторая,
-// независимая линия защиты от гонки (тот же принцип, что markPaid()/
-// restaurantAccept() в orderService.js). ТРЕТЬЯ линия — DB-триггеры
-// fn_restaurant_payouts_valid_transition/fn_restaurant_payouts_immutable_after_terminal
-// (db/postgresql/schema.sql) — отклонят даже гипотетическую ошибку в этом
-// самом файле. rowCount!==1 после conditional UPDATE означает, что статус
-// изменился между SELECT и UPDATE (проиграна гонка) — сообщаем об этом
-// понятной ошибкой, не тихим no-op (в отличие от markPaid, где повторный
-// вызов ожидаем и штатен, здесь HQ-оператор должен явно увидеть, что переход
-// не применился).
 async function getPayoutById(payoutId) {
   const numericId = Number.parseInt(payoutId, 10);
   if (!Number.isInteger(numericId) || numericId < 1) return null;
@@ -120,79 +152,263 @@ async function getPayoutById(payoutId) {
   return rows[0] || null;
 }
 
-async function requirePayout(payoutId) {
-  const payout = await getPayoutById(payoutId);
-  if (!payout) throw new ValidationError('Выплата не найдена.');
-  return payout;
+async function getAttemptById(attemptId) {
+  const numericId = Number.parseInt(attemptId, 10);
+  if (!Number.isInteger(numericId) || numericId < 1) return null;
+  const rows = await db.query('SELECT * FROM payout_attempts WHERE id = $1', [numericId]);
+  return rows[0] || null;
 }
 
-async function markProcessing(payoutId, { externalPayoutId = null } = {}) {
-  const current = await requirePayout(payoutId);
-  if (current.status !== 'prepared') {
-    throw new ValidationError(`Нельзя перевести в processing из статуса "${current.status}" (разрешено только из "prepared").`);
-  }
-  const updated = await db.execute(
-    `UPDATE restaurant_payouts
-       SET status = 'processing', processing_at = NOW(), updated_at = NOW(),
-           external_payout_id = COALESCE($2, external_payout_id)
-     WHERE id = $1 AND status = 'prepared'
-     RETURNING *`,
-    [payoutId, externalPayoutId],
-  );
-  if (updated.rowCount !== 1) {
-    throw new ValidationError('Не удалось перевести выплату в processing — статус уже изменился (гонка).');
-  }
-  return updated.rows[0];
-}
-
-async function markSucceeded(payoutId, { externalPayoutId = null } = {}) {
-  const current = await requirePayout(payoutId);
-  if (current.status !== 'processing') {
-    throw new ValidationError(`Нельзя перевести в succeeded из статуса "${current.status}" (разрешено только из "processing").`);
-  }
-  const updated = await db.execute(
-    `UPDATE restaurant_payouts
-       SET status = 'succeeded', completed_at = NOW(), updated_at = NOW(),
-           external_payout_id = COALESCE($2, external_payout_id)
-     WHERE id = $1 AND status = 'processing'
-     RETURNING *`,
-    [payoutId, externalPayoutId],
-  );
-  if (updated.rowCount !== 1) {
-    throw new ValidationError('Не удалось перевести выплату в succeeded — статус уже изменился (гонка).');
-  }
-  return updated.rows[0];
-}
-
-// failed разрешён и из prepared (отказ на этапе валидации реквизитов, ещё до
-// обращения к провайдеру), и из processing (реальный сетевой/провайдерский
-// отказ) — задание запрещает ТОЛЬКО "failed -> processing" и "prepared ->
-// succeeded", про "prepared -> failed" запрета нет, и оба сценария реальны
-// (см. db/postgresql/schema.sql, комментарий у CHECK-ограничения).
-async function markFailed(payoutId, { failureReason }) {
-  if (!failureReason || !String(failureReason).trim()) {
-    throw new ValidationError('failureReason обязателен для перехода в failed.');
-  }
-  const current = await requirePayout(payoutId);
-  if (!['prepared', 'processing'].includes(current.status)) {
-    throw new ValidationError(`Нельзя перевести в failed из статуса "${current.status}" (разрешено только из "prepared" или "processing").`);
-  }
-  const updated = await db.execute(
-    `UPDATE restaurant_payouts
-       SET status = 'failed', failed_at = NOW(), updated_at = NOW(), failure_reason = $2
-     WHERE id = $1 AND status = ANY($3::text[])
-     RETURNING *`,
-    [payoutId, String(failureReason).trim().slice(0, 500), ['prepared', 'processing']],
-  );
-  if (updated.rowCount !== 1) {
-    throw new ValidationError('Не удалось перевести выплату в failed — статус уже изменился (гонка).');
-  }
-  return updated.rows[0];
+async function listAttemptsForPayout(payoutId) {
+  return db.query('SELECT * FROM payout_attempts WHERE payout_id = $1 ORDER BY attempt_number', [payoutId]);
 }
 
 // ---------------------------------------------------------------------------
-// Чтение для UI (задание: HQ "Выплаты" read-only + карточка + settlement-
-// индикатор + dashboard-статистика)
+// Внутренний помощник: перевод обязательства строго ИЗ одного из ожидаемых
+// статусов (conditional UPDATE — вторая независимая линия защиты от гонки,
+// тот же принцип, что и во всём этом файле; ТРЕТЬЯ линия —
+// fn_restaurant_payouts_valid_transition в БД). extraSet/extraParams — для
+// кэш-полей обязательства (processing_at/completed_at/failed_at/
+// failure_reason), которые обновляются ВМЕСТЕ со статусом атомарно.
+// ---------------------------------------------------------------------------
+async function transitionPayoutStatus(payoutId, fromStatuses, toStatus, client, extraSql = '', extraParams = []) {
+  const params = [payoutId, toStatus, fromStatuses, ...extraParams];
+  const updated = await db.execute(
+    `UPDATE restaurant_payouts
+       SET status = $2, updated_at = NOW() ${extraSql}
+     WHERE id = $1 AND status = ANY($3::text[])
+     RETURNING *`,
+    params,
+    client,
+  );
+  if (updated.rowCount !== 1) {
+    throw new ValidationError('Не удалось перевести обязательство в новый статус — статус уже изменился (гонка).');
+  }
+  return updated.rows[0];
+}
+
+async function requireAttemptForUpdate(attemptId, client) {
+  const rows = await db.query('SELECT * FROM payout_attempts WHERE id = $1 FOR UPDATE', [attemptId], client);
+  const attempt = rows[0];
+  if (!attempt) throw new ValidationError('Попытка выплаты не найдена.');
+  return attempt;
+}
+
+// ---------------------------------------------------------------------------
+// createPayoutAttempt (задание, раздел 7) — единственный способ создать
+// НОВУЮ попытку. Проверки: обязательство prepared/blocked; если blocked —
+// ПОСЛЕДНЯЯ попытка должна быть retryable=true; активной попытки не должно
+// существовать (partial UNIQUE-индекс — последняя линия защиты, но явная
+// проверка здесь даёт понятную ValidationError, а не сырую ошибку 23505).
+// НЕ меняет статус обязательства (задание, раздел 6: "processing: an active
+// attempt is submitting or processing" — НЕ "created"; обязательство
+// переходит в processing только в markAttemptSubmitting).
+// ---------------------------------------------------------------------------
+async function createPayoutAttempt(payoutId) {
+  return db.transaction(async (client) => {
+    const payoutRows = await db.query('SELECT * FROM restaurant_payouts WHERE id = $1 FOR UPDATE', [payoutId], client);
+    const payout = payoutRows[0];
+    if (!payout) throw new ValidationError('Выплата не найдена.');
+    if (!OBLIGATION_ACTIVE_ATTEMPT_ALLOWED_FROM.includes(payout.status)) {
+      throw new ValidationError(
+        `Нельзя создать попытку для выплаты в статусе "${payout.status}" (разрешено только из "prepared" или "blocked").`,
+      );
+    }
+
+    const activeRows = await db.query(
+      `SELECT id FROM payout_attempts WHERE payout_id = $1 AND status = ANY($2::text[])`,
+      [payoutId, ATTEMPT_ACTIVE_STATUSES],
+      client,
+    );
+    if (activeRows.length > 0) {
+      throw new ValidationError('У этой выплаты уже есть активная попытка — создать вторую нельзя.');
+    }
+
+    if (payout.status === 'blocked') {
+      const lastRows = await db.query(
+        `SELECT retryable FROM payout_attempts WHERE payout_id = $1 ORDER BY attempt_number DESC LIMIT 1`,
+        [payoutId],
+        client,
+      );
+      const last = lastRows[0];
+      if (!last || last.retryable !== true) {
+        throw new ValidationError('Последняя попытка не отмечена как retryable — новая попытка требует решения оператора.');
+      }
+    }
+
+    const nextNumberRows = await db.query(
+      `SELECT COALESCE(MAX(attempt_number), 0) + 1 AS next_number FROM payout_attempts WHERE payout_id = $1`,
+      [payoutId],
+      client,
+    );
+    const attemptNumber = nextNumberRows[0].next_number;
+    const paymentId = generatePaymentId(payoutId, attemptNumber);
+
+    const inserted = await db.execute(
+      `INSERT INTO payout_attempts (payout_id, attempt_number, payment_id, status)
+       VALUES ($1, $2, $3, 'created') RETURNING *`,
+      [payoutId, attemptNumber, paymentId],
+      client,
+    );
+    return inserted.rows[0];
+  });
+}
+
+// markAttemptSubmitting — created -> submitting. ПЕРВЫЙ момент, когда
+// обязательство вообще меняется после createPayoutAttempt: prepared/blocked
+// -> processing (задание, раздел 6).
+async function markAttemptSubmitting(attemptId) {
+  return db.transaction(async (client) => {
+    const attempt = await requireAttemptForUpdate(attemptId, client);
+    if (attempt.status !== 'created') {
+      throw new ValidationError(`Нельзя перевести попытку в submitting из статуса "${attempt.status}" (разрешено только из "created").`);
+    }
+    const updatedAttempt = await db.execute(
+      `UPDATE payout_attempts SET status = 'submitting', request_started_at = NOW(), updated_at = NOW()
+       WHERE id = $1 AND status = 'created' RETURNING *`,
+      [attemptId],
+      client,
+    );
+    if (updatedAttempt.rowCount !== 1) {
+      throw new ValidationError('Не удалось перевести попытку в submitting — статус уже изменился (гонка).');
+    }
+    const payout = await transitionPayoutStatus(
+      attempt.payout_id, OBLIGATION_ACTIVE_ATTEMPT_ALLOWED_FROM, 'processing', client,
+      ', processing_at = NOW()',
+    );
+    return { attempt: updatedAttempt.rows[0], payout };
+  });
+}
+
+// markAttemptProcessing — submitting|unknown -> processing (задание,
+// раздел 7: "markAttemptProcessing(attemptId, bankStatus?)"). Обязательство:
+// processing|unknown -> processing (переход processing->processing —
+// no-op для уже processing-обязательства; unknown->processing — попытка
+// снова в обработке после того, как была неопределённой).
+async function markAttemptProcessing(attemptId, bankStatus = null) {
+  return db.transaction(async (client) => {
+    const attempt = await requireAttemptForUpdate(attemptId, client);
+    if (!['submitting', 'unknown'].includes(attempt.status)) {
+      throw new ValidationError(`Нельзя перевести попытку в processing из статуса "${attempt.status}" (разрешено только из "submitting" или "unknown").`);
+    }
+    const updatedAttempt = await db.execute(
+      `UPDATE payout_attempts
+         SET status = 'processing', response_received_at = COALESCE(response_received_at, NOW()),
+             last_checked_at = NOW(), bank_status = COALESCE($2, bank_status), updated_at = NOW()
+       WHERE id = $1 AND status = ANY($3::text[]) RETURNING *`,
+      [attemptId, bankStatus, ['submitting', 'unknown']],
+      client,
+    );
+    if (updatedAttempt.rowCount !== 1) {
+      throw new ValidationError('Не удалось перевести попытку в processing — статус уже изменился (гонка).');
+    }
+    const payout = await transitionPayoutStatus(attempt.payout_id, ['processing', 'unknown'], 'processing', client);
+    return { attempt: updatedAttempt.rows[0], payout };
+  });
+}
+
+// markAttemptUnknown — submitting|processing -> unknown (задание: "YAAM
+// cannot determine whether the bank accepted/executed the request").
+// Обязательство: processing -> unknown.
+async function markAttemptUnknown(attemptId, safeReason = null) {
+  return db.transaction(async (client) => {
+    const attempt = await requireAttemptForUpdate(attemptId, client);
+    if (!['submitting', 'processing'].includes(attempt.status)) {
+      throw new ValidationError(`Нельзя перевести попытку в unknown из статуса "${attempt.status}" (разрешено только из "submitting" или "processing").`);
+    }
+    const updatedAttempt = await db.execute(
+      `UPDATE payout_attempts
+         SET status = 'unknown', last_checked_at = NOW(),
+             error_message = COALESCE($2, error_message), updated_at = NOW()
+       WHERE id = $1 AND status = ANY($3::text[]) RETURNING *`,
+      [attemptId, sanitizeErrorMessage(safeReason), ['submitting', 'processing']],
+      client,
+    );
+    if (updatedAttempt.rowCount !== 1) {
+      throw new ValidationError('Не удалось перевести попытку в unknown — статус уже изменился (гонка).');
+    }
+    const payout = await transitionPayoutStatus(attempt.payout_id, ['processing'], 'unknown', client);
+    return { attempt: updatedAttempt.rows[0], payout };
+  });
+}
+
+// markAttemptSucceeded — processing|unknown -> succeeded (terminal,
+// immutable). Обязательство: processing|unknown -> succeeded, completed_at
+// фиксируется на обязательстве (задание: "succeeded attempt moves parent
+// payout to succeeded and sets actual completed_at").
+async function markAttemptSucceeded(attemptId, bankStatus = null) {
+  return db.transaction(async (client) => {
+    const attempt = await requireAttemptForUpdate(attemptId, client);
+    if (!['processing', 'unknown'].includes(attempt.status)) {
+      throw new ValidationError(`Нельзя перевести попытку в succeeded из статуса "${attempt.status}" (разрешено только из "processing" или "unknown").`);
+    }
+    const updatedAttempt = await db.execute(
+      `UPDATE payout_attempts
+         SET status = 'succeeded', completed_at = NOW(), last_checked_at = NOW(),
+             bank_status = COALESCE($2, bank_status), updated_at = NOW()
+       WHERE id = $1 AND status = ANY($3::text[]) RETURNING *`,
+      [attemptId, bankStatus, ['processing', 'unknown']],
+      client,
+    );
+    if (updatedAttempt.rowCount !== 1) {
+      throw new ValidationError('Не удалось перевести попытку в succeeded — статус уже изменился (гонка).');
+    }
+    const payout = await transitionPayoutStatus(
+      attempt.payout_id, ['processing', 'unknown'], 'succeeded', client,
+      ', completed_at = NOW()',
+    );
+    return { attempt: updatedAttempt.rows[0], payout };
+  });
+}
+
+// markAttemptFailed — submitting|processing|unknown -> failed (terminal,
+// immutable). ВАЖНО (задание, раздел 4, дословно): "timeout / exception /
+// HTTP 500 alone must never cause failed" — эта функция ТРЕБУЕТ явного
+// errorMessage/retryable от вызывающего кода на каждый вызов; она не может
+// быть вызвана "просто по таймауту" без осознанного решения (это
+// ответственность будущего Stage 10 bank-адаптера, не этого файла).
+// retryable ОБЯЗАТЕЛЕН (не имеет значения по умолчанию) — переход
+// обязательства (prepared, если можно повторить сразу, или blocked, если
+// нужно решение оператора) должен быть осознанным решением вызывающего
+// кода, а не тихим допущением.
+async function markAttemptFailed(attemptId, { bankStatus = null, errorCode = null, errorMessage, retryable } = {}) {
+  if (typeof retryable !== 'boolean') {
+    throw new ValidationError('retryable обязателен и должен быть true или false.');
+  }
+  if (!errorMessage || !String(errorMessage).trim()) {
+    throw new ValidationError('errorMessage обязателен для перехода в failed.');
+  }
+  return db.transaction(async (client) => {
+    const attempt = await requireAttemptForUpdate(attemptId, client);
+    if (!['submitting', 'processing', 'unknown'].includes(attempt.status)) {
+      throw new ValidationError(
+        `Нельзя перевести попытку в failed из статуса "${attempt.status}" (разрешено только из "submitting", "processing" или "unknown").`,
+      );
+    }
+    const updatedAttempt = await db.execute(
+      `UPDATE payout_attempts
+         SET status = 'failed', failed_at = NOW(), last_checked_at = NOW(),
+             bank_status = COALESCE($2, bank_status), error_code = $3,
+             error_message = $4, retryable = $5, updated_at = NOW()
+       WHERE id = $1 AND status = ANY($6::text[]) RETURNING *`,
+      [attemptId, bankStatus, errorCode, sanitizeErrorMessage(errorMessage), retryable, ['submitting', 'processing', 'unknown']],
+      client,
+    );
+    if (updatedAttempt.rowCount !== 1) {
+      throw new ValidationError('Не удалось перевести попытку в failed — статус уже изменился (гонка).');
+    }
+    const nextObligationStatus = retryable ? 'prepared' : 'blocked';
+    const payout = await transitionPayoutStatus(
+      attempt.payout_id, ['processing', 'unknown'], nextObligationStatus, client,
+      ', failed_at = NOW(), failure_reason = $4',
+      [sanitizeErrorMessage(errorMessage)],
+    );
+    return { attempt: updatedAttempt.rows[0], payout };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Чтение для UI
 // ---------------------------------------------------------------------------
 
 async function getPayoutForSettlementLine(settlementPeriodId, restaurantId) {
@@ -203,9 +419,6 @@ async function getPayoutForSettlementLine(settlementPeriodId, restaurantId) {
   return rows[0] || null;
 }
 
-// Один запрос вместо N+1 по количеству строк периода (задание, раздел
-// Settlement: "рядом показать «Выплата создана»/«Не создана»" для КАЖДОЙ
-// строки ресторана периода).
 async function listPayoutsForPeriod(settlementPeriodId) {
   const rows = await db.query('SELECT * FROM restaurant_payouts WHERE settlement_period_id = $1', [settlementPeriodId]);
   return new Map(rows.map((r) => [r.restaurant_id, r]));
@@ -232,28 +445,34 @@ async function getPayoutDetail(payoutId) {
   return rows[0] || null;
 }
 
-// Dashboard-статистика (задание: "Количество подготовленных/успешных/ошибок;
-// общая сумма подготовленных/успешных. Без графиков.") — "подготовленных"
-// трактуется как ЛЮБАЯ выплата, которая была подготовлена и ЕЩЁ НЕ провалена
-// (prepared+processing+succeeded — реально "в работе или доведена до
-// конца"), отдельно от "успешных" (только succeeded). Одна строка агрегации,
-// не 5 отдельных запросов.
+// Dashboard-статистика (задание, раздел 11): "obligations prepared;
+// processing; unknown; blocked; succeeded; amount succeeded; amount still
+// owed. Do not count failed attempts as failed obligations. Avoid
+// double-counting one obligation with multiple attempts." — restaurant_payouts
+// ВСЕГДА ровно одна строка на обязательство независимо от числа попыток
+// (они живут в отдельной таблице payout_attempts), поэтому обычный GROUP BY
+// по этой таблице структурно не может задвоить обязательство — двойного
+// счёта здесь физически неоткуда взяться.
 async function getPayoutDashboardStats() {
   const [row] = await db.query(`
     SELECT
-      COUNT(*) FILTER (WHERE status IN ('prepared', 'processing', 'succeeded'))::int AS prepared_count,
+      COUNT(*) FILTER (WHERE status = 'prepared')::int AS prepared_count,
+      COUNT(*) FILTER (WHERE status = 'processing')::int AS processing_count,
+      COUNT(*) FILTER (WHERE status = 'unknown')::int AS unknown_count,
+      COUNT(*) FILTER (WHERE status = 'blocked')::int AS blocked_count,
       COUNT(*) FILTER (WHERE status = 'succeeded')::int AS succeeded_count,
-      COUNT(*) FILTER (WHERE status = 'failed')::int AS failed_count,
-      COALESCE(SUM(amount) FILTER (WHERE status IN ('prepared', 'processing', 'succeeded')), 0)::int AS prepared_amount,
-      COALESCE(SUM(amount) FILTER (WHERE status = 'succeeded'), 0)::int AS succeeded_amount
+      COALESCE(SUM(amount) FILTER (WHERE status = 'succeeded'), 0)::int AS succeeded_amount,
+      COALESCE(SUM(amount) FILTER (WHERE status <> 'succeeded'), 0)::int AS owed_amount
     FROM restaurant_payouts
   `);
   return {
     preparedCount: row.prepared_count,
+    processingCount: row.processing_count,
+    unknownCount: row.unknown_count,
+    blockedCount: row.blocked_count,
     succeededCount: row.succeeded_count,
-    failedCount: row.failed_count,
-    preparedAmount: row.prepared_amount,
     succeededAmount: row.succeeded_amount,
+    owedAmount: row.owed_amount,
   };
 }
 
@@ -265,9 +484,6 @@ async function getPayoutDashboardStats() {
 async function checkPayoutInvariants() {
   const violations = [];
 
-  // 1. amount не совпадает с settlement_restaurant_lines.payable_amount —
-  //    структурно невозможно (amount копируется один раз при создании,
-  //    строка после этого immutable с обеих сторон), но проверяем данные.
   const amountMismatchRows = await db.query(`
     SELECT rp.id FROM restaurant_payouts rp
     JOIN settlement_restaurant_lines srl
@@ -278,35 +494,26 @@ async function checkPayoutInvariants() {
     violations.push({ kind: 'payout_amount_mismatch', count: amountMismatchRows.length });
   }
 
-  // 2. более одной выплаты на пару (период, ресторан) — UNIQUE делает это
-  //    невозможным на уровне схемы, проверяем данные явно.
-  const dupRows = await db.query(`
+  const dupObligationRows = await db.query(`
     SELECT settlement_period_id, restaurant_id FROM restaurant_payouts
     GROUP BY settlement_period_id, restaurant_id HAVING COUNT(*) > 1
   `);
-  if (dupRows.length > 0) {
-    violations.push({ kind: 'multiple_payouts_for_same_period_restaurant', count: dupRows.length });
+  if (dupObligationRows.length > 0) {
+    violations.push({ kind: 'multiple_payouts_for_same_period_restaurant', count: dupObligationRows.length });
   }
 
-  // 3. succeeded без processing_at — CHECK на уровне схемы уже это
-  //    запрещает, но проверяем данные (trust but verify, тот же принцип).
-  const succeededWithoutProcessing = await db.query(
-    "SELECT id FROM restaurant_payouts WHERE status = 'succeeded' AND processing_at IS NULL",
+  const succeededWithoutCompletedAt = await db.query(
+    "SELECT id FROM restaurant_payouts WHERE status = 'succeeded' AND completed_at IS NULL",
   );
-  if (succeededWithoutProcessing.length > 0) {
-    violations.push({ kind: 'succeeded_without_processing', count: succeededWithoutProcessing.length });
+  if (succeededWithoutCompletedAt.length > 0) {
+    violations.push({ kind: 'obligation_succeeded_without_completed_at', count: succeededWithoutCompletedAt.length });
   }
 
-  // 4. amount <= 0 — CHECK(amount > 0) уже это запрещает на уровне схемы.
   const nonPositiveRows = await db.query('SELECT id FROM restaurant_payouts WHERE amount <= 0');
   if (nonPositiveRows.length > 0) {
     violations.push({ kind: 'non_positive_amount', count: nonPositiveRows.length });
   }
 
-  // 5. payout для периода, который на самом деле НЕ closed — FOREIGN KEY на
-  //    settlement_restaurant_lines гарантирует существование строки, но НЕ
-  //    гарантирует, что период остался closed (хотя closed периоды сами
-  //    immutable — Stage 8 — так что это тоже структурно невозможно).
   const payoutForNonClosedPeriod = await db.query(`
     SELECT rp.id FROM restaurant_payouts rp
     JOIN settlement_periods sp ON sp.id = rp.settlement_period_id
@@ -316,19 +523,82 @@ async function checkPayoutInvariants() {
     violations.push({ kind: 'payout_for_non_closed_period', count: payoutForNonClosedPeriod.length });
   }
 
+  // Больше одной АКТИВНОЙ попытки на одно обязательство — партиальный UNIQUE
+  // индекс (ux_payout_attempts_one_active_per_payout) делает это невозможным
+  // на уровне схемы; проверяем данные явно (тот же "trust but verify").
+  const multipleActiveAttempts = await db.query(`
+    SELECT payout_id FROM payout_attempts WHERE status = ANY($1::text[])
+    GROUP BY payout_id HAVING COUNT(*) > 1
+  `, [ATTEMPT_ACTIVE_STATUSES]);
+  if (multipleActiveAttempts.length > 0) {
+    violations.push({ kind: 'multiple_active_attempts', count: multipleActiveAttempts.length });
+  }
+
+  // attempt_number не последователен без пропусков с 1 — UNIQUE(payout_id,
+  // attempt_number) не гарантирует ОТСУТСТВИЕ пропусков сам по себе.
+  const nonSequentialAttempts = await db.query(`
+    SELECT payout_id FROM payout_attempts
+    GROUP BY payout_id
+    HAVING MAX(attempt_number) <> COUNT(*) OR MIN(attempt_number) <> 1
+  `);
+  if (nonSequentialAttempts.length > 0) {
+    violations.push({ kind: 'non_sequential_attempt_numbers', count: nonSequentialAttempts.length });
+  }
+
+  // Обязательство succeeded, У КОТОРОГО ЕСТЬ история попыток, но НИ ОДНА из
+  // них не succeeded — рассогласование. ВАЖНО: "succeeded БЕЗ единой
+  // попытки вообще" — НЕ нарушение (задание, раздел 13: backfill создаёт
+  // синтетическую попытку ТОЛЬКО для бывших 'failed' строк — succeeded
+  // остаётся валидным статусом без изменений, значит унаследованные Stage 9
+  // succeeded-строки закономерно не имеют ни одной попытки в payout_attempts
+  // и это не ошибка данных, а честная историческая граница модели).
+  const obligationSucceededWithConflictingAttempts = await db.query(`
+    SELECT rp.id FROM restaurant_payouts rp
+    WHERE rp.status = 'succeeded'
+      AND EXISTS (SELECT 1 FROM payout_attempts pa WHERE pa.payout_id = rp.id)
+      AND NOT EXISTS (SELECT 1 FROM payout_attempts pa WHERE pa.payout_id = rp.id AND pa.status = 'succeeded')
+  `);
+  if (obligationSucceededWithConflictingAttempts.length > 0) {
+    violations.push({ kind: 'obligation_succeeded_without_succeeded_attempt', count: obligationSucceededWithConflictingAttempts.length });
+  }
+
+  // Обратное рассогласование: есть succeeded-попытка, но обязательство НЕ
+  // succeeded (структурно не должно быть возможно — markAttemptSucceeded
+  // атомарно переводит оба в одной транзакции).
+  const succeededAttemptWithoutObligation = await db.query(`
+    SELECT DISTINCT pa.payout_id FROM payout_attempts pa
+    JOIN restaurant_payouts rp ON rp.id = pa.payout_id
+    WHERE pa.status = 'succeeded' AND rp.status <> 'succeeded'
+  `);
+  if (succeededAttemptWithoutObligation.length > 0) {
+    violations.push({ kind: 'succeeded_attempt_with_non_succeeded_obligation', count: succeededAttemptWithoutObligation.length });
+  }
+
   return { ok: violations.length === 0, violations };
 }
 
 module.exports = {
   ValidationError,
-  STATUSES,
-  TERMINAL_STATUSES,
+  OBLIGATION_STATUSES,
+  OBLIGATION_TERMINAL_STATUSES,
   STATUS_LABELS,
+  ATTEMPT_STATUSES,
+  ATTEMPT_ACTIVE_STATUSES,
+  ATTEMPT_TERMINAL_STATUSES,
+  ATTEMPT_STATUS_LABELS,
+  MAX_ERROR_MESSAGE_LENGTH,
+  generatePaymentId,
+  sanitizeErrorMessage,
   prepareRestaurantPayout,
-  markProcessing,
-  markSucceeded,
-  markFailed,
+  createPayoutAttempt,
+  markAttemptSubmitting,
+  markAttemptProcessing,
+  markAttemptUnknown,
+  markAttemptSucceeded,
+  markAttemptFailed,
   getPayoutById,
+  getAttemptById,
+  listAttemptsForPayout,
   getPayoutForSettlementLine,
   listPayoutsForPeriod,
   listPayouts,

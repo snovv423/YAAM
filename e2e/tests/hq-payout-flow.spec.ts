@@ -2,20 +2,31 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { test, expect } from '@playwright/test';
 
-// YAAM HQ Stage 9 — полный браузерный сценарий сущности выплаты (NO bank
-// integration): войти -> создать ресторан -> доставленный оплаченный заказ
-// -> создать и закрыть расчётный период -> открыть период, увидеть "Не
-// создана" + "Подготовить выплату" -> подготовить выплату (НЕ перевод денег,
-// только внутренняя запись) -> карточка выплаты показывает статус
-// "Подготовлена" и точную сумму (= settlement_restaurant_lines.payable_amount,
-// без пересчёта) -> период теперь показывает "Выплата создана" со ссылкой ->
-// список /hq/payouts показывает строку -> Обзор показывает статистику
-// выплат -> mobile 390×844 -> нигде нет кнопки «Выплатить».
+// YAAM HQ Stage 9 / 9.5 — полный браузерный сценарий сущности выплаты + её
+// попыток (NO bank integration): войти -> создать ресторан -> доставленный
+// оплаченный заказ -> создать и закрыть расчётный период -> открыть период,
+// увидеть "Не создана" + "Подготовить выплату" -> подготовить выплату (НЕ
+// перевод денег, только внутренняя запись) -> карточка выплаты показывает
+// статус "Подготовлена" и точную сумму (= settlement_restaurant_lines.
+// payable_amount, без пересчёта) -> период теперь показывает "Выплата
+// создана" со ссылкой -> список /hq/payouts показывает строку -> Обзор
+// показывает статистику выплат -> [Stage 9.5] создать первую попытку через
+// внутренний сервис (НЕ через UI — банковской интеграции ещё нет), увидеть
+// "В обработке" -> "Неопределённый результат" -> убедиться, что вторую
+// активную попытку создать нельзя -> первая попытка проваливается с
+// retryable=true (обязательство возвращается в "Подготовлена") -> создать
+// вторую попытку с ДРУГИМ payment_id -> вторая попытка завершается успехом
+// (обязательство -> "Успешно" с реальной датой) -> обе попытки остаются
+// видны в истории на карточке -> mobile 390×844 -> нигде нет кнопок
+// «Выплатить» / «Отправить в банк» / «Повторить» / фейкового банка.
 //
 // Заказ продвигается напрямую через orderService (тот же приём, что и
-// hq-restaurant-finance-flow.spec.ts/hq-settlement-periods-flow.spec.ts) —
-// ценность браузерной проверки здесь в экранах HQ (период / список выплат /
-// карточка выплаты / Обзор), не в повторной имитации чекаута.
+// hq-restaurant-finance-flow.spec.ts/hq-settlement-periods-flow.spec.ts).
+// Попытки выплаты продвигаются напрямую через payoutService (задание, раздел
+// 16, дословно: "create the first attempt via the internal service or a test
+// helper, NOT a fake bank UI") — ценность браузерной проверки здесь в
+// экранах HQ (период / список выплат / карточка выплаты с историей попыток /
+// Обзор), не в имитации реального банковского API.
 
 const API_BASE_URL = process.env.YAAM_E2E_API_BASE_URL;
 const HQ_ADMIN_USER = process.env.YAAM_E2E_HQ_ADMIN_USER;
@@ -34,6 +45,8 @@ const db = require(path.join(SERVER_DIR, 'db/postgresql/index.js'));
 const orderService = require(path.join(SERVER_DIR, 'services/postgresql/orderService.js'));
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const menuAdminService = require(path.join(SERVER_DIR, 'services/hq/menuAdminService.js'));
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const payoutService = require(path.join(SERVER_DIR, 'services/hq/payoutService.js'));
 
 function dateStr(offsetDays: number) {
   const d = new Date(Date.now() + offsetDays * 24 * 60 * 60 * 1000);
@@ -141,9 +154,18 @@ test('YAAM HQ: сущность выплаты — подготовка, кар�
   const payoutUrl = page.url();
 
   // 7. Карточка выплаты: статус «Подготовлена», точная сумма, без пересчёта.
-  await expect(page.getByText('Подготовлена')).toBeVisible();
-  await expect(page.locator('.panel')).toContainText('1860 ₽');
+  // .first() — на карточке уже два .panel (детали обязательства + история
+  // попыток, добавлена в Stage 9.5), поэтому обращаемся именно к первой.
+  // obligationBadge — сам <span class="badge">, а не текстовый поиск по всей
+  // панели: несколько строк панели содержат текст статуса как ПОДСТРОКУ
+  // (например "В обработке с", "Завершена успешно"), из-за чего обычный
+  // getByText(...) ловит более одного элемента (strict-mode violation).
+  const obligationBadge = page.locator('.panel').first().locator('.badge');
+  await expect(obligationBadge).toHaveText('Подготовлена');
+  await expect(page.locator('.panel').first()).toContainText('1860 ₽');
   await expect(page.getByRole('link', { name: name })).toBeVisible();
+  await expect(page.getByText('Попыток обращения к банку ещё не было.')).toBeVisible();
+  const payoutId = Number(payoutUrl.split('/').pop());
 
   // 8. Вернуться на период — теперь «Выплата создана» со ссылкой.
   await page.goto(periodUrl);
@@ -160,11 +182,70 @@ test('YAAM HQ: сущность выплаты — подготовка, кар�
   await expect(page.getByRole('button', { name: 'Выплатить' })).toHaveCount(0);
   await expect(page.getByText(/Отметить выплаченным/i)).toHaveCount(0);
 
-  // 10. Обзор — статистика выплат видна (без графиков, просто числа).
-  await page.goto(`${API_BASE_URL}/hq`);
-  await expect(page.getByText('Подготовлено выплат')).toBeVisible();
+  // 10. [Stage 9.5] Первая попытка через внутренний сервис (НЕ через UI —
+  // задание, раздел 16: "create the first attempt via the internal service
+  // or a test helper, NOT a fake bank UI"). created -> submitting ->
+  // processing -> unknown.
+  const attempt1 = await payoutService.createPayoutAttempt(payoutId);
+  await payoutService.markAttemptSubmitting(attempt1.id);
+  await page.goto(payoutUrl);
+  await expect(obligationBadge).toHaveText('В обработке');
+  await expect(page.getByRole('button', { name: 'Выплатить' })).toHaveCount(0);
+  await expect(page.getByText(/Отправить в банк/i)).toHaveCount(0);
+  await expect(page.getByText(/Повторить попытку/i)).toHaveCount(0);
 
-  // 11. Mobile 390×844 — без горизонтального overflow, на списке и карточке.
+  await payoutService.markAttemptProcessing(attempt1.id, 'IN_PROGRESS');
+  await payoutService.markAttemptUnknown(attempt1.id, 'нет ответа от банка в отведённое время');
+  await page.goto(payoutUrl);
+  await expect(obligationBadge).toHaveText('Неопределённый результат');
+
+  // 11. Пока попытка активна (unknown ещё не разрешён) — вторую создать
+  // нельзя, ни через сервис (партиальный UNIQUE-индекс делает это физически
+  // невозможным на уровне БД — см. server/test/postgresql/hqPayoutStage9.test.js).
+  await expect(payoutService.createPayoutAttempt(payoutId)).rejects.toThrow(/Нельзя создать попытку|активная попытка/i);
+
+  // 12. Первая попытка провалилась, retryable=true — обязательство
+  // возвращается в "Подготовлена" (деньги ещё не выплачены, но это НЕ
+  // тупиковый статус — задание, раздел 12).
+  await payoutService.markAttemptFailed(attempt1.id, {
+    errorMessage: 'Недостаточно средств на счёте банка-отправителя', retryable: true,
+  });
+  await page.goto(payoutUrl);
+  await expect(obligationBadge).toHaveText('Подготовлена');
+  const attempt1Row = page.locator('table.responsive tbody tr', { hasText: attempt1.payment_id });
+  await expect(attempt1Row).toContainText('Ошибка');
+  await expect(attempt1Row).toContainText('Недостаточно средств на счёте банка-отправителя');
+
+  // 13. Вторая попытка — ДРУГОЙ payment_id, доходит до успеха.
+  const attempt2 = await payoutService.createPayoutAttempt(payoutId);
+  expect(attempt2.payment_id).not.toBe(attempt1.payment_id);
+  await payoutService.markAttemptSubmitting(attempt2.id);
+  await payoutService.markAttemptProcessing(attempt2.id, 'COMPLETED');
+  await payoutService.markAttemptSucceeded(attempt2.id, 'COMPLETED');
+
+  // 14. Карточка: обязательство «Успешно» с реальной датой, ОБЕ попытки
+  // остаются видны в истории (провалившаяся первая не стирается второй).
+  await page.goto(payoutUrl);
+  await expect(obligationBadge).toHaveText('Успешно');
+  await expect(page.locator('.panel').first()).toContainText('Завершена успешно');
+  await expect(page.locator('table.responsive tbody tr', { hasText: attempt1.payment_id })).toContainText('Ошибка');
+  const attempt2Row = page.locator('table.responsive tbody tr', { hasText: attempt2.payment_id });
+  await expect(attempt2Row).toContainText('Успешно');
+  await expect(page.getByRole('button', { name: 'Выплатить' })).toHaveCount(0);
+  await expect(page.getByText(/Отправить в банк/i)).toHaveCount(0);
+  await expect(page.getByText(/Повторить попытку/i)).toHaveCount(0);
+
+  // 15. Список «Выплаты» тоже отражает финальный статус «Успешно».
+  await page.goto(`${API_BASE_URL}/hq/payouts`);
+  await expect(page.locator('tr', { hasText: name })).toContainText('Успешно');
+
+  // 16. Обзор — статистика выплат видна (без графиков, просто числа).
+  await page.goto(`${API_BASE_URL}/hq`);
+  await expect(page.getByText('Успешных выплат')).toBeVisible();
+  await expect(page.getByText('Сумма к выплате (ещё не оплачено)')).toBeVisible();
+
+  // 17. Mobile 390×844 — без горизонтального overflow, на списке и карточке
+  // (карточка теперь содержит таблицу истории попыток — проверяем именно её).
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(`${API_BASE_URL}/hq/payouts`);
   await expect(page.getByRole('heading', { name: 'Выплаты' })).toBeVisible();
@@ -174,6 +255,8 @@ test('YAAM HQ: сущность выплаты — подготовка, кар�
   overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
   expect(overflow).toBe(false);
 
-  // 12. Нигде на этих экранах нет кнопки/ссылки выплаты денег.
+  // 18. Нигде на этих экранах нет кнопки/ссылки выплаты денег/фейкового банка.
   await expect(page.getByText(/Выплатить/i)).toHaveCount(0);
+  await expect(page.getByText(/Отправить в банк/i)).toHaveCount(0);
+  await expect(page.getByText(/Повторить попытку/i)).toHaveCount(0);
 });

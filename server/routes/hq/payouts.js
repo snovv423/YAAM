@@ -9,10 +9,13 @@
 // периода (routes/hq/settlements.js), где естественно доступны и
 // settlementPeriodId, и restaurantId одновременно — единственное write-
 // действие Stage 9 во всём HQ (см. итоговый отчёт, раздел про UI-решения).
-// markProcessing/markSucceeded/markFailed НЕ подключены ни к одному HQ-
-// маршруту вообще — они реальны и полностью протестированы, но появятся в
-// UI только вместе с настоящей банковской интеграцией на следующем этапе
-// (задание: "чтобы в следующем этапе осталось только подключить API банка").
+// createPayoutAttempt/markAttemptSubmitting/Processing/Unknown/Succeeded/
+// Failed (Stage 9.5) НЕ подключены ни к одному HQ-маршруту вообще — они
+// реальны и полностью протестированы, но появятся в UI только вместе с
+// настоящей банковской интеграцией на следующем этапе (задание: "чтобы в
+// следующем этапе осталось только подключить API банка"). GET /:id ниже —
+// read-only, только читает уже существующие попытки через
+// listAttemptsForPayout, ничего не создаёт и не меняет.
 const express = require('express');
 const payoutService = require('../../services/hq/payoutService');
 const { ensureCsrfToken } = require('../../services/hq/csrf');
@@ -46,8 +49,9 @@ function createPayoutsRouter({ linkBasePath }) {
           title: 'Не найдено', active: 'payouts', csrfToken, linkBasePath, body: notFoundBody(linkBasePath),
         }));
       }
+      const attempts = await payoutService.listAttemptsForPayout(payout.id);
       const csrfToken = ensureCsrfToken(req);
-      const body = views.renderPayoutDetail({ payout, linkBasePath });
+      const body = views.renderPayoutDetail({ payout, attempts, linkBasePath });
       res.send(layout({ title: `Выплата #${payout.id}`, active: 'payouts', csrfToken, linkBasePath, body }));
     } catch (err) {
       next(err);

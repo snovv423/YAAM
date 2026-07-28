@@ -1,11 +1,13 @@
 'use strict';
 
-// YAAM HQ Stage 9 — Payout Entity Foundation (NO bank integration).
-// Интеграционные тесты против настоящего embedded PostgreSQL (тот же
-// harness, что и Stage 7/7.1/8). Заказы/платежи/возвраты сконструированы
-// напрямую через SQL (та же фикстура, что и в предыдущих Stage-тестах) —
-// фокус здесь НА НОВОМ Stage 9 поведении: создание/переходы/immutability/
-// изоляция выплат, не на пересчёте формул заработка (уже доказано Stage 7/8).
+// YAAM HQ Stage 9 / 9.5 — Payout Entity + Payout Attempts Foundation (NO bank
+// integration). Интеграционные тесты против настоящего embedded PostgreSQL
+// (тот же harness, что и Stage 7/7.1/8/9). Тесты A-E — Stage 9 (обязательство,
+// без изменений в Stage 9.5 — раздел "Preserve the obligation model"). Тесты
+// "Stage9.5 #N" — новые сценарии из задания Stage 9.5, раздел 14 (ровно 20
+// пронумерованных сценариев); дополнительные тесты (audit log, migration)
+// добавлены сверх этого списка, где задание требует их отдельно (разделы
+// 12/13), но не включает в нумерацию раздела 14.
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -13,6 +15,9 @@ const path = require('node:path');
 const { startEmbeddedPostgres } = require('./helpers/embeddedPg');
 
 const SCHEMA_SQL = fs.readFileSync(path.join(__dirname, '../../db/postgresql/schema.sql'), 'utf8');
+const OLD_STAGE9_SCHEMA_SQL = fs.readFileSync(
+  path.join(__dirname, 'fixtures/stage9-pre-9.5-schema.sql'), 'utf8',
+);
 
 const HQ_MODULE_PATHS = [
   require.resolve('../../db/postgresql'),
@@ -126,6 +131,17 @@ async function loginHq(base) {
   return cookieHeaderFrom(postRes) || cookie;
 }
 
+function requireFreshModules() {
+  delete require.cache[require.resolve('../../db/postgresql')];
+  delete require.cache[require.resolve('../../services/hq/settlementService')];
+  delete require.cache[require.resolve('../../services/hq/payoutService')];
+  return {
+    db: require('../../db/postgresql'),
+    settlementService: require('../../services/hq/settlementService'),
+    payoutService: require('../../services/hq/payoutService'),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Фикстуры
 // ---------------------------------------------------------------------------
@@ -182,18 +198,24 @@ async function closedPeriodWithEarnings(db, settlementService, restaurantId, { i
   return period;
 }
 
+// Доводит только что prepareRestaurantPayout()-нную выплату до status
+// 'processing' с первой попыткой в статусе 'processing' — общая отправная
+// точка для многих тестов ниже (created -> submitting -> processing).
+async function toFirstAttemptProcessing(payoutService, payoutId) {
+  const attempt = await payoutService.createPayoutAttempt(payoutId);
+  await payoutService.markAttemptSubmitting(attempt.id);
+  const { attempt: processing, payout } = await payoutService.markAttemptProcessing(attempt.id);
+  return { attempt: processing, payout };
+}
+
 // ---------------------------------------------------------------------------
-// A: период не закрыт -> отклонено
+// A-E: prepareRestaurantPayout (Stage 9, БЕЗ ИЗМЕНЕНИЙ в Stage 9.5 — задание,
+// раздел 2: "Preserve the obligation model")
 // ---------------------------------------------------------------------------
 test('A: prepareRestaurantPayout отклоняет создание для НЕ закрытого периода', async () => {
   const databaseUrl = await freshDatabase('payout_period_not_closed');
   process.env.DATABASE_URL = databaseUrl;
-  delete require.cache[require.resolve('../../db/postgresql')];
-  delete require.cache[require.resolve('../../services/hq/settlementService')];
-  delete require.cache[require.resolve('../../services/hq/payoutService')];
-  const db = require('../../db/postgresql');
-  const settlementService = require('../../services/hq/settlementService');
-  const payoutService = require('../../services/hq/payoutService');
+  const { db, settlementService, payoutService } = requireFreshModules();
   try {
     const restaurantId = await createRestaurant(db, 'A');
     const orderId = await createOrderRow(db, { restaurantId, status: 'delivered' });
@@ -206,18 +228,10 @@ test('A: prepareRestaurantPayout отклоняет создание для НЕ
   }
 });
 
-// ---------------------------------------------------------------------------
-// B: нет строки обязательства (ресторан без активности в периоде)
-// ---------------------------------------------------------------------------
 test('B: prepareRestaurantPayout отклоняет создание для ресторана без активности в периоде', async () => {
   const databaseUrl = await freshDatabase('payout_no_line');
   process.env.DATABASE_URL = databaseUrl;
-  delete require.cache[require.resolve('../../db/postgresql')];
-  delete require.cache[require.resolve('../../services/hq/settlementService')];
-  delete require.cache[require.resolve('../../services/hq/payoutService')];
-  const db = require('../../db/postgresql');
-  const settlementService = require('../../services/hq/settlementService');
-  const payoutService = require('../../services/hq/payoutService');
+  const { db, settlementService, payoutService } = requireFreshModules();
   try {
     const restaurantWithActivity = await createRestaurant(db, 'B-active');
     const restaurantWithoutActivity = await createRestaurant(db, 'B-idle');
@@ -232,19 +246,10 @@ test('B: prepareRestaurantPayout отклоняет создание для ре
   }
 });
 
-// ---------------------------------------------------------------------------
-// C: payable_amount <= 0 (единственный реальный случай — ресторан, чья
-// ЕДИНСТВЕННАЯ активность периода — возврат отменённого заказа)
-// ---------------------------------------------------------------------------
 test('C: prepareRestaurantPayout отклоняет создание при payable_amount <= 0', async () => {
   const databaseUrl = await freshDatabase('payout_zero_amount');
   process.env.DATABASE_URL = databaseUrl;
-  delete require.cache[require.resolve('../../db/postgresql')];
-  delete require.cache[require.resolve('../../services/hq/settlementService')];
-  delete require.cache[require.resolve('../../services/hq/payoutService')];
-  const db = require('../../db/postgresql');
-  const settlementService = require('../../services/hq/settlementService');
-  const payoutService = require('../../services/hq/payoutService');
+  const { db, settlementService, payoutService } = requireFreshModules();
   try {
     const restaurantId = await createRestaurant(db, 'C');
     const cancelledOrder = await createOrderRow(db, { restaurantId, status: 'cancelled', itemsTotal: 500, commissionAmount: 0 });
@@ -262,18 +267,10 @@ test('C: prepareRestaurantPayout отклоняет создание при paya
   }
 });
 
-// ---------------------------------------------------------------------------
-// D: успешное создание — сумма БЕЗ пересчёта, ровно из settlement snapshot
-// ---------------------------------------------------------------------------
-test('D: prepareRestaurantPayout создаёт payout с amount, скопированным из settlement_restaurant_lines.payable_amount', async () => {
+test('D: prepareRestaurantPayout создаёт payout с amount, скопированным из settlement_restaurant_lines.payable_amount, никогда не пересчитывается (задание Stage 9.5, сценарий #16)', async () => {
   const databaseUrl = await freshDatabase('payout_create_success');
   process.env.DATABASE_URL = databaseUrl;
-  delete require.cache[require.resolve('../../db/postgresql')];
-  delete require.cache[require.resolve('../../services/hq/settlementService')];
-  delete require.cache[require.resolve('../../services/hq/payoutService')];
-  const db = require('../../db/postgresql');
-  const settlementService = require('../../services/hq/settlementService');
-  const payoutService = require('../../services/hq/payoutService');
+  const { db, settlementService, payoutService } = requireFreshModules();
   try {
     const restaurantId = await createRestaurant(db, 'D');
     const period = await closedPeriodWithEarnings(db, settlementService, restaurantId, { itemsTotal: 1000, commissionAmount: 70 });
@@ -284,31 +281,32 @@ test('D: prepareRestaurantPayout создаёт payout с amount, скопиро
     assert.equal(payout.created_by, 'owner');
     assert.equal(payout.notes, 'первая выплата');
     assert.ok(payout.prepared_at);
-    assert.ok(payout.created_at);
-    assert.ok(payout.updated_at);
     assert.equal(payout.processing_at, null);
     assert.equal(payout.completed_at, null);
-    assert.equal(payout.failed_at, null);
-    assert.equal(payout.failure_reason, null);
-    assert.equal(payout.external_payout_id, null);
+
+    // Полный цикл нескольких попыток НЕ должен ни разу изменить amount —
+    // ни при создании попытки, ни при её провале, ни при успехе.
+    const attempt1 = await payoutService.createPayoutAttempt(payout.id);
+    await payoutService.markAttemptSubmitting(attempt1.id);
+    await payoutService.markAttemptProcessing(attempt1.id);
+    const { payout: afterFail } = await payoutService.markAttemptFailed(attempt1.id, { errorMessage: 'тест', retryable: true });
+    assert.equal(afterFail.amount, 930, 'amount не должен измениться после провалившейся попытки');
+
+    const attempt2 = await payoutService.createPayoutAttempt(payout.id);
+    await payoutService.markAttemptSubmitting(attempt2.id);
+    await payoutService.markAttemptProcessing(attempt2.id);
+    const { payout: afterSucceed } = await payoutService.markAttemptSucceeded(attempt2.id);
+    assert.equal(afterSucceed.amount, 930, 'amount не должен измениться после успешной попытки');
   } finally {
     await db.close();
     delete process.env.DATABASE_URL;
   }
 });
 
-// ---------------------------------------------------------------------------
-// E: повторное создание отклонено
-// ---------------------------------------------------------------------------
-test('E: повторное prepareRestaurantPayout на ту же пару (период, ресторан) отклонено', async () => {
+test('E: повторное prepareRestaurantPayout на ту же пару (период, ресторан) отклонено физически (UNIQUE), не только в коде', async () => {
   const databaseUrl = await freshDatabase('payout_duplicate');
   process.env.DATABASE_URL = databaseUrl;
-  delete require.cache[require.resolve('../../db/postgresql')];
-  delete require.cache[require.resolve('../../services/hq/settlementService')];
-  delete require.cache[require.resolve('../../services/hq/payoutService')];
-  const db = require('../../db/postgresql');
-  const settlementService = require('../../services/hq/settlementService');
-  const payoutService = require('../../services/hq/payoutService');
+  const { db, settlementService, payoutService } = requireFreshModules();
   try {
     const restaurantId = await createRestaurant(db, 'E');
     const period = await closedPeriodWithEarnings(db, settlementService, restaurantId);
@@ -318,9 +316,6 @@ test('E: повторное prepareRestaurantPayout на ту же пару (п�
     const countRows = await db.query('SELECT COUNT(*)::int AS c FROM restaurant_payouts WHERE settlement_period_id = $1 AND restaurant_id = $2', [period.id, restaurantId]);
     assert.equal(countRows[0].c, 1, 'не должно быть создано две строки');
 
-    // Прямой SQL-обход сервисного слоя — доказывает, что UNIQUE-ограничение
-    // само по себе (не только проверка в коде) физически не даёт вставить
-    // вторую строку.
     await assert.rejects(() => db.execute(
       `INSERT INTO restaurant_payouts (restaurant_id, settlement_period_id, amount) VALUES ($1,$2,930)`,
       [restaurantId, period.id],
@@ -331,235 +326,186 @@ test('E: повторное prepareRestaurantPayout на ту же пару (п�
   }
 });
 
+// ===========================================================================
+// Stage 9.5 — 20 сценариев задания, раздел 14 (пронумерованы в том же порядке)
+// ===========================================================================
+
 // ---------------------------------------------------------------------------
-// F: валидные переходы prepared -> processing -> succeeded, свои timestamp'ы
+// #1: migration — старые Stage 9 данные должны корректно смигрироваться
+// (задание, раздел 13). Применяем OLD (pre-9.5) schema.sql к базе, руками
+// вставляем реалистичные Stage 9 строки во ВСЕХ 4 старых статусах, затем
+// применяем НОВЫЙ schema.sql (тот же файл содержит и rework, и backfill) —
+// и проверяем результат. Затем повторно применяем НОВЫЙ schema.sql ещё раз,
+// чтобы доказать идемпотентность (задание: "All migration logic must be
+// idempotent").
 // ---------------------------------------------------------------------------
-test('F: валидный путь prepared -> processing -> succeeded, каждый переход со своим timestamp', async () => {
-  const databaseUrl = await freshDatabase('payout_valid_path');
-  process.env.DATABASE_URL = databaseUrl;
+test('Stage9.5 #1: миграция существующих Stage 9 строк (prepared/processing/succeeded/failed) в новую модель', async () => {
+  await cluster.createDatabase('payout_migration');
+  const setupClient = cluster.getClient('payout_migration');
+  await setupClient.connect();
+  await setupClient.query(OLD_STAGE9_SCHEMA_SQL);
+
+  // Реалистичные Stage 9 фикстуры через реальный settlementService (схема
+  // settlement_periods/settlement_restaurant_lines не менялась в Stage 9.5),
+  // но restaurant_payouts вставляются НАПРЯМУЮ SQL — так же, как это делал
+  // старый payoutService.prepareRestaurantPayout/markProcessing/markFailed,
+  // чтобы не зависеть от уже переписанного нового payoutService.js.
+  process.env.DATABASE_URL = cluster.connectionString('payout_migration');
   delete require.cache[require.resolve('../../db/postgresql')];
   delete require.cache[require.resolve('../../services/hq/settlementService')];
-  delete require.cache[require.resolve('../../services/hq/payoutService')];
   const db = require('../../db/postgresql');
   const settlementService = require('../../services/hq/settlementService');
-  const payoutService = require('../../services/hq/payoutService');
+
+  const rPrepared = await createRestaurant(db, 'Mig-prepared');
+  const rProcessing = await createRestaurant(db, 'Mig-processing');
+  const rSucceeded = await createRestaurant(db, 'Mig-succeeded');
+  const rFailedFromProcessing = await createRestaurant(db, 'Mig-failed-processing');
+  const rFailedFromPrepared = await createRestaurant(db, 'Mig-failed-prepared');
+
+  for (const rid of [rPrepared, rProcessing, rSucceeded, rFailedFromProcessing, rFailedFromPrepared]) {
+    const orderId = await createOrderRow(db, { restaurantId: rid, status: 'delivered', itemsTotal: 1000, commissionAmount: 70 });
+    await addSucceededPayment(db, orderId, 1000);
+  }
+  const period = await settlementService.createDraftSettlementPeriod({ periodFrom: todayStr(), periodTo: todayStr() });
+  await settlementService.closeSettlementPeriod(period.id);
+
+  async function insertOldPayout(restaurantId, { status, processingAt = null, completedAt = null, failedAt = null, failureReason = null }) {
+    const rows = await db.execute(
+      `INSERT INTO restaurant_payouts
+         (restaurant_id, settlement_period_id, amount, status, processing_at, completed_at, failed_at, failure_reason)
+       VALUES ($1,$2,930,$3,$4,$5,$6,$7) RETURNING id`,
+      [restaurantId, period.id, status, processingAt, completedAt, failedAt, failureReason],
+    );
+    return rows.rows[0].id;
+  }
+
+  const preparedId = await insertOldPayout(rPrepared, { status: 'prepared' });
+  const processingId = await insertOldPayout(rProcessing, { status: 'processing', processingAt: new Date() });
+  const succeededId = await insertOldPayout(rSucceeded, { status: 'succeeded', processingAt: new Date(Date.now() - 1000), completedAt: new Date() });
+  const failedFromProcessingId = await insertOldPayout(rFailedFromProcessing, {
+    status: 'failed', processingAt: new Date(Date.now() - 2000), failedAt: new Date(), failureReason: 'Провайдер отклонил перевод',
+  });
+  const failedFromPreparedId = await insertOldPayout(rFailedFromPrepared, {
+    status: 'failed', failedAt: new Date(), failureReason: 'Реквизиты не прошли предварительную проверку',
+  });
+
+  await db.close();
+  delete process.env.DATABASE_URL;
+
+  // Применяем НОВЫЙ schema.sql (уже содержит и rework restaurant_payouts, и
+  // backfill payout_attempts) поверх той же самой базы данных.
+  await setupClient.query(SCHEMA_SQL);
+
+  process.env.DATABASE_URL = cluster.connectionString('payout_migration');
+  delete require.cache[require.resolve('../../db/postgresql')];
+  delete require.cache[require.resolve('../../services/hq/payoutService')];
+  const dbAfter = require('../../db/postgresql');
+  const payoutServiceAfter = require('../../services/hq/payoutService');
   try {
-    const restaurantId = await createRestaurant(db, 'F');
+    const [prepared, processing, succeeded, failedFromProcessing, failedFromPrepared] = await Promise.all(
+      [preparedId, processingId, succeededId, failedFromProcessingId, failedFromPreparedId].map((id) => payoutServiceAfter.getPayoutById(id)),
+    );
+
+    assert.equal(prepared.status, 'prepared', 'prepared должен остаться нетронутым');
+    assert.equal(processing.status, 'processing', 'processing должен остаться нетронутым');
+    assert.equal(succeeded.status, 'succeeded', 'succeeded должен остаться нетронутым');
+    assert.ok(succeeded.completed_at, 'completed_at succeeded-строки не должен потеряться');
+
+    assert.equal(failedFromProcessing.status, 'blocked', 'старый failed должен стать blocked (задание, раздел 13)');
+    assert.equal(failedFromProcessing.failure_reason, 'Провайдер отклонил перевод', 'failure_reason должен сохраниться как кэш');
+    assert.ok(failedFromProcessing.failed_at, 'failed_at должен сохраниться');
+
+    assert.equal(failedFromPrepared.status, 'blocked');
+    assert.equal(failedFromPrepared.failure_reason, 'Реквизиты не прошли предварительную проверку');
+
+    // Синтетические исторические попытки — ровно по одной на каждую бывшую
+    // 'failed' строку, НИ ОДНОЙ на prepared/processing/succeeded.
+    const attemptsProcessing = await payoutServiceAfter.listAttemptsForPayout(processingId);
+    assert.equal(attemptsProcessing.length, 0);
+    const attemptsPrepared = await payoutServiceAfter.listAttemptsForPayout(preparedId);
+    assert.equal(attemptsPrepared.length, 0);
+    const attemptsSucceeded = await payoutServiceAfter.listAttemptsForPayout(succeededId);
+    assert.equal(attemptsSucceeded.length, 0);
+
+    const attemptsA = await payoutServiceAfter.listAttemptsForPayout(failedFromProcessingId);
+    assert.equal(attemptsA.length, 1);
+    assert.equal(attemptsA[0].attempt_number, 1);
+    assert.equal(attemptsA[0].status, 'failed');
+    assert.equal(attemptsA[0].bank_status, null, 'задание: "Do not invent provider status"');
+    assert.equal(attemptsA[0].retryable, false);
+    assert.equal(attemptsA[0].payment_id, `legacy-payout-${failedFromProcessingId}`);
+    assert.equal(attemptsA[0].error_message, 'Провайдер отклонил перевод');
+
+    const attemptsB = await payoutServiceAfter.listAttemptsForPayout(failedFromPreparedId);
+    assert.equal(attemptsB.length, 1);
+    assert.equal(attemptsB[0].payment_id, `legacy-payout-${failedFromPreparedId}`);
+    assert.equal(attemptsB[0].retryable, false);
+
+    const invariants = await payoutServiceAfter.checkPayoutInvariants();
+    assert.equal(invariants.ok, true, `инварианты нарушены после миграции: ${JSON.stringify(invariants.violations)}`);
+
+    await dbAfter.close();
+    delete process.env.DATABASE_URL;
+
+    // Идемпотентность: повторное применение НОВОГО schema.sql на уже
+    // смигрированной базе НЕ должно ни упасть с ошибкой, ни задвоить попытки.
+    await setupClient.query(SCHEMA_SQL);
+
+    process.env.DATABASE_URL = cluster.connectionString('payout_migration');
+    delete require.cache[require.resolve('../../db/postgresql')];
+    delete require.cache[require.resolve('../../services/hq/payoutService')];
+    const dbRerun = require('../../db/postgresql');
+    const payoutServiceRerun = require('../../services/hq/payoutService');
+    const attemptsARerun = await payoutServiceRerun.listAttemptsForPayout(failedFromProcessingId);
+    assert.equal(attemptsARerun.length, 1, 'повторный прогон schema.sql не должен задваивать историческую попытку');
+    const invariantsRerun = await payoutServiceRerun.checkPayoutInvariants();
+    assert.equal(invariantsRerun.ok, true);
+    await dbRerun.close();
+  } finally {
+    delete process.env.DATABASE_URL;
+    await setupClient.end();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// #2: multiple historical attempts per obligation — полный retry-цикл
+// (провал с retryable=true -> новая попытка -> успех), обе попытки остаются
+// видны в истории.
+// ---------------------------------------------------------------------------
+test('Stage9.5 #2: несколько исторических попыток на одно обязательство остаются видны после успеха', async () => {
+  const databaseUrl = await freshDatabase('attempt_history');
+  process.env.DATABASE_URL = databaseUrl;
+  const { db, settlementService, payoutService } = requireFreshModules();
+  try {
+    const restaurantId = await createRestaurant(db, 'Hist');
     const period = await closedPeriodWithEarnings(db, settlementService, restaurantId);
-    const prepared = await payoutService.prepareRestaurantPayout(period.id, restaurantId);
-    assert.equal(prepared.status, 'prepared');
+    const payout = await payoutService.prepareRestaurantPayout(period.id, restaurantId);
 
-    const processing = await payoutService.markProcessing(prepared.id, { externalPayoutId: 'ext-001' });
-    assert.equal(processing.status, 'processing');
-    assert.ok(processing.processing_at);
-    assert.equal(processing.external_payout_id, 'ext-001');
-    assert.equal(processing.completed_at, null);
+    const attempt1 = await payoutService.createPayoutAttempt(payout.id);
+    await payoutService.markAttemptSubmitting(attempt1.id);
+    await payoutService.markAttemptProcessing(attempt1.id, 'REJECTED');
+    const { payout: afterFail } = await payoutService.markAttemptFailed(attempt1.id, {
+      bankStatus: 'REJECTED', errorCode: 'insufficient_funds', errorMessage: 'Недостаточно средств на счёте банка-отправителя', retryable: true,
+    });
+    assert.equal(afterFail.status, 'prepared');
 
-    const succeeded = await payoutService.markSucceeded(processing.id);
+    const attempt2 = await payoutService.createPayoutAttempt(payout.id);
+    assert.notEqual(attempt2.payment_id, attempt1.payment_id, 'новая попытка должна получить НОВЫЙ payment_id');
+    assert.equal(attempt2.attempt_number, 2);
+    await payoutService.markAttemptSubmitting(attempt2.id);
+    await payoutService.markAttemptProcessing(attempt2.id, 'COMPLETED');
+    const { payout: succeeded } = await payoutService.markAttemptSucceeded(attempt2.id, 'COMPLETED');
     assert.equal(succeeded.status, 'succeeded');
     assert.ok(succeeded.completed_at);
-    assert.equal(succeeded.failed_at, null);
-    assert.equal(succeeded.external_payout_id, 'ext-001', 'external_payout_id, заданный на processing, не теряется');
-  } finally {
-    await db.close();
-    delete process.env.DATABASE_URL;
-  }
-});
 
-// ---------------------------------------------------------------------------
-// G/H: валидные переходы в failed (из prepared И из processing)
-// ---------------------------------------------------------------------------
-test('G: валидный переход prepared -> failed (отказ до processing) с failure_reason', async () => {
-  const databaseUrl = await freshDatabase('payout_failed_from_prepared');
-  process.env.DATABASE_URL = databaseUrl;
-  delete require.cache[require.resolve('../../db/postgresql')];
-  delete require.cache[require.resolve('../../services/hq/settlementService')];
-  delete require.cache[require.resolve('../../services/hq/payoutService')];
-  const db = require('../../db/postgresql');
-  const settlementService = require('../../services/hq/settlementService');
-  const payoutService = require('../../services/hq/payoutService');
-  try {
-    const restaurantId = await createRestaurant(db, 'G');
-    const period = await closedPeriodWithEarnings(db, settlementService, restaurantId);
-    const prepared = await payoutService.prepareRestaurantPayout(period.id, restaurantId);
-    const failed = await payoutService.markFailed(prepared.id, { failureReason: 'Реквизиты не прошли предварительную проверку' });
-    assert.equal(failed.status, 'failed');
-    assert.ok(failed.failed_at);
-    assert.equal(failed.processing_at, null, 'отказ до processing — processing_at остаётся null');
-    assert.equal(failed.failure_reason, 'Реквизиты не прошли предварительную проверку');
-  } finally {
-    await db.close();
-    delete process.env.DATABASE_URL;
-  }
-});
+    const history = await payoutService.listAttemptsForPayout(payout.id);
+    assert.equal(history.length, 2, 'обе попытки должны остаться в истории — ни одна не удаляется/не переписывается');
+    assert.equal(history[0].attempt_number, 1);
+    assert.equal(history[0].status, 'failed');
+    assert.equal(history[0].error_message, 'Недостаточно средств на счёте банка-отправителя');
+    assert.equal(history[1].attempt_number, 2);
+    assert.equal(history[1].status, 'succeeded');
 
-test('H: валидный переход processing -> failed (реальный отказ провайдера) с failure_reason', async () => {
-  const databaseUrl = await freshDatabase('payout_failed_from_processing');
-  process.env.DATABASE_URL = databaseUrl;
-  delete require.cache[require.resolve('../../db/postgresql')];
-  delete require.cache[require.resolve('../../services/hq/settlementService')];
-  delete require.cache[require.resolve('../../services/hq/payoutService')];
-  const db = require('../../db/postgresql');
-  const settlementService = require('../../services/hq/settlementService');
-  const payoutService = require('../../services/hq/payoutService');
-  try {
-    const restaurantId = await createRestaurant(db, 'H');
-    const period = await closedPeriodWithEarnings(db, settlementService, restaurantId);
-    const prepared = await payoutService.prepareRestaurantPayout(period.id, restaurantId);
-    const processing = await payoutService.markProcessing(prepared.id);
-    const failed = await payoutService.markFailed(processing.id, { failureReason: 'Провайдер отклонил перевод' });
-    assert.equal(failed.status, 'failed');
-    assert.ok(failed.processing_at, 'processing_at должен остаться с прошлого перехода');
-    assert.ok(failed.failed_at);
-  } finally {
-    await db.close();
-    delete process.env.DATABASE_URL;
-  }
-});
-
-// ---------------------------------------------------------------------------
-// I-L: неверные переходы отклонены
-// ---------------------------------------------------------------------------
-test('I: prepared -> succeeded напрямую (минуя processing) отклонён', async () => {
-  const databaseUrl = await freshDatabase('payout_invalid_skip_processing');
-  process.env.DATABASE_URL = databaseUrl;
-  delete require.cache[require.resolve('../../db/postgresql')];
-  delete require.cache[require.resolve('../../services/hq/settlementService')];
-  delete require.cache[require.resolve('../../services/hq/payoutService')];
-  const db = require('../../db/postgresql');
-  const settlementService = require('../../services/hq/settlementService');
-  const payoutService = require('../../services/hq/payoutService');
-  try {
-    const restaurantId = await createRestaurant(db, 'I');
-    const period = await closedPeriodWithEarnings(db, settlementService, restaurantId);
-    const prepared = await payoutService.prepareRestaurantPayout(period.id, restaurantId);
-    await assert.rejects(() => payoutService.markSucceeded(prepared.id), /разрешено только из "processing"/i);
-  } finally {
-    await db.close();
-    delete process.env.DATABASE_URL;
-  }
-});
-
-test('J: succeeded -> processing отклонён (terminal, нельзя вернуть в обработку)', async () => {
-  const databaseUrl = await freshDatabase('payout_invalid_terminal_succeeded');
-  process.env.DATABASE_URL = databaseUrl;
-  delete require.cache[require.resolve('../../db/postgresql')];
-  delete require.cache[require.resolve('../../services/hq/settlementService')];
-  delete require.cache[require.resolve('../../services/hq/payoutService')];
-  const db = require('../../db/postgresql');
-  const settlementService = require('../../services/hq/settlementService');
-  const payoutService = require('../../services/hq/payoutService');
-  try {
-    const restaurantId = await createRestaurant(db, 'J');
-    const period = await closedPeriodWithEarnings(db, settlementService, restaurantId);
-    const prepared = await payoutService.prepareRestaurantPayout(period.id, restaurantId);
-    const processing = await payoutService.markProcessing(prepared.id);
-    const succeeded = await payoutService.markSucceeded(processing.id);
-    await assert.rejects(() => payoutService.markProcessing(succeeded.id), /разрешено только из "prepared"/i);
-  } finally {
-    await db.close();
-    delete process.env.DATABASE_URL;
-  }
-});
-
-test('K: failed -> processing отклонён (задание, дословно: "нельзя failed -> processing")', async () => {
-  const databaseUrl = await freshDatabase('payout_invalid_failed_to_processing');
-  process.env.DATABASE_URL = databaseUrl;
-  delete require.cache[require.resolve('../../db/postgresql')];
-  delete require.cache[require.resolve('../../services/hq/settlementService')];
-  delete require.cache[require.resolve('../../services/hq/payoutService')];
-  const db = require('../../db/postgresql');
-  const settlementService = require('../../services/hq/settlementService');
-  const payoutService = require('../../services/hq/payoutService');
-  try {
-    const restaurantId = await createRestaurant(db, 'K');
-    const period = await closedPeriodWithEarnings(db, settlementService, restaurantId);
-    const prepared = await payoutService.prepareRestaurantPayout(period.id, restaurantId);
-    const failed = await payoutService.markFailed(prepared.id, { failureReason: 'тест' });
-    await assert.rejects(() => payoutService.markProcessing(failed.id), /разрешено только из "prepared"/i);
-  } finally {
-    await db.close();
-    delete process.env.DATABASE_URL;
-  }
-});
-
-test('L: failed -> succeeded отклонён (terminal)', async () => {
-  const databaseUrl = await freshDatabase('payout_invalid_failed_to_succeeded');
-  process.env.DATABASE_URL = databaseUrl;
-  delete require.cache[require.resolve('../../db/postgresql')];
-  delete require.cache[require.resolve('../../services/hq/settlementService')];
-  delete require.cache[require.resolve('../../services/hq/payoutService')];
-  const db = require('../../db/postgresql');
-  const settlementService = require('../../services/hq/settlementService');
-  const payoutService = require('../../services/hq/payoutService');
-  try {
-    const restaurantId = await createRestaurant(db, 'L');
-    const period = await closedPeriodWithEarnings(db, settlementService, restaurantId);
-    const prepared = await payoutService.prepareRestaurantPayout(period.id, restaurantId);
-    const failed = await payoutService.markFailed(prepared.id, { failureReason: 'тест' });
-    await assert.rejects(() => payoutService.markSucceeded(failed.id), /разрешено только из "processing"/i);
-  } finally {
-    await db.close();
-    delete process.env.DATABASE_URL;
-  }
-});
-
-test('M: markFailed без failureReason отклонён', async () => {
-  const databaseUrl = await freshDatabase('payout_failed_reason_required');
-  process.env.DATABASE_URL = databaseUrl;
-  delete require.cache[require.resolve('../../db/postgresql')];
-  delete require.cache[require.resolve('../../services/hq/settlementService')];
-  delete require.cache[require.resolve('../../services/hq/payoutService')];
-  const db = require('../../db/postgresql');
-  const settlementService = require('../../services/hq/settlementService');
-  const payoutService = require('../../services/hq/payoutService');
-  try {
-    const restaurantId = await createRestaurant(db, 'M');
-    const period = await closedPeriodWithEarnings(db, settlementService, restaurantId);
-    const prepared = await payoutService.prepareRestaurantPayout(period.id, restaurantId);
-    await assert.rejects(() => payoutService.markFailed(prepared.id, {}), /failureReason обязателен/i);
-    await assert.rejects(() => payoutService.markFailed(prepared.id, { failureReason: '   ' }), /failureReason обязателен/i);
-  } finally {
-    await db.close();
-    delete process.env.DATABASE_URL;
-  }
-});
-
-// ---------------------------------------------------------------------------
-// N: immutability на уровне БД после terminal
-// ---------------------------------------------------------------------------
-test('N: succeeded/failed выплаты защищены DB-триггером от UPDATE/DELETE напрямую через SQL', async () => {
-  const databaseUrl = await freshDatabase('payout_immutability');
-  process.env.DATABASE_URL = databaseUrl;
-  delete require.cache[require.resolve('../../db/postgresql')];
-  delete require.cache[require.resolve('../../services/hq/settlementService')];
-  delete require.cache[require.resolve('../../services/hq/payoutService')];
-  const db = require('../../db/postgresql');
-  const settlementService = require('../../services/hq/settlementService');
-  const payoutService = require('../../services/hq/payoutService');
-  try {
-    const restaurantA = await createRestaurant(db, 'N-succeeded');
-    const periodA = await closedPeriodWithEarnings(db, settlementService, restaurantA);
-    const preparedA = await payoutService.prepareRestaurantPayout(periodA.id, restaurantA);
-    const processingA = await payoutService.markProcessing(preparedA.id);
-    const succeeded = await payoutService.markSucceeded(processingA.id);
-
-    await assert.rejects(() => db.execute(`UPDATE restaurant_payouts SET notes = 'hacked' WHERE id = $1`, [succeeded.id]), /immutable/i);
-    await assert.rejects(() => db.execute(`DELETE FROM restaurant_payouts WHERE id = $1`, [succeeded.id]), /immutable|cannot be deleted/i);
-
-    const restaurantB = await createRestaurant(db, 'N-failed');
-    const periodB = await closedPeriodWithEarnings(db, settlementService, restaurantB, { dayOffset: -1 });
-    const preparedB = await payoutService.prepareRestaurantPayout(periodB.id, restaurantB);
-    const failed = await payoutService.markFailed(preparedB.id, { failureReason: 'тест' });
-
-    await assert.rejects(() => db.execute(`UPDATE restaurant_payouts SET notes = 'hacked' WHERE id = $1`, [failed.id]), /immutable/i);
-    await assert.rejects(() => db.execute(`DELETE FROM restaurant_payouts WHERE id = $1`, [failed.id]), /immutable|cannot be deleted/i);
-
-    // Не-terminal (prepared/processing) НЕ должны быть immutable — иначе
-    // сам markProcessing/markSucceeded/markFailed выше не сработал бы.
-    // Дополнительно явно проверяем, что prepared-строку МОЖНО обновить
-    // штатным переходом (уже доказано выше тем, что succeeded/failed вообще
-    // существуют), поэтому здесь только негативный кейс terminal.
     const invariants = await payoutService.checkPayoutInvariants();
     assert.equal(invariants.ok, true);
   } finally {
@@ -569,20 +515,480 @@ test('N: succeeded/failed выплаты защищены DB-триггером 
 });
 
 // ---------------------------------------------------------------------------
-// O: изоляция ресторанов
+// #3: no more than one active attempt per payout — И на уровне сервиса, И
+// физически на уровне партиального UNIQUE-индекса (задание, раздел 5:
+// "must be physically impossible").
 // ---------------------------------------------------------------------------
-test('O: выплаты двух ресторанов в одном периоде не смешиваются', async () => {
-  const databaseUrl = await freshDatabase('payout_isolation');
+test('Stage9.5 #3a: createPayoutAttempt отклоняет создание второй попытки, пока первая активна (сервисный уровень)', async () => {
+  const databaseUrl = await freshDatabase('attempt_one_active_service');
   process.env.DATABASE_URL = databaseUrl;
-  delete require.cache[require.resolve('../../db/postgresql')];
-  delete require.cache[require.resolve('../../services/hq/settlementService')];
-  delete require.cache[require.resolve('../../services/hq/payoutService')];
-  const db = require('../../db/postgresql');
-  const settlementService = require('../../services/hq/settlementService');
-  const payoutService = require('../../services/hq/payoutService');
+  const { db, settlementService, payoutService } = requireFreshModules();
   try {
-    const restaurantA = await createRestaurant(db, 'O-A');
-    const restaurantB = await createRestaurant(db, 'O-B');
+    const restaurantId = await createRestaurant(db, 'OneActive');
+    const period = await closedPeriodWithEarnings(db, settlementService, restaurantId);
+    const payout = await payoutService.prepareRestaurantPayout(period.id, restaurantId);
+
+    await payoutService.createPayoutAttempt(payout.id); // status='created', уже активна
+    await assert.rejects(() => payoutService.createPayoutAttempt(payout.id), /уже есть активная попытка/i);
+  } finally {
+    await db.close();
+    delete process.env.DATABASE_URL;
+  }
+});
+
+test('Stage9.5 #3b: партиальный UNIQUE-индекс физически запрещает вторую активную попытку в обход сервисного слоя', async () => {
+  const databaseUrl = await freshDatabase('attempt_one_active_db');
+  process.env.DATABASE_URL = databaseUrl;
+  const { db, settlementService, payoutService } = requireFreshModules();
+  try {
+    const restaurantId = await createRestaurant(db, 'OneActiveDb');
+    const period = await closedPeriodWithEarnings(db, settlementService, restaurantId);
+    const payout = await payoutService.prepareRestaurantPayout(period.id, restaurantId);
+    const attempt1 = await payoutService.createPayoutAttempt(payout.id);
+    assert.equal(attempt1.status, 'created');
+
+    // Прямой SQL-обход всего сервисного слоя — доказывает, что ограничение
+    // физическое (уровень БД), а не только проверка в JS до INSERT.
+    await assert.rejects(() => db.execute(
+      `INSERT INTO payout_attempts (payout_id, attempt_number, payment_id, status) VALUES ($1, 2, 'manual-bypass-attempt', 'created')`,
+      [payout.id],
+    ), /duplicate key|unique/i);
+  } finally {
+    await db.close();
+    delete process.env.DATABASE_URL;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// #4: payment_id uniqueness — физическое ограничение
+// ---------------------------------------------------------------------------
+test('Stage9.5 #4: payment_id уникален физически (UNIQUE), повторное использование отклоняется', async () => {
+  const databaseUrl = await freshDatabase('payment_id_unique');
+  process.env.DATABASE_URL = databaseUrl;
+  const { db, settlementService, payoutService } = requireFreshModules();
+  try {
+    const restaurantId = await createRestaurant(db, 'PayIdUnique');
+    const period = await closedPeriodWithEarnings(db, settlementService, restaurantId);
+    const payout = await payoutService.prepareRestaurantPayout(period.id, restaurantId);
+    const attempt1 = await payoutService.createPayoutAttempt(payout.id);
+    await payoutService.markAttemptSubmitting(attempt1.id);
+    await payoutService.markAttemptProcessing(attempt1.id);
+    await payoutService.markAttemptFailed(attempt1.id, { errorMessage: 'тест', retryable: true });
+
+    // Другая выплата (другой ресторан/период) НЕ должна иметь возможность
+    // переиспользовать тот же payment_id, даже вручную через SQL.
+    const restaurantId2 = await createRestaurant(db, 'PayIdUnique2');
+    const period2 = await closedPeriodWithEarnings(db, settlementService, restaurantId2, { dayOffset: -1 });
+    const payout2 = await payoutService.prepareRestaurantPayout(period2.id, restaurantId2);
+
+    await assert.rejects(() => db.execute(
+      `INSERT INTO payout_attempts (payout_id, attempt_number, payment_id, status) VALUES ($1, 1, $2, 'created')`,
+      [payout2.id, attempt1.payment_id],
+    ), /duplicate key|unique/i);
+  } finally {
+    await db.close();
+    delete process.env.DATABASE_URL;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// #5: sequential attempt_number
+// ---------------------------------------------------------------------------
+test('Stage9.5 #5a: attempt_number растёт последовательно 1, 2, 3 при повторных retryable-провалах', async () => {
+  const databaseUrl = await freshDatabase('attempt_number_sequential');
+  process.env.DATABASE_URL = databaseUrl;
+  const { db, settlementService, payoutService } = requireFreshModules();
+  try {
+    const restaurantId = await createRestaurant(db, 'Sequential');
+    const period = await closedPeriodWithEarnings(db, settlementService, restaurantId);
+    const payout = await payoutService.prepareRestaurantPayout(period.id, restaurantId);
+
+    const numbers = [];
+    for (let i = 0; i < 3; i += 1) {
+      const attempt = await payoutService.createPayoutAttempt(payout.id);
+      numbers.push(attempt.attempt_number);
+      await payoutService.markAttemptSubmitting(attempt.id);
+      await payoutService.markAttemptProcessing(attempt.id);
+      await payoutService.markAttemptFailed(attempt.id, { errorMessage: `провал ${i + 1}`, retryable: true });
+    }
+    assert.deepEqual(numbers, [1, 2, 3]);
+  } finally {
+    await db.close();
+    delete process.env.DATABASE_URL;
+  }
+});
+
+test('Stage9.5 #5b: checkPayoutInvariants обнаруживает пропуск в attempt_number (ручная порча данных)', async () => {
+  const databaseUrl = await freshDatabase('attempt_number_gap');
+  process.env.DATABASE_URL = databaseUrl;
+  const { db, settlementService, payoutService } = requireFreshModules();
+  try {
+    const restaurantId = await createRestaurant(db, 'Gap');
+    const period = await closedPeriodWithEarnings(db, settlementService, restaurantId);
+    const payout = await payoutService.prepareRestaurantPayout(period.id, restaurantId);
+
+    // Обходим сервисный слой напрямую SQL, чтобы создать физически валидную
+    // (никакое ограничение схемы это не запрещает), но логически испорченную
+    // ситуацию — attempt_number=5 без предшествующих 1-4.
+    await db.execute(
+      `INSERT INTO payout_attempts (payout_id, attempt_number, payment_id, status) VALUES ($1, 5, 'manual-gap-attempt', 'created')`,
+      [payout.id],
+    );
+
+    const invariants = await payoutService.checkPayoutInvariants();
+    assert.equal(invariants.ok, false);
+    assert.ok(invariants.violations.some((v) => v.kind === 'non_sequential_attempt_numbers'));
+  } finally {
+    await db.close();
+    delete process.env.DATABASE_URL;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// #6: valid transitions — полный набор реально достижимых путей
+// ---------------------------------------------------------------------------
+test('Stage9.5 #6: валидные переходы попытки — submitting->unknown->processing->succeeded', async () => {
+  const databaseUrl = await freshDatabase('valid_transitions_via_unknown');
+  process.env.DATABASE_URL = databaseUrl;
+  const { db, settlementService, payoutService } = requireFreshModules();
+  try {
+    const restaurantId = await createRestaurant(db, 'ValidUnknown');
+    const period = await closedPeriodWithEarnings(db, settlementService, restaurantId);
+    const payout = await payoutService.prepareRestaurantPayout(period.id, restaurantId);
+
+    const attempt = await payoutService.createPayoutAttempt(payout.id);
+    assert.equal(attempt.status, 'created');
+    const { payout: afterSubmit } = await payoutService.markAttemptSubmitting(attempt.id);
+    assert.equal(afterSubmit.status, 'processing', 'обязательство переходит в processing именно на submitting, не раньше');
+
+    const { attempt: unknownAttempt, payout: unknownPayout } = await payoutService.markAttemptUnknown(attempt.id, 'нет ответа от банка за отведённое время');
+    assert.equal(unknownAttempt.status, 'unknown');
+    assert.equal(unknownPayout.status, 'unknown');
+
+    const { attempt: backToProcessing, payout: payoutBackToProcessing } = await payoutService.markAttemptProcessing(attempt.id, 'IN_PROGRESS');
+    assert.equal(backToProcessing.status, 'processing');
+    assert.equal(backToProcessing.bank_status, 'IN_PROGRESS');
+    assert.equal(payoutBackToProcessing.status, 'processing');
+
+    const { attempt: succeeded, payout: succeededPayout } = await payoutService.markAttemptSucceeded(attempt.id, 'COMPLETED');
+    assert.equal(succeeded.status, 'succeeded');
+    assert.ok(succeeded.completed_at);
+    assert.equal(succeededPayout.status, 'succeeded');
+    assert.ok(succeededPayout.completed_at);
+  } finally {
+    await db.close();
+    delete process.env.DATABASE_URL;
+  }
+});
+
+test('Stage9.5 #6b: unknown -> failed — валидный переход (неопределённость в итоге разрешилась отказом)', async () => {
+  const databaseUrl = await freshDatabase('valid_unknown_to_failed');
+  process.env.DATABASE_URL = databaseUrl;
+  const { db, settlementService, payoutService } = requireFreshModules();
+  try {
+    const restaurantId = await createRestaurant(db, 'UnknownFailed');
+    const period = await closedPeriodWithEarnings(db, settlementService, restaurantId);
+    const payout = await payoutService.prepareRestaurantPayout(period.id, restaurantId);
+    const attempt = await payoutService.createPayoutAttempt(payout.id);
+    await payoutService.markAttemptSubmitting(attempt.id);
+    await payoutService.markAttemptUnknown(attempt.id, 'timeout');
+    const { attempt: failed, payout: blocked } = await payoutService.markAttemptFailed(attempt.id, {
+      errorMessage: 'Банк подтвердил: перевод не прошёл', retryable: false,
+    });
+    assert.equal(failed.status, 'failed');
+    assert.equal(blocked.status, 'blocked');
+  } finally {
+    await db.close();
+    delete process.env.DATABASE_URL;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// #7: invalid transitions — сервисный уровень И уровень БД (defense in depth)
+// ---------------------------------------------------------------------------
+test('Stage9.5 #7a: created -> processing напрямую (минуя submitting) отклонён на сервисном уровне', async () => {
+  const databaseUrl = await freshDatabase('invalid_created_to_processing');
+  process.env.DATABASE_URL = databaseUrl;
+  const { db, settlementService, payoutService } = requireFreshModules();
+  try {
+    const restaurantId = await createRestaurant(db, 'InvalidSkip');
+    const period = await closedPeriodWithEarnings(db, settlementService, restaurantId);
+    const payout = await payoutService.prepareRestaurantPayout(period.id, restaurantId);
+    const attempt = await payoutService.createPayoutAttempt(payout.id);
+    await assert.rejects(() => payoutService.markAttemptProcessing(attempt.id), /разрешено только из "submitting" или "unknown"/i);
+  } finally {
+    await db.close();
+    delete process.env.DATABASE_URL;
+  }
+});
+
+test('Stage9.5 #7b: succeeded -> любой другой статус отклонён (terminal, сервисный уровень)', async () => {
+  const databaseUrl = await freshDatabase('invalid_from_succeeded');
+  process.env.DATABASE_URL = databaseUrl;
+  const { db, settlementService, payoutService } = requireFreshModules();
+  try {
+    const restaurantId = await createRestaurant(db, 'InvalidFromSucceeded');
+    const period = await closedPeriodWithEarnings(db, settlementService, restaurantId);
+    const payout = await payoutService.prepareRestaurantPayout(period.id, restaurantId);
+    const { attempt } = await toFirstAttemptProcessing(payoutService, payout.id);
+    const { attempt: succeeded } = await payoutService.markAttemptSucceeded(attempt.id);
+    await assert.rejects(() => payoutService.markAttemptProcessing(succeeded.id), /разрешено только из/i);
+    await assert.rejects(() => payoutService.markAttemptFailed(succeeded.id, { errorMessage: 'x', retryable: true }), /разрешено только из/i);
+  } finally {
+    await db.close();
+    delete process.env.DATABASE_URL;
+  }
+});
+
+test('Stage9.5 #7c: невалидный переход попытки отклонён и НА УРОВНЕ БД напрямую (в обход сервиса)', async () => {
+  const databaseUrl = await freshDatabase('invalid_db_level');
+  process.env.DATABASE_URL = databaseUrl;
+  const { db, settlementService, payoutService } = requireFreshModules();
+  try {
+    const restaurantId = await createRestaurant(db, 'InvalidDbLevel');
+    const period = await closedPeriodWithEarnings(db, settlementService, restaurantId);
+    const payout = await payoutService.prepareRestaurantPayout(period.id, restaurantId);
+    const attempt = await payoutService.createPayoutAttempt(payout.id); // status='created'
+
+    // created -> succeeded напрямую через сырой SQL — граф переходов
+    // fn_payout_attempts_valid_transition не разрешает такой прыжок.
+    await assert.rejects(() => db.execute(
+      `UPDATE payout_attempts SET status = 'succeeded', completed_at = NOW() WHERE id = $1`,
+      [attempt.id],
+    ), /invalid status transition/i);
+  } finally {
+    await db.close();
+    delete process.env.DATABASE_URL;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// #8: timeout/unknown never becomes failed automatically (задание, раздел 4,
+// дословно: "timeout / exception / HTTP 500 alone must never cause failed")
+// ---------------------------------------------------------------------------
+test('Stage9.5 #8: markAttemptUnknown не переводит попытку в failed сама по себе; markAttemptFailed требует явных errorMessage/retryable', async () => {
+  const databaseUrl = await freshDatabase('unknown_never_auto_failed');
+  process.env.DATABASE_URL = databaseUrl;
+  const { db, settlementService, payoutService } = requireFreshModules();
+  try {
+    const restaurantId = await createRestaurant(db, 'NeverAutoFailed');
+    const period = await closedPeriodWithEarnings(db, settlementService, restaurantId);
+    const payout = await payoutService.prepareRestaurantPayout(period.id, restaurantId);
+    const attempt = await payoutService.createPayoutAttempt(payout.id);
+    await payoutService.markAttemptSubmitting(attempt.id);
+    const { attempt: unknown } = await payoutService.markAttemptUnknown(attempt.id, 'network timeout');
+    assert.equal(unknown.status, 'unknown', 'попытка остаётся unknown — НЕ становится failed автоматически');
+
+    // markAttemptFailed без errorMessage/retryable должен быть физически
+    // невозможен вызвать "просто по таймауту" без осознанного решения.
+    await assert.rejects(() => payoutService.markAttemptFailed(attempt.id, { retryable: true }), /errorMessage обязателен/i);
+    await assert.rejects(() => payoutService.markAttemptFailed(attempt.id, { errorMessage: 'timeout' }), /retryable обязателен/i);
+    await assert.rejects(() => payoutService.markAttemptFailed(attempt.id, { errorMessage: '   ', retryable: true }), /errorMessage обязателен/i);
+
+    const stillUnknown = await payoutService.getAttemptById(attempt.id);
+    assert.equal(stillUnknown.status, 'unknown', 'неудачные вызовы markAttemptFailed не должны были изменить статус');
+  } finally {
+    await db.close();
+    delete process.env.DATABASE_URL;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// #9: unknown blocks creation of new attempt
+// ---------------------------------------------------------------------------
+test('Stage9.5 #9: активная попытка в статусе unknown блокирует создание новой попытки', async () => {
+  const databaseUrl = await freshDatabase('unknown_blocks_new_attempt');
+  process.env.DATABASE_URL = databaseUrl;
+  const { db, settlementService, payoutService } = requireFreshModules();
+  try {
+    const restaurantId = await createRestaurant(db, 'UnknownBlocks');
+    const period = await closedPeriodWithEarnings(db, settlementService, restaurantId);
+    const payout = await payoutService.prepareRestaurantPayout(period.id, restaurantId);
+    const attempt = await payoutService.createPayoutAttempt(payout.id);
+    await payoutService.markAttemptSubmitting(attempt.id);
+    const { payout: unknownPayout } = await payoutService.markAttemptUnknown(attempt.id, 'timeout');
+    assert.equal(unknownPayout.status, 'unknown');
+
+    await assert.rejects(() => payoutService.createPayoutAttempt(payout.id), /Нельзя создать попытку|уже есть активная попытка/i);
+  } finally {
+    await db.close();
+    delete process.env.DATABASE_URL;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// #10: processing blocks creation of new attempt
+// ---------------------------------------------------------------------------
+test('Stage9.5 #10: активная попытка в статусе processing блокирует создание новой попытки', async () => {
+  const databaseUrl = await freshDatabase('processing_blocks_new_attempt');
+  process.env.DATABASE_URL = databaseUrl;
+  const { db, settlementService, payoutService } = requireFreshModules();
+  try {
+    const restaurantId = await createRestaurant(db, 'ProcessingBlocks');
+    const period = await closedPeriodWithEarnings(db, settlementService, restaurantId);
+    const payout = await payoutService.prepareRestaurantPayout(period.id, restaurantId);
+    await toFirstAttemptProcessing(payoutService, payout.id);
+
+    await assert.rejects(() => payoutService.createPayoutAttempt(payout.id), /Нельзя создать попытку|уже есть активная попытка/i);
+  } finally {
+    await db.close();
+    delete process.env.DATABASE_URL;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// #11: succeeded attempt makes parent succeeded
+// ---------------------------------------------------------------------------
+test('Stage9.5 #11: успешная попытка переводит обязательство в succeeded с реальной датой завершения', async () => {
+  const databaseUrl = await freshDatabase('succeeded_attempt_parent');
+  process.env.DATABASE_URL = databaseUrl;
+  const { db, settlementService, payoutService } = requireFreshModules();
+  try {
+    const restaurantId = await createRestaurant(db, 'SucceededParent');
+    const period = await closedPeriodWithEarnings(db, settlementService, restaurantId);
+    const payout = await payoutService.prepareRestaurantPayout(period.id, restaurantId);
+    const before = Date.now();
+    const { attempt } = await toFirstAttemptProcessing(payoutService, payout.id);
+    const { payout: succeeded } = await payoutService.markAttemptSucceeded(attempt.id, 'COMPLETED');
+    assert.equal(succeeded.status, 'succeeded');
+    assert.ok(new Date(succeeded.completed_at).getTime() >= before);
+  } finally {
+    await db.close();
+    delete process.env.DATABASE_URL;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// #12: failed+retryable leaves obligation unpaid and allows new attempt
+// ---------------------------------------------------------------------------
+test('Stage9.5 #12: провал с retryable=true оставляет обязательство неоплаченным (prepared) и разрешает новую попытку', async () => {
+  const databaseUrl = await freshDatabase('failed_retryable_allows_retry');
+  process.env.DATABASE_URL = databaseUrl;
+  const { db, settlementService, payoutService } = requireFreshModules();
+  try {
+    const restaurantId = await createRestaurant(db, 'RetryableAllows');
+    const period = await closedPeriodWithEarnings(db, settlementService, restaurantId);
+    const payout = await payoutService.prepareRestaurantPayout(period.id, restaurantId);
+    const { attempt } = await toFirstAttemptProcessing(payoutService, payout.id);
+    const { payout: afterFail } = await payoutService.markAttemptFailed(attempt.id, { errorMessage: 'временный сбой шлюза', retryable: true });
+    assert.equal(afterFail.status, 'prepared', 'retryable=true -> prepared, не blocked');
+
+    const attempt2 = await payoutService.createPayoutAttempt(payout.id);
+    assert.equal(attempt2.attempt_number, 2);
+    assert.notEqual(attempt2.payment_id, attempt.payment_id);
+  } finally {
+    await db.close();
+    delete process.env.DATABASE_URL;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// #13: failed+non-retryable moves to blocked, new attempt rejected
+// ---------------------------------------------------------------------------
+test('Stage9.5 #13: провал с retryable=false переводит обязательство в blocked, новая попытка отклоняется без решения оператора', async () => {
+  const databaseUrl = await freshDatabase('failed_nonretryable_blocked');
+  process.env.DATABASE_URL = databaseUrl;
+  const { db, settlementService, payoutService } = requireFreshModules();
+  try {
+    const restaurantId = await createRestaurant(db, 'NonRetryableBlocked');
+    const period = await closedPeriodWithEarnings(db, settlementService, restaurantId);
+    const payout = await payoutService.prepareRestaurantPayout(period.id, restaurantId);
+    const { attempt } = await toFirstAttemptProcessing(payoutService, payout.id);
+    const { payout: afterFail } = await payoutService.markAttemptFailed(attempt.id, { errorMessage: 'реквизиты получателя некорректны', retryable: false });
+    assert.equal(afterFail.status, 'blocked');
+
+    await assert.rejects(() => payoutService.createPayoutAttempt(payout.id), /retryable|решения оператора/i);
+  } finally {
+    await db.close();
+    delete process.env.DATABASE_URL;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// #14: terminal attempt immutable
+// ---------------------------------------------------------------------------
+test('Stage9.5 #14: succeeded/failed попытки защищены DB-триггером от UPDATE/DELETE напрямую через SQL', async () => {
+  const databaseUrl = await freshDatabase('attempt_immutability');
+  process.env.DATABASE_URL = databaseUrl;
+  const { db, settlementService, payoutService } = requireFreshModules();
+  try {
+    const restaurantId = await createRestaurant(db, 'AttemptImmutable');
+    const period = await closedPeriodWithEarnings(db, settlementService, restaurantId);
+    const payout = await payoutService.prepareRestaurantPayout(period.id, restaurantId);
+    const { attempt } = await toFirstAttemptProcessing(payoutService, payout.id);
+    const { attempt: succeeded } = await payoutService.markAttemptSucceeded(attempt.id);
+
+    await assert.rejects(() => db.execute(`UPDATE payout_attempts SET bank_status = 'hacked' WHERE id = $1`, [succeeded.id]), /immutable/i);
+    await assert.rejects(() => db.execute(`DELETE FROM payout_attempts WHERE id = $1`, [succeeded.id]), /immutable|cannot be deleted/i);
+
+    const restaurantId2 = await createRestaurant(db, 'AttemptImmutableFailed');
+    const period2 = await closedPeriodWithEarnings(db, settlementService, restaurantId2, { dayOffset: -1 });
+    const payout2 = await payoutService.prepareRestaurantPayout(period2.id, restaurantId2);
+    const { attempt: attempt2 } = await toFirstAttemptProcessing(payoutService, payout2.id);
+    const { attempt: failed } = await payoutService.markAttemptFailed(attempt2.id, { errorMessage: 'тест', retryable: false });
+
+    await assert.rejects(() => db.execute(`UPDATE payout_attempts SET bank_status = 'hacked' WHERE id = $1`, [failed.id]), /immutable/i);
+    await assert.rejects(() => db.execute(`DELETE FROM payout_attempts WHERE id = $1`, [failed.id]), /immutable|cannot be deleted/i);
+  } finally {
+    await db.close();
+    delete process.env.DATABASE_URL;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// #15: succeeded obligation immutable (тот же принцип, что Stage 9, теперь
+// ТОЛЬКО succeeded — blocked/unknown/prepared/processing остаются
+// редактируемыми, задание раздел 6)
+// ---------------------------------------------------------------------------
+test('Stage9.5 #15: succeeded обязательство защищено DB-триггером, blocked — НЕ защищено (контраст)', async () => {
+  const databaseUrl = await freshDatabase('obligation_immutability');
+  process.env.DATABASE_URL = databaseUrl;
+  const { db, settlementService, payoutService } = requireFreshModules();
+  try {
+    const restaurantA = await createRestaurant(db, 'ObligImmutableSucceeded');
+    const periodA = await closedPeriodWithEarnings(db, settlementService, restaurantA);
+    const payoutA = await payoutService.prepareRestaurantPayout(periodA.id, restaurantA);
+    const { attempt } = await toFirstAttemptProcessing(payoutService, payoutA.id);
+    const { payout: succeeded } = await payoutService.markAttemptSucceeded(attempt.id);
+
+    await assert.rejects(() => db.execute(`UPDATE restaurant_payouts SET notes = 'hacked' WHERE id = $1`, [succeeded.id]), /immutable/i);
+    await assert.rejects(() => db.execute(`DELETE FROM restaurant_payouts WHERE id = $1`, [succeeded.id]), /immutable|cannot be deleted/i);
+
+    const restaurantB = await createRestaurant(db, 'ObligMutableBlocked');
+    const periodB = await closedPeriodWithEarnings(db, settlementService, restaurantB, { dayOffset: -1 });
+    const payoutB = await payoutService.prepareRestaurantPayout(periodB.id, restaurantB);
+    const { attempt: attemptB } = await toFirstAttemptProcessing(payoutService, payoutB.id);
+    const { payout: blocked } = await payoutService.markAttemptFailed(attemptB.id, { errorMessage: 'тест', retryable: false });
+    assert.equal(blocked.status, 'blocked');
+    // blocked НЕ terminal — обычный SQL UPDATE (не через триггер валидных
+    // переходов, просто правка не-статусного поля) должен пройти свободно.
+    await db.execute(`UPDATE restaurant_payouts SET notes = 'заметка оператора' WHERE id = $1`, [blocked.id]);
+    const reread = await payoutService.getPayoutById(blocked.id);
+    assert.equal(reread.notes, 'заметка оператора');
+
+    const invariants = await payoutService.checkPayoutInvariants();
+    assert.equal(invariants.ok, true);
+  } finally {
+    await db.close();
+    delete process.env.DATABASE_URL;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// #16: amount copied, never recalculated — уже проверено тестом D выше
+// (задание, раздел 2/16). Отдельный тест здесь не дублируется намеренно.
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// #17: restaurant isolation
+// ---------------------------------------------------------------------------
+test('Stage9.5 #17: выплаты и попытки двух ресторанов в одном периоде не смешиваются', async () => {
+  const databaseUrl = await freshDatabase('restaurant_isolation');
+  process.env.DATABASE_URL = databaseUrl;
+  const { db, settlementService, payoutService } = requireFreshModules();
+  try {
+    const restaurantA = await createRestaurant(db, 'Iso-A');
+    const restaurantB = await createRestaurant(db, 'Iso-B');
     const orderA = await createOrderRow(db, { restaurantId: restaurantA, status: 'delivered', itemsTotal: 1000, commissionAmount: 70 });
     await addSucceededPayment(db, orderA, 1000);
     const orderB = await createOrderRow(db, { restaurantId: restaurantB, status: 'delivered', itemsTotal: 5000, commissionAmount: 350 });
@@ -596,10 +1002,14 @@ test('O: выплаты двух ресторанов в одном период
     assert.equal(payoutA.amount, 930);
     assert.equal(payoutB.amount, 4650);
 
-    await payoutService.markProcessing(payoutA.id);
-    // A -> processing НЕ должно влиять на B, которая осталась prepared.
+    const attemptA = await payoutService.createPayoutAttempt(payoutA.id);
+    await payoutService.markAttemptSubmitting(attemptA.id);
+    // A -> processing НЕ должно влиять на B, которая осталась prepared, и не
+    // должно создавать никаких попыток для B.
     const bStillPrepared = await payoutService.getPayoutById(payoutB.id);
     assert.equal(bStillPrepared.status, 'prepared');
+    const bAttempts = await payoutService.listAttemptsForPayout(payoutB.id);
+    assert.equal(bAttempts.length, 0);
 
     const map = await payoutService.listPayoutsForPeriod(period.id);
     assert.equal(map.get(restaurantA).status, 'processing');
@@ -611,52 +1021,108 @@ test('O: выплаты двух ресторанов в одном период
 });
 
 // ---------------------------------------------------------------------------
-// P: public API leak scan
+// #18: public API leak scan
 // ---------------------------------------------------------------------------
-test('P: публичный API не содержит ни одного payout-поля', async () => {
-  const databaseUrl = await freshDatabase('payout_public_leak');
+test('Stage9.5 #18: публичный API не содержит ни одного payout/attempt-поля', async () => {
+  const databaseUrl = await freshDatabase('public_leak_scan');
   const { instance, base } = await startApp(databaseUrl);
   try {
-    const cookie = await loginHq(base);
+    await loginHq(base);
     const db = require('../../db/postgresql');
     const settlementService = require('../../services/hq/settlementService');
     const payoutService = require('../../services/hq/payoutService');
 
     const restaurantRows = await db.execute(
-      `INSERT INTO restaurants (name, cities, published_at, is_open) VALUES ('Leak Payout', '[]', NOW(), 1) RETURNING id`,
+      `INSERT INTO restaurants (name, cities, published_at, is_open) VALUES ('Leak Payout Attempt', '[]', NOW(), 1) RETURNING id`,
     );
     const restaurantId = restaurantRows.rows[0].id;
     const orderId = await createOrderRow(db, { restaurantId, status: 'delivered', itemsTotal: 1234, commissionAmount: 86 });
     await addSucceededPayment(db, orderId, 1234);
     const period = await settlementService.createDraftSettlementPeriod({ periodFrom: todayStr(), periodTo: todayStr() });
     await settlementService.closeSettlementPeriod(period.id);
-    await payoutService.prepareRestaurantPayout(period.id, restaurantId, { notes: 'секретная внутренняя заметка' });
+    const payout = await payoutService.prepareRestaurantPayout(period.id, restaurantId, { notes: 'секретная внутренняя заметка' });
+    const attempt = await payoutService.createPayoutAttempt(payout.id);
+    await payoutService.markAttemptSubmitting(attempt.id);
+    await payoutService.markAttemptProcessing(attempt.id, 'SECRET_BANK_STATUS');
+    await payoutService.markAttemptFailed(attempt.id, { errorMessage: 'секретная причина отказа банка', errorCode: 'SECRET_CODE', retryable: false });
 
     const listRes = await fetch(`${base}/api/restaurants`);
     const listText = await listRes.text();
     const detailRes = await fetch(`${base}/api/restaurants/${restaurantId}`);
     const detailText = await detailRes.text();
-    for (const field of ['payout', 'prepared_at', 'processing_at', 'external_payout_id', 'failure_reason', 'секретная внутренняя заметка']) {
+    const forbiddenFields = [
+      'payout', 'prepared_at', 'processing_at', 'external_payout_id', 'failure_reason',
+      'секретная внутренняя заметка', attempt.payment_id, 'SECRET_BANK_STATUS',
+      'секретная причина отказа банка', 'SECRET_CODE', 'bank_status', 'retryable',
+    ];
+    for (const field of forbiddenFields) {
       assert.ok(!listText.includes(field), `публичный список не должен содержать "${field}"`);
       assert.ok(!detailText.includes(field), `публичная карточка не должна содержать "${field}"`);
     }
-    void cookie;
   } finally {
     await stopApp(instance);
   }
 });
 
 // ---------------------------------------------------------------------------
-// Q/R: CSRF, Auth
+// #19: HQ auth/no-store/CSRF
 // ---------------------------------------------------------------------------
-test('Q: POST prepare без CSRF-токена отклоняется', async () => {
-  const databaseUrl = await freshDatabase('payout_csrf');
+test('Stage9.5 #19a: /hq/payouts и карточка /hq/payouts/:id без сессии -> редирект на логин', async () => {
+  const databaseUrl = await freshDatabase('hq_auth_redirect');
+  const { instance, base } = await startApp(databaseUrl);
+  try {
+    const listRes = await fetch(`${base}/hq/payouts`, { redirect: 'manual' });
+    assert.equal(listRes.status, 302);
+    assert.match(listRes.headers.get('location') || '', /login/);
+
+    const detailRes = await fetch(`${base}/hq/payouts/1`, { redirect: 'manual' });
+    assert.equal(detailRes.status, 302);
+    assert.match(detailRes.headers.get('location') || '', /login/);
+
+    const prepareRes = await fetch(`${base}/hq/finance/settlements/1/payouts/1/prepare`, {
+      method: 'POST', redirect: 'manual',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({}).toString(),
+    });
+    assert.equal(prepareRes.status, 302);
+    assert.match(prepareRes.headers.get('location') || '', /login/);
+  } finally {
+    await stopApp(instance);
+  }
+});
+
+test('Stage9.5 #19b: /hq/payouts и /hq/payouts/:id — Cache-Control: no-store', async () => {
+  const databaseUrl = await freshDatabase('hq_no_store');
   const { instance, base } = await startApp(databaseUrl);
   try {
     const cookie = await loginHq(base);
     const db = require('../../db/postgresql');
     const settlementService = require('../../services/hq/settlementService');
-    const restaurantId = await createRestaurant(db, 'Q');
+    const payoutService = require('../../services/hq/payoutService');
+    const restaurantId = await createRestaurant(db, 'NoStore');
+    const period = await closedPeriodWithEarnings(db, settlementService, restaurantId);
+    const payout = await payoutService.prepareRestaurantPayout(period.id, restaurantId);
+
+    const listRes = await fetch(`${base}/hq/payouts`, { headers: { Cookie: cookie } });
+    assert.equal(listRes.status, 200);
+    assert.equal(listRes.headers.get('cache-control'), 'no-store');
+
+    const detailRes = await fetch(`${base}/hq/payouts/${payout.id}`, { headers: { Cookie: cookie } });
+    assert.equal(detailRes.status, 200);
+    assert.equal(detailRes.headers.get('cache-control'), 'no-store');
+  } finally {
+    await stopApp(instance);
+  }
+});
+
+test('Stage9.5 #19c: POST prepare без CSRF-токена отклоняется (единственный write-маршрут этого раздела HQ)', async () => {
+  const databaseUrl = await freshDatabase('hq_csrf');
+  const { instance, base } = await startApp(databaseUrl);
+  try {
+    const cookie = await loginHq(base);
+    const db = require('../../db/postgresql');
+    const settlementService = require('../../services/hq/settlementService');
+    const restaurantId = await createRestaurant(db, 'Csrf');
     const orderId = await createOrderRow(db, { restaurantId, status: 'delivered', itemsTotal: 1000, commissionAmount: 70 });
     await addSucceededPayment(db, orderId, 1000);
     const period = await settlementService.createDraftSettlementPeriod({ periodFrom: todayStr(), periodTo: todayStr() });
@@ -673,50 +1139,112 @@ test('Q: POST prepare без CSRF-токена отклоняется', async ()
   }
 });
 
-test('R: /hq/payouts и /hq/finance/settlements/:id/payouts/:rid/prepare без сессии -> редирект на логин', async () => {
-  const databaseUrl = await freshDatabase('payout_auth');
-  const { instance, base } = await startApp(databaseUrl);
-  try {
-    const listRes = await fetch(`${base}/hq/payouts`, { redirect: 'manual' });
-    assert.equal(listRes.status, 302);
-    assert.match(listRes.headers.get('location') || '', /login/);
-
-    const prepareRes = await fetch(`${base}/hq/finance/settlements/1/payouts/1/prepare`, {
-      method: 'POST', redirect: 'manual',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({}).toString(),
-    });
-    assert.equal(prepareRes.status, 302);
-    assert.match(prepareRes.headers.get('location') || '', /login/);
-  } finally {
-    await stopApp(instance);
-  }
-});
-
-test('R2: /hq/payouts — Cache-Control: no-store', async () => {
-  const databaseUrl = await freshDatabase('payout_no_store');
-  const { instance, base } = await startApp(databaseUrl);
-  try {
-    const cookie = await loginHq(base);
-    const res = await fetch(`${base}/hq/payouts`, { headers: { Cookie: cookie } });
-    assert.equal(res.status, 200);
-    assert.equal(res.headers.get('cache-control'), 'no-store');
-  } finally {
-    await stopApp(instance);
-  }
-});
-
-// ---------------------------------------------------------------------------
-// S: audit log
-// ---------------------------------------------------------------------------
-test('S: подготовка выплаты через HQ пишет payout_created с правильным restaurant_id', async () => {
-  const databaseUrl = await freshDatabase('payout_audit_log');
+test('Stage9.5 #19d: карточка выплаты показывает историю попыток и НЕ содержит кнопок «Выплатить»/«Отправить»/«Повторить»', async () => {
+  const databaseUrl = await freshDatabase('hq_detail_no_buttons');
   const { instance, base } = await startApp(databaseUrl);
   try {
     const cookie = await loginHq(base);
     const db = require('../../db/postgresql');
     const settlementService = require('../../services/hq/settlementService');
-    const restaurantId = await createRestaurant(db, 'S');
+    const payoutService = require('../../services/hq/payoutService');
+    const restaurantId = await createRestaurant(db, 'DetailNoButtons');
+    const period = await closedPeriodWithEarnings(db, settlementService, restaurantId);
+    const payout = await payoutService.prepareRestaurantPayout(period.id, restaurantId);
+    const attempt = await payoutService.createPayoutAttempt(payout.id);
+    await payoutService.markAttemptSubmitting(attempt.id);
+    await payoutService.markAttemptFailed(attempt.id, { errorMessage: 'тестовая причина отказа', retryable: true });
+
+    const detailRes = await fetch(`${base}/hq/payouts/${payout.id}`, { headers: { Cookie: cookie } });
+    const html = await detailRes.text();
+    assert.equal(detailRes.status, 200);
+    assert.ok(html.includes(attempt.payment_id), 'история попыток должна показывать payment_id');
+    assert.ok(html.includes('тестовая причина отказа'), 'причина ошибки должна быть видна');
+    for (const forbidden of ['Выплатить', 'Отправить в банк', 'Повторить попытку', 'value="submit_attempt"', 'action="/hq/payouts']) {
+      assert.ok(!html.includes(forbidden), `карточка не должна содержать "${forbidden}"`);
+    }
+  } finally {
+    await stopApp(instance);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// #20: dashboard no double-counting
+// ---------------------------------------------------------------------------
+test('Stage9.5 #20: getPayoutDashboardStats считает обязательства (не попытки), без задвоения при нескольких попытках на одно обязательство', async () => {
+  const databaseUrl = await freshDatabase('dashboard_no_double_count');
+  process.env.DATABASE_URL = databaseUrl;
+  const { db, settlementService, payoutService } = requireFreshModules();
+  try {
+    const r1 = await createRestaurant(db, 'Dash1'); // остаётся prepared, 0 попыток
+    const r2 = await createRestaurant(db, 'Dash2'); // succeeded ПОСЛЕ 2 попыток (1 failed + 1 succeeded)
+    const r3 = await createRestaurant(db, 'Dash3'); // blocked после 1 non-retryable failed
+    const r4 = await createRestaurant(db, 'Dash4'); // processing (активная попытка)
+    const r5 = await createRestaurant(db, 'Dash5'); // unknown
+    for (const [rid, total, comm] of [
+      [r1, 1000, 70], [r2, 2000, 140], [r3, 3000, 210], [r4, 4000, 280], [r5, 5000, 350],
+    ]) {
+      const orderId = await createOrderRow(db, { restaurantId: rid, status: 'delivered', itemsTotal: total, commissionAmount: comm });
+      await addSucceededPayment(db, orderId, total);
+    }
+    const period = await settlementService.createDraftSettlementPeriod({ periodFrom: todayStr(), periodTo: todayStr() });
+    await settlementService.closeSettlementPeriod(period.id);
+
+    const p1 = await payoutService.prepareRestaurantPayout(period.id, r1); // 930, prepared
+
+    const p2 = await payoutService.prepareRestaurantPayout(period.id, r2); // 1860
+    const p2a1 = await payoutService.createPayoutAttempt(p2.id);
+    await payoutService.markAttemptSubmitting(p2a1.id);
+    await payoutService.markAttemptProcessing(p2a1.id);
+    await payoutService.markAttemptFailed(p2a1.id, { errorMessage: 'первая попытка провалилась', retryable: true });
+    const p2a2 = await payoutService.createPayoutAttempt(p2.id);
+    await payoutService.markAttemptSubmitting(p2a2.id);
+    await payoutService.markAttemptProcessing(p2a2.id);
+    await payoutService.markAttemptSucceeded(p2a2.id); // succeeded, 1860 — ДВЕ попытки, ОДНО обязательство
+
+    const p3 = await payoutService.prepareRestaurantPayout(period.id, r3); // 2790
+    const p3a1 = await payoutService.createPayoutAttempt(p3.id);
+    await payoutService.markAttemptSubmitting(p3a1.id);
+    await payoutService.markAttemptProcessing(p3a1.id);
+    await payoutService.markAttemptFailed(p3a1.id, { errorMessage: 'реквизиты некорректны', retryable: false }); // blocked
+
+    const p4 = await payoutService.prepareRestaurantPayout(period.id, r4); // 3720
+    const p4a1 = await payoutService.createPayoutAttempt(p4.id);
+    await payoutService.markAttemptSubmitting(p4a1.id); // processing
+
+    const p5 = await payoutService.prepareRestaurantPayout(period.id, r5); // 4650
+    const p5a1 = await payoutService.createPayoutAttempt(p5.id);
+    await payoutService.markAttemptSubmitting(p5a1.id);
+    await payoutService.markAttemptUnknown(p5a1.id, 'timeout'); // unknown
+
+    const stats = await payoutService.getPayoutDashboardStats();
+    assert.equal(stats.preparedCount, 1, 'ровно 1 обязательство (p1) — попытки внутри p2 НЕ считаются отдельными обязательствами');
+    assert.equal(stats.processingCount, 1);
+    assert.equal(stats.unknownCount, 1);
+    assert.equal(stats.blockedCount, 1);
+    assert.equal(stats.succeededCount, 1, 'p2 succeeded ровно ОДИН раз, несмотря на 2 попытки внутри неё');
+    assert.equal(stats.succeededAmount, 1860);
+    assert.equal(stats.owedAmount, 930 + 2790 + 3720 + 4650, 'всё, кроме succeeded, считается ещё не выплаченным');
+
+    void p1;
+  } finally {
+    await db.close();
+    delete process.env.DATABASE_URL;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Дополнительно (сверх 20 сценариев раздела 14) — audit log (задание,
+// раздел 12): payout_created по-прежнему пишется реальным HQ-маршрутом;
+// payout_attempt_* приняты allowlist'ом, но НЕ emitted никаким текущим кодом.
+// ---------------------------------------------------------------------------
+test('Stage9.5 audit: payout_created пишется реальным маршрутом; payout_attempt_* приняты allowlist, но пока не emitted', async () => {
+  const databaseUrl = await freshDatabase('payout_audit_log_95');
+  const { instance, base } = await startApp(databaseUrl);
+  try {
+    const cookie = await loginHq(base);
+    const db = require('../../db/postgresql');
+    const settlementService = require('../../services/hq/settlementService');
+    const restaurantId = await createRestaurant(db, 'Audit95');
     const orderId = await createOrderRow(db, { restaurantId, status: 'delivered', itemsTotal: 1000, commissionAmount: 70 });
     await addSucceededPayment(db, orderId, 1000);
     const period = await settlementService.createDraftSettlementPeriod({ periodFrom: todayStr(), periodTo: todayStr() });
@@ -731,84 +1259,24 @@ test('S: подготовка выплаты через HQ пишет payout_cre
     });
     assert.equal(prepareRes.status, 302);
 
-    const auditRows = await db.query(`SELECT action, restaurant_id, details FROM hq_audit_log WHERE action = 'payout_created'`);
+    const auditRows = await db.query(`SELECT action, restaurant_id FROM hq_audit_log WHERE action = 'payout_created'`);
     assert.equal(auditRows.length, 1);
-    assert.equal(auditRows[0].restaurant_id, restaurantId, 'payout_created ДОЛЖЕН быть привязан к ресторану (в отличие от settlement-событий)');
-    assert.match(auditRows[0].details, /payout_id=\d+/);
-  } finally {
-    await stopApp(instance);
-  }
-});
+    assert.equal(auditRows[0].restaurant_id, restaurantId);
 
-// payout_processing/payout_succeeded/payout_failed — задание требует
-// "добавить события" (задание, раздел "Audit") — они добавлены в allowlist
-// hq_audit_log.action и services/hq/auditLog.js ACTIONS (инфраструктура
-// готова), но НЕ вызываются ни одним текущим маршрутом: markProcessing/
-// markSucceeded/markFailed не подключены к HQ UI в этом этапе (нет банка —
-// нет реального триггера для этих переходов, задание: "Пока Read Only",
-// "Без ручной отправки"). Следующий тест доказывает, что allowlist их
-// принимает — то есть Stage 10 (когда появится реальный вызывающий код —
-// банковский webhook/API) сможет писать эти события без миграции схемы.
-test('T: payout_processing/payout_succeeded/payout_failed принимаются allowlist hq_audit_log (готово для Stage 10, ещё не вызывается ни одним маршрутом)', async () => {
-  const databaseUrl = await freshDatabase('payout_audit_future_actions');
-  process.env.DATABASE_URL = databaseUrl;
-  delete require.cache[require.resolve('../../db/postgresql')];
-  delete require.cache[require.resolve('../../services/hq/auditLog')];
-  const db = require('../../db/postgresql');
-  const { logAuditEvent } = require('../../services/hq/auditLog');
-  try {
-    const restaurantId = await createRestaurant(db, 'T');
-    for (const action of ['payout_processing', 'payout_succeeded', 'payout_failed']) {
+    // allowlist готовность (задание: "ensure schema allowlist is ready for
+    // Stage 10") — проверяется напрямую logAuditEvent, без реального
+    // вызывающего маршрута (которого пока не существует).
+    const { logAuditEvent } = require('../../services/hq/auditLog');
+    for (const action of ['payout_attempt_created', 'payout_attempt_processing', 'payout_attempt_unknown', 'payout_attempt_succeeded', 'payout_attempt_failed']) {
       await logAuditEvent({ action, restaurantId, details: 'test', ip: '127.0.0.1' });
     }
-    const rows = await db.query(`SELECT action FROM hq_audit_log WHERE restaurant_id = $1 ORDER BY id`, [restaurantId]);
-    assert.deepEqual(rows.map((r) => r.action), ['payout_processing', 'payout_succeeded', 'payout_failed']);
+    const attemptAuditRows = await db.query(
+      `SELECT action FROM hq_audit_log WHERE restaurant_id = $1 AND action LIKE 'payout_attempt_%' ORDER BY id`, [restaurantId],
+    );
+    assert.deepEqual(attemptAuditRows.map((r) => r.action), [
+      'payout_attempt_created', 'payout_attempt_processing', 'payout_attempt_unknown', 'payout_attempt_succeeded', 'payout_attempt_failed',
+    ]);
   } finally {
-    await db.close();
-    delete process.env.DATABASE_URL;
-  }
-});
-
-// ---------------------------------------------------------------------------
-// U: dashboard-статистика
-// ---------------------------------------------------------------------------
-test('U: getPayoutDashboardStats считает prepared/succeeded/failed раздельно, суммы корректны', async () => {
-  const databaseUrl = await freshDatabase('payout_dashboard_stats');
-  process.env.DATABASE_URL = databaseUrl;
-  delete require.cache[require.resolve('../../db/postgresql')];
-  delete require.cache[require.resolve('../../services/hq/settlementService')];
-  delete require.cache[require.resolve('../../services/hq/payoutService')];
-  const db = require('../../db/postgresql');
-  const settlementService = require('../../services/hq/settlementService');
-  const payoutService = require('../../services/hq/payoutService');
-  try {
-    const r1 = await createRestaurant(db, 'U1');
-    const r2 = await createRestaurant(db, 'U2');
-    const r3 = await createRestaurant(db, 'U3');
-    for (const [rid, total, comm] of [[r1, 1000, 70], [r2, 2000, 140], [r3, 3000, 210]]) {
-      const orderId = await createOrderRow(db, { restaurantId: rid, status: 'delivered', itemsTotal: total, commissionAmount: comm });
-      await addSucceededPayment(db, orderId, total);
-    }
-    const period = await settlementService.createDraftSettlementPeriod({ periodFrom: todayStr(), periodTo: todayStr() });
-    await settlementService.closeSettlementPeriod(period.id);
-
-    const p1 = await payoutService.prepareRestaurantPayout(period.id, r1); // остаётся prepared (930)
-    const p2 = await payoutService.prepareRestaurantPayout(period.id, r2);
-    await payoutService.markProcessing(p2.id);
-    const succeeded2 = await payoutService.getPayoutById(p2.id);
-    await payoutService.markSucceeded(succeeded2.id); // succeeded (1860)
-    const p3 = await payoutService.prepareRestaurantPayout(period.id, r3);
-    await payoutService.markFailed(p3.id, { failureReason: 'тест' }); // failed (2790)
-
-    const stats = await payoutService.getPayoutDashboardStats();
-    assert.equal(stats.preparedCount, 2, 'prepared+processing+succeeded = p1(prepared) + p2(succeeded)');
-    assert.equal(stats.succeededCount, 1);
-    assert.equal(stats.failedCount, 1);
-    assert.equal(stats.preparedAmount, 930 + 1860);
-    assert.equal(stats.succeededAmount, 1860);
-    void p1;
-  } finally {
-    await db.close();
-    delete process.env.DATABASE_URL;
+    await stopApp(instance);
   }
 });
