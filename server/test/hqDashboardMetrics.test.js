@@ -12,7 +12,6 @@ const {
   todayRangeUtc,
   getActiveOrdersBreakdown,
   getRestaurantsStatus,
-  getFinanceSummary,
   getAttentionItems,
   getAttentionCount,
   getTopSummary,
@@ -114,29 +113,15 @@ test('getRestaurantsStatus: маппинг в camelCase, boolean-коэрсия 
   assert.ok(sql.includes('telegram_chat_id IS NOT NULL'), 'telegram_connected должен вычисляться как boolean, а не отдавать сырое значение');
 });
 
-test('getFinanceSummary: restaurantsShare = turnover - commission, суммы возвратов из отдельного join-запроса', async () => {
-  const db = makeFakeDb([
-    { match: 'AS turnover', rows: [{ turnover: 1000, commission: 70 }] },
-    { match: 'AS refunded_orders', rows: [{ refunded_orders: 2, refunded_amount: 500 }] },
-  ]);
-  const result = await getFinanceSummary(db);
-  assert.deepEqual(result, {
-    turnover: 1000,
-    commission: 70,
-    restaurantsShare: 930,
-    refundedOrders: 2,
-    refundedAmount: 500,
-  });
-});
-
-test('getFinanceSummary: нулевой оборот — restaurantsShare тоже 0, без NaN/отрицательных значений', async () => {
-  const db = makeFakeDb([
-    { match: 'AS turnover', rows: [{ turnover: 0, commission: 0 }] },
-    { match: 'AS refunded_orders', rows: [{ refunded_orders: 0, refunded_amount: 0 }] },
-  ]);
-  const result = await getFinanceSummary(db);
-  assert.equal(result.restaurantsShare, 0);
-});
+// getFinanceSummary: с Stage 7 делегирует в services/hq/
+// restaurantFinanceService.js (единый источник финансовой истины) и больше
+// НЕ использует переданный db-параметр для собственных запросов — fake-db
+// SQL-текст-мэтчинг здесь перестал бы что-либо реально проверять (запросы
+// теперь идут через restaurantFinanceService.js напрямую к реальному
+// db/postgresql). Формулы (restaurantsShare = turnover - commission,
+// нулевой оборот, эксклюзия возвратов) теперь проверяются live-DB тестами —
+// см. server/test/postgresql/hqRestaurantFinanceStage7.test.js
+// ("dashboardMetrics.getFinanceSummary согласован с restaurantFinanceService").
 
 test('getAttentionItems: пусто, если нет ни просроченных awaiting_restaurant, ни failed-возвратов', async () => {
   const db = makeFakeDb([

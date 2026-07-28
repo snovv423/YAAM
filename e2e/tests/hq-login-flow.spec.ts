@@ -60,7 +60,11 @@ test('YAAM HQ: вход, «Обзор» с реальными метриками
 
   await page.getByRole('link', { name: 'Финансы' }).click();
   await expect(page).toHaveURL(`${API_BASE_URL}/hq/finance`);
-  await expect(page.getByText('Сводка за сегодня (только чтение)')).toBeVisible();
+  // Stage 7: страница «Финансы» стала реально рабочим read-only экраном с
+  // периодным фильтром (см. hq-restaurant-finance-flow.spec.ts за полным
+  // сценарием) — заголовок панели сводки сменился с фиксированного
+  // "за сегодня" на "за период" (период по умолчанию всё ещё «сегодня»).
+  await expect(page.getByText('Сводка за период (только чтение)')).toBeVisible();
 
   await page.getByRole('link', { name: 'Настройки' }).click();
   await expect(page).toHaveURL(`${API_BASE_URL}/hq/settings`);

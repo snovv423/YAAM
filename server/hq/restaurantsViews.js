@@ -521,7 +521,7 @@ function renderDailyChart(dailySeries) {
   }).join('')}</div>`;
 }
 
-function renderStatisticsTab({ restaurant, statistics: s, periodOptions, linkBasePath, error }) {
+function renderStatisticsTab({ restaurant, statistics: s, financialPosition: f, periodOptions, linkBasePath, error }) {
   const baseUrl = `${linkBasePath}/restaurants/${restaurant.id}/statistics`;
   const period = periodOptions.period || 'today';
 
@@ -565,6 +565,18 @@ function renderStatisticsTab({ restaurant, statistics: s, periodOptions, linkBas
       <div class="metric"><div class="value">${s.conversionPercent === null ? '—' : `${s.conversionPercent}%`}</div><div class="label">Конверсия создано → доставлено</div></div>
     </div>
     <div class="empty-state" style="margin-top:-10px;margin-bottom:20px">Конверсия — доля заказов периода, дошедших до статуса «доставлен» на СЕЙЧАС. Заказы, ещё не завершившиеся к моменту просмотра (в пути/готовятся), не считаются ни доставленными, ни отменёнными — для незакрытых периодов (например «сегодня») конверсия занижена относительно итоговой судьбы этих заказов.</div>
+
+    <div class="panel">
+      <div style="font-weight:700;margin-bottom:14px">Финансы за период</div>
+      <table>
+        <tr><td>Доставленных оплаченных заказов</td><td style="text-align:right">${f.deliveredPaidOrders}</td></tr>
+        <tr><td>Оборот</td><td style="text-align:right">${money(f.turnover)}</td></tr>
+        <tr><td>Комиссия YAAM</td><td style="text-align:right">${money(f.commission)}</td></tr>
+        <tr><td>Сумма ресторана</td><td style="text-align:right">${money(f.restaurantEarnings)}</td></tr>
+        <tr><td>Успешные возвраты</td><td style="text-align:right">${f.successfulRefundsCount} шт · ${money(f.successfulRefunds)}</td></tr>
+      </table>
+      <div class="empty-state" style="margin-top:10px">Остаток к будущей выплате (за всё время, временная формула до отдельного этапа выплат): ${money(f.payableBalance)}. ${financeViews.renderPayoutReadinessInline(f.payoutReadiness)}.</div>
+    </div>
 
     <div class="panel">
       <div style="font-weight:700;margin-bottom:6px">Заказы по дням</div>

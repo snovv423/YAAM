@@ -15,6 +15,7 @@ const legalService = require('../../services/hq/restaurantLegalDetailsService');
 const bankService = require('../../services/hq/restaurantBankDetailsService');
 const contractService = require('../../services/hq/restaurantContractService');
 const payoutService = require('../../services/hq/restaurantPayoutService');
+const financeService = require('../../services/hq/restaurantFinanceService');
 const {
   logAuditEvent, summarizeRestaurantDiff, summarizeMenuItemDiff, summarizeCategoryDiff, summarizePhotoDetails,
   summarizeLegalDetailsDiff, summarizeBankDetailsDiff, summarizeContractDiff, summarizeContractStatusChange,
@@ -730,10 +731,15 @@ function createRestaurantsRouter({ linkBasePath, mediaProvider = null }) {
         periodOptions.period = 'today';
         statistics = await statsService.getStatistics(req.restaurant.id, { period: 'today' });
       }
+      // YAAM HQ Stage 7 — тот же (уже провалидированный/упавший-на-today
+      // periodOptions) период, что и статистика выше, — один селектор
+      // периода управляет обоими блоками (задание, раздел 8: "не создавать
+      // лишнюю вкладку, если данные логично помещаются в текущий экран").
+      const financialPosition = await financeService.getRestaurantFinancialPosition(req.restaurant.id, periodOptions);
       const csrfToken = ensureCsrfToken(req);
       const body = await pageShell({
         restaurant: req.restaurant, active: 'statistics', csrfToken, req,
-        tabBody: views.renderStatisticsTab({ restaurant: req.restaurant, statistics, periodOptions, linkBasePath, error: periodError }),
+        tabBody: views.renderStatisticsTab({ restaurant: req.restaurant, statistics, financialPosition, periodOptions, linkBasePath, error: periodError }),
       });
       res.send(layout({ title: `Статистика — ${req.restaurant.name}`, active: 'restaurants', csrfToken, linkBasePath, body }));
     } catch (err) {

@@ -15,7 +15,9 @@ const ownerService = require('../../services/hq/ownerService');
 const { logSecurityEvent } = require('../../services/hq/securityLog');
 const dashboardMetrics = require('../../services/hq/dashboardMetrics');
 const payoutService = require('../../services/hq/restaurantPayoutService');
+const financeService = require('../../services/hq/restaurantFinanceService');
 const { CONTRACT_STATUS_LABELS } = require('../../services/hq/restaurantContractService');
+const { ValidationError } = require('../../services/hq/restaurantAdminService');
 
 const STATUS_LABELS = {
   awaiting_payment: 'Ожидают оплаты',
@@ -103,43 +105,79 @@ function renderOverview({ top, active, restaurants, finance, attentionItems, csr
   `;
 }
 
-function renderFinanceStub({ finance, payoutSummary, linkBasePath }) {
-  // Stage 6 (задание, раздел 12) — только готовность документов/реквизитов,
-  // никаких сумм к выплате (нет зрелой сущности задолженности перед
-  // рестораном на этом этапе — не выдумывается) и никаких кнопок
-  // «Выплатить» (задание прямо запрещает это здесь).
-  const readinessRows = payoutSummary.length
-    ? payoutSummary.map((r) => {
+// YAAM HQ Stage 7 — «Финансы» стала реально рабочим read-only экраном
+// (задание, раздел 7), заменив Stage 6-заглушку без реальных сумм.
+// Период — тот же селектор today/7d/30d/custom, что уже используется на
+// вкладке «Статистика» ресторана (services/hq/restaurantStatsService.js:
+// resolvePeriodRange) — переиспользован, не продублирован. payableBalance —
+// ВСЕГДА за всё время (не зависит от выбранного периода отчёта — это
+// остаток задолженности, а не поток за период, см. services/hq/
+// restaurantFinanceService.js за полным обоснованием) — подписано явно.
+function renderFinancePage({ overall, positions, periodOptions, linkBasePath, error }) {
+  const baseUrl = `${linkBasePath}/finance`;
+  const period = periodOptions.period || 'today';
+
+  const positionRows = positions.length
+    ? positions.map((r) => {
         const contractLabel = r.contractStatus ? CONTRACT_STATUS_LABELS[r.contractStatus] || r.contractStatus : 'Не оформлен';
-        const readinessLabel = payoutService.READINESS_LABELS[r.readiness] || r.readiness;
-        const readinessBadgeClass = r.readiness === 'ready' ? 'open' : 'closed';
+        const readinessLabel = payoutService.READINESS_LABELS[r.payoutReadiness] || r.payoutReadiness;
+        const readinessBadgeClass = r.payoutReadiness === 'ready' ? 'open' : 'closed';
         return `<tr>
-          <td>${esc(r.name)}</td>
-          <td>${esc(contractLabel)}</td>
-          <td><span class="badge ${readinessBadgeClass}">${esc(readinessLabel)}</span></td>
-          <td style="text-align:right"><a href="${linkBasePath}/restaurants/${r.restaurantId}/settings">Открыть ресторан</a></td>
+          <td data-label="Ресторан">${esc(r.name)}</td>
+          <td data-label="Договор">${esc(contractLabel)}</td>
+          <td data-label="Готовность"><span class="badge ${readinessBadgeClass}">${esc(readinessLabel)}</span></td>
+          <td data-label="Заказов" style="text-align:right">${r.deliveredPaidOrders}</td>
+          <td data-label="Оборот" style="text-align:right">${r.turnover} ₽</td>
+          <td data-label="Комиссия" style="text-align:right">${r.commission} ₽</td>
+          <td data-label="Сумма ресторана" style="text-align:right">${r.restaurantEarnings} ₽</td>
+          <td data-label="Остаток" style="text-align:right">${r.payableBalance} ₽</td>
+          <td data-label=""><a href="${linkBasePath}/restaurants/${r.restaurantId}">Открыть</a></td>
         </tr>`;
       }).join('')
-    : `<tr><td colspan="4" class="empty-state">Ресторанов пока нет.</td></tr>`;
+    : `<tr><td colspan="9" class="empty-state">Ресторанов пока нет.</td></tr>`;
 
   return `
     <h1>Финансы</h1>
+    <form class="filters panel" method="get" action="${baseUrl}">
+      <div class="field">
+        <label for="ff-period">Период</label>
+        <select id="ff-period" name="period" onchange="this.form.submit()">
+          <option value="today" ${period === 'today' ? 'selected' : ''}>Сегодня</option>
+          <option value="7d" ${period === '7d' ? 'selected' : ''}>7 дней</option>
+          <option value="30d" ${period === '30d' ? 'selected' : ''}>30 дней</option>
+          <option value="custom" ${period === 'custom' ? 'selected' : ''}>Произвольный период</option>
+        </select>
+      </div>
+      ${period === 'custom' ? `
+      <div class="field"><label for="ff-from">С даты</label><input id="ff-from" type="date" name="from" value="${esc(periodOptions.from || '')}"></div>
+      <div class="field"><label for="ff-to">По дату</label><input id="ff-to" type="date" name="to" value="${esc(periodOptions.to || '')}"></div>
+      ` : ''}
+      <button type="submit">Показать</button>
+    </form>
+    ${error ? `<div class="panel"><div class="error" style="margin-top:0">${esc(error)} Показан период «Сегодня».</div></div>` : ''}
+
     <div class="panel">
-      <div style="font-weight:700;margin-bottom:14px">Сводка за сегодня (только чтение)</div>
+      <div style="font-weight:700;margin-bottom:14px">Сводка за период (только чтение)</div>
       <table>
-        <tr><td>Оборот доставленных заказов</td><td style="text-align:right">${finance.turnover} ₽</td></tr>
-        <tr><td>Комиссия YAAM</td><td style="text-align:right">${finance.commission} ₽</td></tr>
-        <tr><td>Доля ресторанов</td><td style="text-align:right">${finance.restaurantsShare} ₽</td></tr>
-        <tr><td>Полные возвраты</td><td style="text-align:right">${finance.refundedOrders} шт · ${finance.refundedAmount} ₽</td></tr>
+        <tr><td>Доставленных оплаченных заказов</td><td style="text-align:right">${overall.deliveredPaidOrders}</td></tr>
+        <tr><td>Оборот</td><td style="text-align:right">${overall.turnover} ₽</td></tr>
+        <tr><td>Комиссия YAAM</td><td style="text-align:right">${overall.commission} ₽</td></tr>
+        <tr><td>Сумма ресторанов</td><td style="text-align:right">${overall.restaurantEarnings} ₽</td></tr>
+        <tr><td>Успешные возвраты</td><td style="text-align:right">${overall.successfulRefundsCount} шт · ${overall.successfulRefunds} ₽</td></tr>
+        <tr><td>Остаток к будущим выплатам (за всё время)</td><td style="text-align:right">${overall.payableBalance} ₽</td></tr>
       </table>
-      <div class="empty-state" style="margin-top:10px">Банковские выплаты будут доступны после подключения финансового модуля.</div>
+      <div class="empty-state" style="margin-top:10px">«Остаток к будущим выплатам» — временная формула (= сумма ресторанов за всё время, выплат ещё не было) до отдельного этапа подключения реальных выплат.</div>
     </div>
 
     <div class="panel">
-      <div style="font-weight:700;margin-bottom:14px">Готовность ресторанов к выплатам</div>
-      <table>
-        <thead><tr><th>Ресторан</th><th>Договор</th><th>Готовность</th><th></th></tr></thead>
-        <tbody>${readinessRows}</tbody>
+      <div style="font-weight:700;margin-bottom:14px">Рестораны</div>
+      <table class="responsive">
+        <thead><tr>
+          <th>Ресторан</th><th>Договор</th><th>Готовность</th><th>Заказов</th>
+          <th style="text-align:right">Оборот</th><th style="text-align:right">Комиссия</th>
+          <th style="text-align:right">Сумма ресторана</th><th style="text-align:right">Остаток</th><th></th>
+        </tr></thead>
+        <tbody>${positionRows}</tbody>
       </table>
     </div>
   `;
@@ -248,18 +286,26 @@ function createPagesRouter({ linkBasePath, mediaProvider = null }) {
   // index.js под /restaurants (раньше /hq/restaurants).
 
   router.get('/finance', async (req, res, next) => {
+    const periodOptions = { period: req.query.period, from: req.query.from, to: req.query.to };
     try {
-      const [finance, payoutSummary] = await Promise.all([
-        dashboardMetrics.getFinanceSummary(db),
-        payoutService.listRestaurantsPayoutSummary(),
-      ]);
+      let positions;
+      let periodError = null;
+      try {
+        positions = await financeService.listRestaurantsFinancialPositions(periodOptions);
+      } catch (err) {
+        if (!(err instanceof ValidationError)) throw err;
+        periodError = err.message;
+        periodOptions.period = 'today';
+        positions = await financeService.listRestaurantsFinancialPositions({ period: 'today' });
+      }
+      const overall = financeService.summarizeOverall(positions);
       const csrfToken = ensureCsrfToken(req);
       res.send(layout({
         title: 'Финансы',
         active: 'finance',
         csrfToken,
         linkBasePath,
-        body: renderFinanceStub({ finance, payoutSummary, linkBasePath }),
+        body: renderFinancePage({ overall, positions, periodOptions, linkBasePath, error: periodError }),
       }));
     } catch (err) {
       next(err);

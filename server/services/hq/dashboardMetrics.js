@@ -167,35 +167,37 @@ async function getRestaurantsStatus(db) {
 
 // --- Финансовая сводка (6.3) ---------------------------------------------
 //
-// Тот же якорь времени "сегодня", что и верхний блок (см. правило выше) —
-// осознанно не вводим отдельное понятие "расчётного периода" (это будущий,
-// отдельно согласуемый этап — агентские отчёты/выплаты).
+// YAAM HQ Stage 7 — делегирует в services/hq/restaurantFinanceService.js
+// (единый источник финансовой истины по всей HQ — задание Stage 7, раздел
+// 3: "не создавать второй параллельный источник финансовой истины"), а не
+// считает turnover/commission независимым запросом, как раньше (Stage 2).
+//
+// НАЙДЕННЫЙ И ИСПРАВЛЕННЫЙ БАГ (Stage 7 отчёт, раздел 2/12): прежняя
+// реализация фильтровала ТОЛЬКО по status='delivered' и НЕ исключала
+// заказы с succeeded-возвратом — комиссия/оборот оставались "заработанными"
+// даже после полного возврата. Также якорь времени сменился с created_at на
+// status_updated_at (момент, когда заказ реально СТАЛ delivered, а не когда
+// был создан — см. restaurantFinanceService.js за полным обоснованием).
+// period='today' здесь сохраняет прежний внешний контракт этой функции
+// (карточка "Обзор"/старая "Финансы" всегда показывали "сегодня") — общее
+// понятие произвольного периода появилось в новой странице «Финансы»
+// (routes/hq/pages.js), не здесь.
 async function getFinanceSummary(db, { now = new Date() } = {}) {
-  const { startUtc, endUtc } = todayRangeUtc(now);
-  const [row] = await db.query(
-    `SELECT
-       COALESCE(SUM(items_total) FILTER (WHERE status = 'delivered'), 0)::int AS turnover,
-       COALESCE(SUM(commission_amount) FILTER (WHERE status = 'delivered'), 0)::int AS commission
-     FROM orders
-     WHERE created_at >= $1 AND created_at < $2`,
-    [startUtc, endUtc],
-  );
-  const [refundRow] = await db.query(
-    `SELECT
-       COUNT(DISTINCT o.id)::int AS refunded_orders,
-       COALESCE(SUM(o.items_total), 0)::int AS refunded_amount
-     FROM orders o
-     JOIN payments p ON p.order_id = o.id
-     JOIN refunds rf ON rf.payment_id = p.id AND rf.status = 'succeeded'
-     WHERE o.created_at >= $1 AND o.created_at < $2`,
-    [startUtc, endUtc],
-  );
+  // Ленивый require (не наверху файла) — избегает потенциального
+  // циклического require: restaurantFinanceService.js импортирует
+  // restaurantStatsService.js, который сам НЕ импортирует dashboardMetrics
+  // напрямую, но dashboardMetrics исторически "нижний" модуль в этом слое
+  // (сам импортируется другими) — цикла на практике нет, но ленивый require
+  // здесь дешёв и полностью его исключает.
+  const financeService = require('./restaurantFinanceService');
+  const positions = await financeService.listRestaurantsFinancialPositions({ period: 'today' }, now);
+  const overall = financeService.summarizeOverall(positions);
   return {
-    turnover: row.turnover,
-    commission: row.commission,
-    restaurantsShare: row.turnover - row.commission,
-    refundedOrders: refundRow.refunded_orders,
-    refundedAmount: refundRow.refunded_amount,
+    turnover: overall.turnover,
+    commission: overall.commission,
+    restaurantsShare: overall.restaurantEarnings,
+    refundedOrders: overall.successfulRefundsCount,
+    refundedAmount: overall.successfulRefunds,
   };
 }
 

@@ -440,6 +440,67 @@ function formatPublicCode(id) {
   return `YAAM-${String(id).padStart(5, '0')}`;
 }
 
+// YAAM HQ Stage 7 — комиссия заказа теперь берётся из подписанного активного
+// договора ресторана (Stage 6, restaurant_contracts.commission_bps), а не из
+// захардкоженной константы. FALLBACK_COMMISSION_BPS = 700 (7%) — дословная
+// копия restaurantContractService.DEFAULT_COMMISSION_BPS (services/hq/
+// restaurantContractService.js): тот же принцип "дословная копия", что уже
+// применяется для normalizeRuPhone/ADVANCE_MAP выше в этом файле — НЕ
+// добавляем зависимость core-orderService.js -> HQ-сервисный слой
+// (services/hq/*), сохраняя направление зависимостей "HQ использует core",
+// а не наоборот (services/hq/dashboardMetrics.js уже импортирует ИЗ этого
+// файла — обратное направление было бы архитектурной инверсией).
+const FALLBACK_COMMISSION_BPS = 700;
+
+// "Активный" договор — подписан (status='signed') И сегодняшняя дата (Europe/
+// Moscow) внутри [starts_at, ends_at], если эти границы заданы (NULL —
+// граница не ограничивает). Дата — YYYY-MM-DD строка, сравнивается с
+// restaurant_contracts.starts_at/ends_at (DATE-колонки, начиная со Stage 6
+// парсятся `pg` как обычная строка, не JS Date — см. db/postgresql/
+// index.js:types.setTypeParser(1082, ...), никакой двусмысленности часового
+// пояса при сравнении строк 'YYYY-MM-DD').
+function todayDateStringMoscow(now = new Date()) {
+  const offsetMs = 180 * 60 * 1000; // тот же фиксированный +180 минут, что и PROJECT_TIMEZONE_OFFSET_MINUTES в dashboardMetrics.js
+  const local = new Date(now.getTime() + offsetMs);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${local.getUTCFullYear()}-${pad(local.getUTCMonth() + 1)}-${pad(local.getUTCDate())}`;
+}
+
+// Момент фиксации комиссии — МОМЕНТ СОЗДАНИЯ ЗАКАЗА (вызывается из
+// createOrder() ниже, ДО оплаты), не момент подтверждения оплаты. Это
+// сознательное решение (задание Stage 7, раздел 9: "выбрать один момент
+// фиксации комиссии и задокументировать его"), а не оставленное как есть по
+// умолчанию:
+//   1. items_total УЖЕ фиксируется на создании (цены блюд читаются из БД в
+//      этот момент, см. trustedItems выше) — комиссия логически часть той же
+//      "цены заказа на момент оформления", менять момент фиксации только для
+//      комиссии означало бы два разных якоря для одного финансового снимка.
+//   2. Момент подтверждения оплаты асинхронный (webhook провайдера, может
+//      прийти через секунды/минуты, потенциально после retry) — фиксация
+//      комиссии в этот момент потребовала бы либо повторного чтения
+//      restaurant_contracts внутри webhook-обработчика (новая точка отказа,
+//      новая гонка с самим webhook retry), либо сохранения "запланированной"
+//      комиссии на создании и её подтверждения на оплате (двойное
+//      состояние без дополнительной пользы).
+//   3. Race case (изменение договора между созданием и оплатой заказа):
+//      ПОСЛЕДСТВИЯ ОСОЗНАННО ПРИНЯТЫ — заказ использует комиссию, актуальную
+//      на момент СОЗДАНИЯ, даже если договор изменится до фактической
+//      оплаты. Это идентично уже существующему поведению items_total (цена
+//      блюда, изменённая после создания заказа, но до оплаты, тоже не
+//      переоценивает уже созданный заказ) — тот же, уже принятый и
+//      протестированный принцип, не новый прецедент.
+async function resolveCommissionBps(restaurantId, now = new Date()) {
+  const today = todayDateStringMoscow(now);
+  const rows = await db.query(
+    `SELECT commission_bps FROM restaurant_contracts
+     WHERE restaurant_id = $1 AND status = 'signed'
+       AND (starts_at IS NULL OR starts_at <= $2)
+       AND (ends_at IS NULL OR ends_at >= $2)`,
+    [restaurantId, today],
+  );
+  return rows[0] ? rows[0].commission_bps : FALLBACK_COMMISSION_BPS;
+}
+
 // Дословная копия AWAITING_PAYMENT_DEDUP_TTL_SEC (см. комментарий в
 // orderService.js) — временная demo-логика дедупа брошенных неоплаченных
 // заказов, продуктовое решение, не часть этой волны.
@@ -629,7 +690,14 @@ async function createOrder({
   if (itemsTotal < restaurant.min_order) {
     throw new OrderCreationInputError(`сумма заказа ${itemsTotal} меньше минимальной ${restaurant.min_order}`);
   }
-  const commission = Math.round(itemsTotal * 0.07); // YAAM_COMMISSION_RATE, дословно из paymentService.calcCommission
+  // YAAM HQ Stage 7 — комиссия из подписанного активного договора ресторана
+  // (см. resolveCommissionBps выше за полным обоснованием момента фиксации),
+  // fallback 700 bps (7%), если договора нет/не подписан/вне срока действия.
+  // Integer math — Math.round(itemsTotal * commissionBps / 10000), НЕ float
+  // 0.07 (задание, раздел 9) — численно идентично для fallback-случая,
+  // проверено server/test/postgresql/resolveCommissionBpsStage7.test.js.
+  const commissionBps = await resolveCommissionBps(restaurantId);
+  const commission = Math.round(itemsTotal * commissionBps / 10000);
 
   return db.serializableTransaction(async (client) => {
     const exactReplay = await initialAttemptRowByCredentials(tokenHash, createKeyHash, client);
@@ -2707,6 +2775,10 @@ module.exports = {
   PAYMENT_DEADLINE_MINUTES,
   ActiveOrderConflictError,
   OrderCreationInputError,
+  // Stage 7 (services/hq/restaurantFinanceService.js, тесты)
+  resolveCommissionBps,
+  todayDateStringMoscow,
+  FALLBACK_COMMISSION_BPS,
   // Stage 1 (routes/postgresql/api.js)
   parseBearerAuthorization,
   findAuthorizedOrderId,
