@@ -52,6 +52,11 @@ const ACTIONS = [
   'restaurant_contract_created',
   'restaurant_contract_updated',
   'restaurant_contract_status_changed',
+  // Stage 8 — расчётные периоды (задание, раздел 13). restaurantId для этих
+  // событий всегда null — событие уровня периода в целом, не одного ресторана.
+  'settlement_period_created',
+  'settlement_period_closed',
+  'settlement_period_draft_deleted',
 ];
 
 // Единственные поля ресторана, которые вообще могут попасть в текст лога —

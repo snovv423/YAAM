@@ -21,6 +21,7 @@ const { normalizeHqLinkBasePath, hqRootPath } = require('../../services/hq/baseP
 const { createAuthRouter } = require('./auth');
 const { createPagesRouter } = require('./pages');
 const { createRestaurantsRouter } = require('./restaurants');
+const { createSettlementsRouter } = require('./settlements');
 const { createRequireHqAuth } = require('./middleware');
 
 // linkBasePath — Stage 2.1 clean-root routing (см. services/hq/basePath.js):
@@ -78,6 +79,11 @@ function createHqRouter({ sessionSecret, isProduction, linkBasePath, mediaProvid
   // смонтирован ДО общего pagesRouter (тот ниже больше не содержит заглушки
   // "Рестораны" — заменена этим полноценным разделом целиком).
   router.use('/restaurants', createRequireHqAuth(resolvedLinkBasePath), createRestaurantsRouter({ linkBasePath: resolvedLinkBasePath, mediaProvider }));
+  // YAAM HQ Stage 8: /finance/settlements — смонтирован ДО общего
+  // pagesRouter (тот же принцип, что и /restaurants выше), '/finance' САМ
+  // ПО СЕБЕ (без /settlements) по-прежнему обрабатывается pagesRouter'ом
+  // (существующий Stage 7 live-экран, только дополненный секцией периодов).
+  router.use('/finance/settlements', createRequireHqAuth(resolvedLinkBasePath), createSettlementsRouter({ linkBasePath: resolvedLinkBasePath }));
   router.use('/', createRequireHqAuth(resolvedLinkBasePath), createPagesRouter({ linkBasePath: resolvedLinkBasePath, mediaProvider }));
 
   return router;

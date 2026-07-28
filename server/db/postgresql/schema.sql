@@ -812,4 +812,217 @@ ALTER TABLE hq_audit_log ADD CONSTRAINT hq_audit_log_action_check CHECK (action 
   'restaurant_contract_created', 'restaurant_contract_updated', 'restaurant_contract_status_changed'
 ));
 
+-- =========================================================================
+-- YAAM HQ Stage 8 — settlement_periods / settlement_restaurant_lines /
+-- settlement_order_lines / settlement_refunds
+-- =========================================================================
+--
+-- Аудит перед разработкой (см. итоговый отчёт Stage 8, раздел 2): Stage 7/7.1
+-- (services/hq/restaurantFinanceService.js) остаётся ЕДИНСТВЕННЫМ источником
+-- LIVE-финансовой позиции — ничего здесь его не переопределяет и не дублирует
+-- его формулы. Эти четыре таблицы хранят ВТОРОЙ, принципиально другой по
+-- природе класс данных — CLOSED SETTLEMENT SNAPSHOT: то, что было официально
+-- зафиксировано волевым действием владельца YAAM ("закрыть период"), и после
+-- этого момента НИКОГДА не пересчитывается заново, даже если позже изменится
+-- меню, договор, комиссия или найдётся более новый заказ. Разделение "live
+-- position" (Stage 7, читает orders/payments/refunds заново при каждом
+-- запросе) vs "closed snapshot" (Stage 8, читает только то, что здесь
+-- сохранено, никогда не смотрит в orders/payments/refunds заново) — это и
+-- есть архитектурное решение этого этапа (задание, раздел 2).
+--
+-- settlement_order_lines.order_id и settlement_refunds.refund_id — оба с
+-- голым UNIQUE (не составным) — это ЕДИНСТВЕННЫЙ и решающий механизм защиты
+-- от двойного учёта (задание, раздел 7: "это критично"): один и тот же заказ
+-- или один и тот же возврат физически не может быть вставлен в ДВА разных
+-- settlement_period_id, потому что тогда потребовались бы ДВЕ строки с
+-- одинаковым order_id/refund_id, а UNIQUE это запрещает на уровне PostgreSQL,
+-- а не только проверкой в JS. При этом (см. итоговый отчёт, раздел 8) при
+-- корректно работающей системе непересекающихся периодов
+-- (EXCLUDE-constraint ниже) один и тот же заказ структурно не может попасть
+-- в диапазон дат ДВУХ разных периодов — то есть это ограничение, как и
+-- EARNED_ORDER_FILTER_SQL "delivered И succeeded refund" в Stage 7, защищает
+-- от состояния, которое НЕ должно быть достижимо при исправно работающем
+-- коде, но проверяется на уровне данных, а не только предполагается.
+
+CREATE TABLE IF NOT EXISTS settlement_periods (
+  id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  period_from DATE NOT NULL,
+  period_to DATE NOT NULL,
+  status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'closed')),
+  notes TEXT NOT NULL DEFAULT '',
+  created_by TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  closed_at TIMESTAMPTZ,
+  CHECK (period_to >= period_from),
+  -- closed_at заполнен ТОГДА И ТОЛЬКО ТОГДА, когда status='closed' (задание,
+  -- раздел 14: "closed period без closed_at" / "draft period с closed_at" —
+  -- оба симметричных нарушения инварианта запрещены здесь на уровне схемы,
+  -- не только проверяются health-функцией ниже).
+  CHECK ((status = 'closed' AND closed_at IS NOT NULL) OR (status = 'draft' AND closed_at IS NULL))
+);
+
+-- "Периоды не должны пересекаться" И "один календарный диапазон нельзя
+-- создать дважды" (задание, раздел 3) — ОДНО ограничение покрывает оба
+-- правила: идентичный диапазон — частный случай пересечения самого с собой.
+-- daterange(..., '[]') — обе границы включительно, ровно "московский
+-- календарь включительно" из задания. GiST-поддержка range-типов встроена в
+-- ядро PostgreSQL — CREATE EXTENSION НЕ требуется (в отличие от смешивания
+-- range с обычной scalar-колонкой в одном EXCLUDE, что потребовало бы
+-- btree_gist — здесь такой колонки нет, ограничение только по диапазону дат).
+-- Действует для ЛЮБЫХ двух периодов независимо от статуса (draft и closed
+-- тоже не могут пересекаться друг с другом) — задание не делает исключения.
+ALTER TABLE settlement_periods DROP CONSTRAINT IF EXISTS settlement_periods_no_overlap;
+ALTER TABLE settlement_periods ADD CONSTRAINT settlement_periods_no_overlap
+  EXCLUDE USING gist (daterange(period_from, period_to, '[]') WITH &&);
+
+-- Закрытый период — immutable (задание, раздел 8/17: "закрытый период нельзя
+-- редактировать"/"нельзя удалять"). DB-backstop поверх сервисного слоя — тот
+-- же принцип, что и fn_refunds_immutable_fields выше: приложение просто не
+-- должно этого делать, но если бы попыталось (баг, ручной SQL), PostgreSQL
+-- сам откажет, а не молча тихо испортит зафиксированный snapshot.
+CREATE OR REPLACE FUNCTION fn_settlement_period_immutable_after_close()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF OLD.status = 'closed' THEN
+    RAISE EXCEPTION 'settlement_periods: closed period is immutable (id=%)', OLD.id;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_settlement_period_block_update_after_close ON settlement_periods;
+CREATE TRIGGER trg_settlement_period_block_update_after_close
+BEFORE UPDATE ON settlement_periods
+FOR EACH ROW
+EXECUTE FUNCTION fn_settlement_period_immutable_after_close();
+
+CREATE OR REPLACE FUNCTION fn_settlement_period_block_delete_after_close()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF OLD.status = 'closed' THEN
+    RAISE EXCEPTION 'settlement_periods: closed period cannot be deleted (id=%)', OLD.id;
+  END IF;
+  RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_settlement_period_block_delete_after_close ON settlement_periods;
+CREATE TRIGGER trg_settlement_period_block_delete_after_close
+BEFORE DELETE ON settlement_periods
+FOR EACH ROW
+EXECUTE FUNCTION fn_settlement_period_block_delete_after_close();
+
+-- Одна строка обязательства на ресторан в одном периоде (задание, раздел 4).
+-- Создаётся ТОЛЬКО restaurant'ам с реальной активностью в периоде (хотя бы
+-- один заработанный заказ ИЛИ хотя бы один успешный возврат) — ресторан без
+-- какой-либо активности просто не упоминается в закрытом периоде, что само
+-- по себе честно отражает "ноль активности", без раздувания таблицы пустыми
+-- строками на каждый когда-либо созданный ресторан.
+CREATE TABLE IF NOT EXISTS settlement_restaurant_lines (
+  id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  settlement_period_id INTEGER NOT NULL REFERENCES settlement_periods(id),
+  restaurant_id INTEGER NOT NULL REFERENCES restaurants(id),
+  delivered_paid_orders INTEGER NOT NULL DEFAULT 0,
+  turnover INTEGER NOT NULL DEFAULT 0,
+  yaam_commission INTEGER NOT NULL DEFAULT 0,
+  restaurant_earnings INTEGER NOT NULL DEFAULT 0,
+  successful_refunds_count INTEGER NOT NULL DEFAULT 0,
+  successful_refunds_amount INTEGER NOT NULL DEFAULT 0,
+  payable_amount INTEGER NOT NULL DEFAULT 0,
+  payout_readiness_snapshot TEXT NOT NULL,
+  contract_number_snapshot TEXT NOT NULL DEFAULT '',
+  -- NULL = комиссия по заказам периода не была однородной ЛИБО не может быть
+  -- достоверно восстановлена (orders.commission_amount не хранит саму bps-
+  -- ставку, а restaurant_contracts не версионируется — см. итоговый отчёт,
+  -- раздел "Формулы", за полным обоснованием честной, а не выдуманной модели).
+  commission_bps_summary INTEGER,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (settlement_period_id, restaurant_id)
+);
+CREATE INDEX IF NOT EXISTS ix_settlement_restaurant_lines_period ON settlement_restaurant_lines (settlement_period_id);
+
+-- Строки этой и следующих двух таблиц НИКОГДА не обновляются и не удаляются
+-- после вставки — это и есть "immutable snapshot" (задание, раздел 9).
+-- Единственный код-путь, который сюда пишет — closeSettlementPeriod()
+-- (services/hq/settlementService.js), один раз, внутри одной SERIALIZABLE-
+-- транзакции вместе с переводом периода в 'closed'.
+CREATE OR REPLACE FUNCTION fn_settlement_snapshot_row_immutable()
+RETURNS TRIGGER AS $$
+BEGIN
+  RAISE EXCEPTION 'settlement snapshot rows are immutable and cannot be modified or deleted';
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_settlement_restaurant_lines_immutable ON settlement_restaurant_lines;
+CREATE TRIGGER trg_settlement_restaurant_lines_immutable
+BEFORE UPDATE OR DELETE ON settlement_restaurant_lines
+FOR EACH ROW
+EXECUTE FUNCTION fn_settlement_snapshot_row_immutable();
+
+-- Snapshot-связь "какие именно заработанные заказы вошли в этот период" —
+-- задание, раздел 7, вариант B ("хранить restaurant lines + список
+-- включённых order/refund IDs"), выбран явно вместо варианта A
+-- (только агрегаты): только вариант B реально ДОКАЗЫВАЕТ отсутствие
+-- двойного учёта голым UNIQUE(order_id) ниже — агрегатов самих по себе для
+-- этого недостаточно (два периода могли бы оба насчитать один и тот же
+-- заказ в свои суммы, и ни один агрегат этого бы не показал).
+CREATE TABLE IF NOT EXISTS settlement_order_lines (
+  id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  settlement_period_id INTEGER NOT NULL REFERENCES settlement_periods(id),
+  restaurant_id INTEGER NOT NULL REFERENCES restaurants(id),
+  order_id INTEGER NOT NULL UNIQUE REFERENCES orders(id),
+  items_total_snapshot INTEGER NOT NULL,
+  commission_amount_snapshot INTEGER NOT NULL,
+  restaurant_amount_snapshot INTEGER NOT NULL,
+  delivered_at_snapshot TIMESTAMPTZ NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS ix_settlement_order_lines_period ON settlement_order_lines (settlement_period_id);
+
+DROP TRIGGER IF EXISTS trg_settlement_order_lines_immutable ON settlement_order_lines;
+CREATE TRIGGER trg_settlement_order_lines_immutable
+BEFORE UPDATE OR DELETE ON settlement_order_lines
+FOR EACH ROW
+EXECUTE FUNCTION fn_settlement_snapshot_row_immutable();
+
+-- Symmetric snapshot-связь для возвратов (задание, раздел 7).
+CREATE TABLE IF NOT EXISTS settlement_refunds (
+  id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  settlement_period_id INTEGER NOT NULL REFERENCES settlement_periods(id),
+  restaurant_id INTEGER NOT NULL REFERENCES restaurants(id),
+  refund_id INTEGER NOT NULL UNIQUE REFERENCES refunds(id),
+  amount_snapshot INTEGER NOT NULL,
+  completed_at_snapshot TIMESTAMPTZ NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS ix_settlement_refunds_period ON settlement_refunds (settlement_period_id);
+
+DROP TRIGGER IF EXISTS trg_settlement_refunds_immutable ON settlement_refunds;
+CREATE TRIGGER trg_settlement_refunds_immutable
+BEFORE UPDATE OR DELETE ON settlement_refunds
+FOR EACH ROW
+EXECUTE FUNCTION fn_settlement_snapshot_row_immutable();
+
+-- Аудит-события этого этапа (задание, раздел 13) — тот же allowlist-принцип,
+-- что и остальной hq_audit_log.action. restaurant_id для settlement-событий
+-- всегда NULL (событие уровня периода в целом, не привязано к одному
+-- ресторану) — колонка это уже поддерживает (nullable).
+ALTER TABLE hq_audit_log DROP CONSTRAINT IF EXISTS hq_audit_log_action_check;
+ALTER TABLE hq_audit_log ADD CONSTRAINT hq_audit_log_action_check CHECK (action IN (
+  'restaurant_created', 'restaurant_updated', 'restaurant_paused',
+  'restaurant_resumed', 'restaurant_archived', 'restaurant_restored',
+  'restaurant_published', 'restaurant_unpublished',
+  'category_created', 'category_updated', 'category_archived',
+  'category_restored', 'category_moved',
+  'menu_item_created', 'menu_item_updated', 'menu_item_available',
+  'menu_item_unavailable', 'menu_item_archived', 'menu_item_restored',
+  'menu_item_moved',
+  'restaurant_photo_uploaded', 'restaurant_photo_primary_changed', 'restaurant_photo_deleted',
+  'menu_item_photo_uploaded', 'menu_item_photo_primary_changed', 'menu_item_photo_deleted',
+  'restaurant_legal_details_created', 'restaurant_legal_details_updated',
+  'restaurant_bank_details_created', 'restaurant_bank_details_updated',
+  'restaurant_contract_created', 'restaurant_contract_updated', 'restaurant_contract_status_changed',
+  'settlement_period_created', 'settlement_period_closed', 'settlement_period_draft_deleted'
+));
+
 COMMIT;

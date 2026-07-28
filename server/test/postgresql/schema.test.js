@@ -28,6 +28,8 @@ const EXPECTED_TABLES = [
   'restaurant_photos', 'menu_item_photos',
   // YAAM HQ Stage 6 (юридические данные/банковские реквизиты/договор).
   'restaurant_legal_details', 'restaurant_bank_details', 'restaurant_contracts',
+  // YAAM HQ Stage 8 (расчётные периоды и immutable snapshot обязательств).
+  'settlement_periods', 'settlement_restaurant_lines', 'settlement_order_lines', 'settlement_refunds',
 ];
 
 const EXPECTED_INDEXES = {
@@ -56,24 +58,47 @@ const TABLES_WITH_CREATED_AT = [
   'hq_owner', 'hq_security_log', 'hq_audit_log',
   'restaurant_photos', 'menu_item_photos',
   'restaurant_legal_details', 'restaurant_bank_details', 'restaurant_contracts',
+  // YAAM HQ Stage 8.
+  'settlement_periods', 'settlement_restaurant_lines', 'settlement_order_lines', 'settlement_refunds',
 ];
 
 const EXPECTED_FUNCTIONS = [
   'fn_refunds_amount_matches_payment',
   'fn_refunds_block_after_succeeded',
   'fn_refunds_immutable_fields',
+  // YAAM HQ Stage 8 — immutability triggers на settlement_periods/
+  // settlement_restaurant_lines/settlement_order_lines/settlement_refunds.
+  'fn_settlement_period_immutable_after_close',
+  'fn_settlement_period_block_delete_after_close',
+  'fn_settlement_snapshot_row_immutable',
 ];
 
+// event — массив (не строка): некоторые Stage 8 триггеры объявлены как
+// "BEFORE UPDATE OR DELETE" ОДНИМ CREATE TRIGGER — information_schema.triggers
+// показывает такой триггер как ПО ОДНОЙ СТРОКЕ НА КАЖДОЕ событие (тот же
+// триггер, то же имя, две строки с разным event_manipulation) — это
+// задокументированное поведение representation в information_schema, не
+// два физически разных триггера.
 const EXPECTED_TRIGGERS = {
-  trg_refunds_amount_matches_payment: 'INSERT',
-  trg_refunds_block_after_succeeded: 'INSERT',
-  trg_refunds_immutable_fields: 'UPDATE',
+  trg_refunds_amount_matches_payment: ['INSERT'],
+  trg_refunds_block_after_succeeded: ['INSERT'],
+  trg_refunds_immutable_fields: ['UPDATE'],
+  trg_settlement_period_block_update_after_close: ['UPDATE'],
+  trg_settlement_period_block_delete_after_close: ['DELETE'],
+  trg_settlement_restaurant_lines_immutable: ['UPDATE', 'DELETE'],
+  trg_settlement_order_lines_immutable: ['UPDATE', 'DELETE'],
+  trg_settlement_refunds_immutable: ['UPDATE', 'DELETE'],
 };
 
 // hq_owner НЕ входит: его id — фиксированная константа (DEFAULT 1 CHECK
 // id=1), не GENERATED ALWAYS AS IDENTITY (единственная строка никогда не
 // "автоинкрементируется" — см. db/postgresql/schema.sql).
-const IDENTITY_TABLES = ['restaurants', 'categories', 'menu_items', 'orders', 'order_items', 'payments', 'refunds', 'hq_security_log', 'hq_audit_log', 'restaurant_photos', 'menu_item_photos'];
+const IDENTITY_TABLES = [
+  'restaurants', 'categories', 'menu_items', 'orders', 'order_items', 'payments', 'refunds',
+  'hq_security_log', 'hq_audit_log', 'restaurant_photos', 'menu_item_photos',
+  // YAAM HQ Stage 8.
+  'settlement_periods', 'settlement_restaurant_lines', 'settlement_order_lines', 'settlement_refunds',
+];
 
 let cluster;
 
@@ -97,7 +122,7 @@ async function runSchemaAndInspect(t, databaseName) {
       await client.query(SCHEMA_SQL);
     });
 
-    await t.test('создаются все 20 таблиц', async () => {
+    await t.test('создаются все 24 таблицы', async () => {
       const { rows } = await client.query(
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename`
       );
@@ -105,13 +130,13 @@ async function runSchemaAndInspect(t, databaseName) {
       assert.deepEqual(names, [...EXPECTED_TABLES].sort());
     });
 
-    await t.test('создаются все 19 внешних ключей', async () => {
+    await t.test('создаются все 27 внешних ключей', async () => {
       const { rows } = await client.query(`
         SELECT count(*)::int AS n
         FROM information_schema.table_constraints
         WHERE constraint_schema = 'public' AND constraint_type = 'FOREIGN KEY'
       `);
-      assert.equal(rows[0].n, 19);
+      assert.equal(rows[0].n, 27);
     });
 
     await t.test('CHECK-ограничения присутствуют (>=12, включая новый на payments.status)', async () => {
@@ -155,7 +180,7 @@ async function runSchemaAndInspect(t, databaseName) {
       assert.equal(partialUniqueCount, 7, 'ожидали ровно 7 partial UNIQUE индексов');
     });
 
-    await t.test('создаются 3 PL/pgSQL-функции', async () => {
+    await t.test('создаются 6 PL/pgSQL-функций', async () => {
       const { rows } = await client.query(`
         SELECT routine_name, external_language
         FROM information_schema.routines
@@ -169,26 +194,44 @@ async function runSchemaAndInspect(t, databaseName) {
       }
     });
 
-    await t.test('создаются 3 триггера на refunds с ожидаемым событием', async () => {
+    await t.test('создаются 8 триггеров (refunds + Stage 8 settlement-immutability) с ожидаемыми событиями', async () => {
       const { rows } = await client.query(`
         SELECT trigger_name, event_manipulation, event_object_table
         FROM information_schema.triggers
         WHERE trigger_schema = 'public'
-        ORDER BY trigger_name
+        ORDER BY trigger_name, event_manipulation
       `);
-      const byName = {};
+      // По одному Set событий на имя триггера — многособытийный (UPDATE OR
+      // DELETE) триггер даёт несколько строк с одним и тем же именем (см.
+      // комментарий у EXPECTED_TRIGGERS выше), поэтому группируем в Set, а не
+      // перезаписываем последней строкой.
+      const eventsByName = new Map();
+      const tableByName = new Map();
       for (const r of rows) {
-        byName[r.trigger_name] = r;
+        if (!eventsByName.has(r.trigger_name)) eventsByName.set(r.trigger_name, new Set());
+        eventsByName.get(r.trigger_name).add(r.event_manipulation);
+        tableByName.set(r.trigger_name, r.event_object_table);
       }
-      assert.equal(Object.keys(byName).length, 3);
-      for (const [name, event] of Object.entries(EXPECTED_TRIGGERS)) {
-        assert.ok(byName[name], `триггер ${name} не найден`);
-        assert.equal(byName[name].event_object_table, 'refunds');
-        assert.equal(byName[name].event_manipulation, event);
+      assert.equal(eventsByName.size, 8, `ожидали 8 различных триггеров, получили: ${[...eventsByName.keys()].join(', ')}`);
+
+      const EXPECTED_TABLE_BY_TRIGGER = {
+        trg_refunds_amount_matches_payment: 'refunds',
+        trg_refunds_block_after_succeeded: 'refunds',
+        trg_refunds_immutable_fields: 'refunds',
+        trg_settlement_period_block_update_after_close: 'settlement_periods',
+        trg_settlement_period_block_delete_after_close: 'settlement_periods',
+        trg_settlement_restaurant_lines_immutable: 'settlement_restaurant_lines',
+        trg_settlement_order_lines_immutable: 'settlement_order_lines',
+        trg_settlement_refunds_immutable: 'settlement_refunds',
+      };
+      for (const [name, expectedEvents] of Object.entries(EXPECTED_TRIGGERS)) {
+        assert.ok(eventsByName.has(name), `триггер ${name} не найден`);
+        assert.equal(tableByName.get(name), EXPECTED_TABLE_BY_TRIGGER[name]);
+        assert.deepEqual([...eventsByName.get(name)].sort(), [...expectedEvents].sort(), `${name}: неожиданный набор событий`);
       }
     });
 
-    await t.test('IDENTITY корректна на всех 11 автоинкрементных таблицах', async () => {
+    await t.test('IDENTITY корректна на всех 15 автоинкрементных таблицах', async () => {
       for (const table of IDENTITY_TABLES) {
         const { rows } = await client.query(`
           SELECT is_identity, identity_generation
@@ -220,7 +263,7 @@ async function runSchemaAndInspect(t, databaseName) {
       assert.equal(rows[0].data_type, 'bytea');
     });
 
-    await t.test('DEFAULT NOW() присутствует на всех 17 датовых колонках created_at', async () => {
+    await t.test('DEFAULT NOW() присутствует на всех 21 датовых колонках created_at', async () => {
       const { rows } = await client.query(`
         SELECT table_name, column_default
         FROM information_schema.columns

@@ -16,6 +16,8 @@ const { logSecurityEvent } = require('../../services/hq/securityLog');
 const dashboardMetrics = require('../../services/hq/dashboardMetrics');
 const payoutService = require('../../services/hq/restaurantPayoutService');
 const financeService = require('../../services/hq/restaurantFinanceService');
+const settlementService = require('../../services/hq/settlementService');
+const settlementViews = require('../../hq/settlementViews');
 const { CONTRACT_STATUS_LABELS } = require('../../services/hq/restaurantContractService');
 const { ValidationError } = require('../../services/hq/restaurantAdminService');
 
@@ -113,7 +115,7 @@ function renderOverview({ top, active, restaurants, finance, attentionItems, csr
 // ВСЕГДА за всё время (не зависит от выбранного периода отчёта — это
 // остаток задолженности, а не поток за период, см. services/hq/
 // restaurantFinanceService.js за полным обоснованием) — подписано явно.
-function renderFinancePage({ overall, positions, periodOptions, linkBasePath, error }) {
+function renderFinancePage({ overall, positions, periodOptions, linkBasePath, error, settlementPeriods }) {
   const baseUrl = `${linkBasePath}/finance`;
   const period = periodOptions.period || 'today';
 
@@ -180,6 +182,8 @@ function renderFinancePage({ overall, positions, periodOptions, linkBasePath, er
         <tbody>${positionRows}</tbody>
       </table>
     </div>
+
+    ${settlementViews.renderSettlementPeriodsSection({ periods: settlementPeriods, linkBasePath })}
   `;
 }
 
@@ -299,13 +303,14 @@ function createPagesRouter({ linkBasePath, mediaProvider = null }) {
         positions = await financeService.listRestaurantsFinancialPositions({ period: 'today' });
       }
       const overall = financeService.summarizeOverall(positions);
+      const settlementPeriods = await settlementService.listSettlementPeriods();
       const csrfToken = ensureCsrfToken(req);
       res.send(layout({
         title: 'Финансы',
         active: 'finance',
         csrfToken,
         linkBasePath,
-        body: renderFinancePage({ overall, positions, periodOptions, linkBasePath, error: periodError }),
+        body: renderFinancePage({ overall, positions, periodOptions, linkBasePath, error: periodError, settlementPeriods }),
       }));
     } catch (err) {
       next(err);
