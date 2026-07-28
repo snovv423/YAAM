@@ -93,9 +93,9 @@ function renderOverview({ top, active, restaurants, finance, attentionItems, csr
         <tr><td>Оборот доставленных заказов</td><td style="text-align:right">${finance.turnover} ₽</td></tr>
         <tr><td>Комиссия YAAM</td><td style="text-align:right">${finance.commission} ₽</td></tr>
         <tr><td>Доля ресторанов</td><td style="text-align:right">${finance.restaurantsShare} ₽</td></tr>
-        <tr><td>Полные возвраты</td><td style="text-align:right">${finance.refundedOrders} шт · ${finance.refundedAmount} ₽</td></tr>
+        <tr><td>Возвращено клиентам</td><td style="text-align:right">${finance.refundedOrders} шт · ${finance.refundedAmount} ₽</td></tr>
       </table>
-      <div class="empty-state" style="margin-top:10px">Банковские выплаты будут доступны после подключения финансового модуля.</div>
+      <div class="empty-state" style="margin-top:10px">Возвраты показаны отдельно и не вычитаются повторно из заработка ресторана, если отменённый заказ не входил в доставленный оборот. Банковские выплаты будут доступны после подключения финансового модуля.</div>
     </div>
 
     <div class="panel">
@@ -163,10 +163,10 @@ function renderFinancePage({ overall, positions, periodOptions, linkBasePath, er
         <tr><td>Оборот</td><td style="text-align:right">${overall.turnover} ₽</td></tr>
         <tr><td>Комиссия YAAM</td><td style="text-align:right">${overall.commission} ₽</td></tr>
         <tr><td>Сумма ресторанов</td><td style="text-align:right">${overall.restaurantEarnings} ₽</td></tr>
-        <tr><td>Успешные возвраты</td><td style="text-align:right">${overall.successfulRefundsCount} шт · ${overall.successfulRefunds} ₽</td></tr>
+        <tr><td>Возвращено клиентам</td><td style="text-align:right">${overall.successfulRefundsCount} шт · ${overall.successfulRefunds} ₽</td></tr>
         <tr><td>Остаток к будущим выплатам (за всё время)</td><td style="text-align:right">${overall.payableBalance} ₽</td></tr>
       </table>
-      <div class="empty-state" style="margin-top:10px">«Остаток к будущим выплатам» — временная формула (= сумма ресторанов за всё время, выплат ещё не было) до отдельного этапа подключения реальных выплат.</div>
+      <div class="empty-state" style="margin-top:10px">Возвраты показаны отдельно и не вычитаются повторно из заработка ресторана, если отменённый заказ не входил в доставленный оборот. «Остаток к будущим выплатам» — временная формула (= сумма ресторанов за всё время, выплат ещё не было) до отдельного этапа подключения реальных выплат.</div>
     </div>
 
     <div class="panel">

@@ -180,10 +180,13 @@ test('YAAM HQ: финансовый учёт по ресторанам — су�
 
   // 6. Тестовый полный возврат — реальный, реальный жизненный цикл заказа
   // (оплачен -> принят -> отменён клиентом): деньги реально возвращаются
-  // через mock-провайдер. Заказ никогда не был delivered, поэтому по
-  // дизайну (см. server/services/hq/restaurantFinanceService.js) не входит
-  // ни в заработок, ни в «успешные возвраты» финансового экрана — эта
-  // проверка ниже осознанно подтверждает именно это, не наоборот.
+  // через mock-провайдер. Заказ никогда не был delivered, поэтому НЕ входит
+  // в заработок ресторана (turnover/commission/restaurantEarnings) — но
+  // Stage 7.1 ("Correct Successful Refund Reporting") ИСПРАВИЛ Stage 7-баг,
+  // из-за которого такой (единственный реально достижимый) возврат вообще
+  // не показывался в «Возвращено клиентам»; теперь он корректно виден там,
+  // не будучи повторно вычтенным из заработка — см. server/test/postgresql/
+  // hqRestaurantRefundReportingStage71.test.js за полным разбором.
   await createCancelledWithRealRefundOrder(restaurantAId, menuItemA.id, 1);
 
   const orderB1 = await createDeliveredPaidOrder(restaurantBId, menuItemB.id, 1); // 1000 ₽ -> earned, fallback 7%
@@ -205,7 +208,10 @@ test('YAAM HQ: финансовый учёт по ресторанам — су�
   const summaryPanel = page.locator('.panel', { hasText: 'Сводка за период' });
   await expect(summaryPanel).toContainText('4000 ₽'); // общий оборот 3000+1000
   await expect(summaryPanel).toContainText('370 ₽'); // общая комиссия 300+70
-  await expect(summaryPanel).toContainText('0 шт'); // успешных возвратов пока 0 — отменённый заказ никогда не был delivered
+  // Stage 7.1: реальный возврат отменённого заказа A5 (1000 ₽) корректно
+  // виден в «Возвращено клиентам», НЕ влияя на оборот/комиссию/сумму
+  // ресторанов выше (заказ никогда не входил в заработок).
+  await expect(summaryPanel).toContainText('1 шт · 1000 ₽');
 
   // «Остаток к будущим выплатам» явно подписан как временная формула.
   await expect(page.getByText('временная формула')).toBeVisible();

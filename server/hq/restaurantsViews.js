@@ -573,9 +573,9 @@ function renderStatisticsTab({ restaurant, statistics: s, financialPosition: f, 
         <tr><td>Оборот</td><td style="text-align:right">${money(f.turnover)}</td></tr>
         <tr><td>Комиссия YAAM</td><td style="text-align:right">${money(f.commission)}</td></tr>
         <tr><td>Сумма ресторана</td><td style="text-align:right">${money(f.restaurantEarnings)}</td></tr>
-        <tr><td>Успешные возвраты</td><td style="text-align:right">${f.successfulRefundsCount} шт · ${money(f.successfulRefunds)}</td></tr>
+        <tr><td>Возвращено клиентам</td><td style="text-align:right">${f.successfulRefundsCount} шт · ${money(f.successfulRefunds)}</td></tr>
       </table>
-      <div class="empty-state" style="margin-top:10px">Остаток к будущей выплате (за всё время, временная формула до отдельного этапа выплат): ${money(f.payableBalance)}. ${financeViews.renderPayoutReadinessInline(f.payoutReadiness)}.</div>
+      <div class="empty-state" style="margin-top:10px">Возвраты показаны отдельно и не вычитаются повторно из заработка ресторана, если отменённый заказ не входил в доставленный оборот. Остаток к будущей выплате (за всё время, временная формула до отдельного этапа выплат): ${money(f.payableBalance)}. ${financeViews.renderPayoutReadinessInline(f.payoutReadiness)}.</div>
     </div>
 
     <div class="panel">

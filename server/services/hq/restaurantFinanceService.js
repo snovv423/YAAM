@@ -104,6 +104,27 @@ function pushRangeConditions(conditions, params, range) {
   conditions.push(`o.status_updated_at < $${params.length}`);
 }
 
+// YAAM HQ Stage 7.1 — anchor времени возврата (задание, раздел 4):
+// refunds.completed_at, НЕ дата заказа. Аудит перед разработкой (Stage 7.1
+// отчёт, раздел «Аудит timestamp'ов») установил, что эта колонка уже
+// существует в схеме (db/postgresql/schema.sql) и заполняется АТОМАРНО
+// внутри finalizeRefundSucceeded() (services/postgresql/orderService.js)
+// РОВНО в момент `UPDATE refunds SET status = 'succeeded', ...,
+// completed_at = NOW() WHERE id = $2 AND status = 'processing'` — это
+// ЕДИНСТВЕННЫЙ код-путь во всём orderService.js, который устанавливает
+// refunds.status = 'succeeded' (проверено полным grep по файлу). Значит
+// completed_at достоверно и однозначно отражает момент, когда возврат
+// РЕАЛЬНО завершился успехом — никакого пробела схемы здесь нет (в отличие
+// от Stage 7 delivered_at), новая колонка не добавлялась, использована уже
+// существующая и уже надёжная.
+function pushRefundCompletionRangeConditions(conditions, params, range) {
+  if (!range) return;
+  params.push(range.startUtc);
+  conditions.push(`rf.completed_at >= $${params.length}`);
+  params.push(range.endUtc);
+  conditions.push(`rf.completed_at < $${params.length}`);
+}
+
 // Возвращает по одной строке на restaurant_id, у которого есть хотя бы один
 // заработанный заказ в диапазоне (restaurantId=null -> все рестораны сразу,
 // один GROUP BY запрос вместо N+1).
@@ -130,35 +151,46 @@ async function computeEarningsAggregate({ restaurantId = null, range = null } = 
   return rows;
 }
 
-// "Успешные возвраты" (задание, раздел 7/10) — суммы delivered+оплаченных
-// заказов, у которых ЕСТЬ succeeded refund (зеркало EARNED_ORDER_FILTER_SQL
-// с инвертированным условием по возврату). Возвраты по НЕ-delivered заказам
-// (customer_cancel/restaurant_decline/timeout — единственные реально
-// достижимые сегодня пути) сюда намеренно НЕ входят: те заказы никогда не
-// считались заработком (не delivered), поэтому их возврат ничего не
-// "уменьшает" в финансовой сводке — включать их в "успешные возвраты" было
-// бы вводящей в заблуждение строкой без соответствующего вычета.
+// YAAM HQ Stage 7.1 — «Возвращено клиентам» (задание, раздел 1-3). ИСПРАВЛЕН
+// смысловой дефект Stage 7: прежняя версия этого запроса требовала
+// `o.status = 'delivered'`, то есть показывала успешные возвраты ТОЛЬКО для
+// заказов, у которых "delivered И succeeded refund" — а это состояние
+// СТРУКТУРНО НЕДОСТИЖИМО через сегодняшний жизненный цикл заказа (см.
+// комментарий над EARNED_ORDER_FILTER_SQL выше). Единственные РЕАЛЬНО
+// достижимые сегодня возвраты — customer_cancel/restaurant_decline/timeout —
+// происходят исключительно на заказах, которые НИКОГДА не становятся
+// delivered. То есть прежний запрос показывал «0 возвратов» для КАЖДОГО
+// возврата, который когда-либо реально происходил в системе, хотя деньги
+// клиенту были фактически возвращены. Полный разбор — Stage 7.1 отчёт,
+// раздел «Прежняя ошибка».
+//
+// Новая версия считает КАЖДЫЙ succeeded refund НЕЗАВИСИМО от финального
+// статуса заказа — «сколько денег реально вернулось клиентам» (задание,
+// раздел 2), а НЕ «сколько из заработка ресторана было аннулировано». Это
+// два разных числа, посчитанных из двух независимых запросов:
+// EARNED_ORDER_FILTER_SQL (заработок, требует delivered, НЕ читает эту
+// функцию) и эта функция (возвраты, читает ТОЛЬКО refunds.status). Заказ,
+// который никогда не входил в заработок (не delivered), не может быть из
+// него вычтен второй раз этой функцией — она в принципе не трогает
+// restaurantEarnings (задание, раздел 3; доказательство — Stage 7.1 отчёт,
+// раздел «Формулы»).
 async function computeRefundsAggregate({ restaurantId = null, range = null } = {}) {
   const params = [];
-  const conditions = [
-    `o.status = 'delivered'`,
-    `p.status = 'succeeded'`,
-    `rf.status = 'succeeded'`,
-  ];
+  const conditions = [`rf.status = 'succeeded'`];
   if (restaurantId !== null) {
     params.push(restaurantId);
     conditions.push(`o.restaurant_id = $${params.length}`);
   }
-  pushRangeConditions(conditions, params, range);
+  pushRefundCompletionRangeConditions(conditions, params, range);
 
   const rows = await db.query(
     `SELECT
        o.restaurant_id,
        COUNT(*)::int AS refunded_orders,
-       COALESCE(SUM(o.items_total), 0)::int AS refunded_amount
-     FROM orders o
-     JOIN payments p ON p.order_id = o.id
-     JOIN refunds rf ON rf.payment_id = p.id
+       COALESCE(SUM(rf.amount), 0)::int AS refunded_amount
+     FROM refunds rf
+     JOIN payments p ON p.id = rf.payment_id
+     JOIN orders o ON o.id = p.order_id
      WHERE ${conditions.join(' AND ')}
      GROUP BY o.restaurant_id`,
     params,
