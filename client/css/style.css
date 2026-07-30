@@ -379,7 +379,12 @@
      только шрифт/трекинг/начертание — размер/цвет остаются за контекстом
      (крупно на статус-экране, мелко в списке отклонённых/в админке). */
   .order-code{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;font-weight:600;letter-spacing:.04em}
-  .st-share-btn{margin-top:10px;padding:8px 18px;font-size:13px}
+  /* Обёртка без собственных отступов/фона — когда кнопка внутри скрыта
+     (display:none, оплата ещё не подтверждена), пустая обёртка не даёт
+     никакой видимой высоты и не оставляет промежуток. Отступ — на самой
+     кнопке (.st-share-btn), поэтому он тоже пропадает вместе с кнопкой. */
+  .st-share-wrap{text-align:center}
+  .st-share-btn{margin-top:14px;padding:8px 18px;font-size:13px}
   .ststate{text-align:center;font-weight:800;font-size:20px;margin:14px 0 6px}
   .progress{display:flex;align-items:center;margin:18px 6px 8px}
   .pstep{flex:1;display:flex;flex-direction:column;align-items:center;position:relative}

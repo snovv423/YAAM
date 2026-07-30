@@ -151,9 +151,6 @@
   <div class="stwrap">
     <div class="stnum">
       <div class="lbl">Ваш заказ</div><div class="n order-code" id="st-num">YAAM-00001</div><div class="order-time" id="st-time"></div>
-      <!-- Показывается только владельцу заказа (initStatusScreen), не в
-           read-only просмотре по ссылке «Поделиться» (см. app.js). -->
-      <button class="ghost st-share-btn" id="st-share-btn" style="display:none" onclick="shareOrder()">Поделиться</button>
     </div>
     <div class="st-spin" id="st-spin"></div>
     <div id="st-content">
@@ -165,6 +162,16 @@
       <div class="st-phone-wrap" id="st-phone-wrap" style="display:none">
         <p id="st-phone-note">Вопрос по заказу? Свяжитесь с рестораном напрямую — это быстрее, чем через поддержку.</p>
         <a class="ghost st-phone-btn" id="st-phone-link" href="tel:">Позвонить в ресторан</a>
+      </div>
+      <!-- Сразу под «Позвонить в ресторан» — визуально ниже и менее заметна
+           (см. .st-share-btn: меньше padding/font, чем у .st-phone-btn).
+           Отдельная обёртка (не внутри .st-phone-wrap) нужна, чтобы кнопка
+           не исчезала вместе с блоком телефона, когда у ресторана нет
+           номера (showRestaurantPhone(null) скрывает только .st-phone-wrap).
+           Показывается только владельцу заказа (initStatusScreen), не в
+           read-only просмотре по ссылке «Поделиться» (см. app.js). -->
+      <div class="st-share-wrap">
+        <button class="ghost st-share-btn" id="st-share-btn" style="display:none" onclick="shareOrder()">Поделиться</button>
       </div>
       <div class="demobar">
         <button class="pay" id="st-next" onclick="nextStatus()">Следующий статус →</button>
