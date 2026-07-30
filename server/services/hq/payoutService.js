@@ -412,7 +412,12 @@ async function markAttemptProcessing(attemptId, bankStatus = null) {
 // markAttemptUnknown — submitting|processing -> unknown (задание: "YAAM
 // cannot determine whether the bank accepted/executed the request").
 // Обязательство: processing -> unknown.
-async function markAttemptUnknown(attemptId, safeReason = null) {
+// bankStatus (опционально, тот же COALESCE-паттерн, что и у markAttemptProcessing/
+// markAttemptSucceeded/markAttemptFailed) — добавлено для T-Bank status-mapper'а
+// (см. tbankPayoutStatusMapper.js): нераспознанный внешний статус тоже должен
+// сохраняться сырым в bank_status ("сохранить исходное значение"), не только
+// попадать в error_message/лог.
+async function markAttemptUnknown(attemptId, safeReason = null, bankStatus = null) {
   return db.transaction(async (client) => {
     const attempt = await requireAttemptForUpdate(attemptId, client);
     if (!['submitting', 'processing'].includes(attempt.status)) {
@@ -421,9 +426,9 @@ async function markAttemptUnknown(attemptId, safeReason = null) {
     const updatedAttempt = await db.execute(
       `UPDATE payout_attempts
          SET status = 'unknown', last_checked_at = NOW(),
-             error_message = COALESCE($2, error_message), updated_at = NOW()
-       WHERE id = $1 AND status = ANY($3::text[]) RETURNING *`,
-      [attemptId, sanitizeErrorMessage(safeReason), ['submitting', 'processing']],
+             error_message = COALESCE($2, error_message), bank_status = COALESCE($3, bank_status), updated_at = NOW()
+       WHERE id = $1 AND status = ANY($4::text[]) RETURNING *`,
+      [attemptId, sanitizeErrorMessage(safeReason), bankStatus, ['submitting', 'processing']],
       client,
     );
     if (updatedAttempt.rowCount !== 1) {
