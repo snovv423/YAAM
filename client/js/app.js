@@ -19,6 +19,8 @@ const DEMO_SEQ_KEY='yaam_demo_order_seq';
 const ORDER_TOKEN_PREFIX='yaam_ord_v1_';
 const CREATE_KEY_PREFIX='yaam_create_v1_';
 const RETRY_KEY_PREFIX='yaam_retry_v1_';
+const SHARE_TOKEN_PREFIX='yaam_shr_v1_';
+const SHARE_TOKENS_STORAGE_KEY='yaam_order_share_tokens';
 const CREATE_ORDER_LOCK_NAME='yaam-create-order-v1';
 const UI_ICON_PATHS={
   order:'<rect x="6" y="3.5" width="12" height="17" rx="2"/><path d="M9 8h6M9 12h6M9 16h4"/>',
@@ -1385,6 +1387,12 @@ function initStatusScreen(){
   document.getElementById('st-items').innerHTML=orderItemsHTML();
   document.getElementById('statusbg').style.display='block';
   showStatusSpinner(true);
+  // Кнопка «Поделиться» — только у владельца заказа (этот экран) и только
+  // при реальном бэкенде: без него ссылку некому обслужить на другом
+  // устройстве (см. shareOrder()). В read-only просмотре по чужой ссылке
+  // (openSharedOrder()) эта функция не вызывается — кнопка остаётся скрытой.
+  const shareBtn=document.getElementById('st-share-btn');
+  if(shareBtn)shareBtn.style.display=USE_API?'inline-flex':'none';
 }
 function openStatus(){
   currentFulfillment=fulfillmentType;
@@ -1856,6 +1864,197 @@ function refreshPendingInitialOrderIfVisible(){
 document.addEventListener('visibilitychange',()=>{if(!document.hidden){refreshActiveOrderIfVisible();refreshPendingInitialOrderIfVisible();resyncVisibleTimers();}});
 window.addEventListener('pageshow',(e)=>{if(e.persisted){refreshActiveOrderIfVisible();refreshPendingInitialOrderIfVisible();resyncVisibleTimers();}});
 
+// ---------------------------------------------------------------------------
+// Фича «Поделиться заказом» (Web Share API).
+//
+// Отдельная read-only capability (SHARE_TOKEN_PREFIX), НЕ access_token
+// владельца — сервер регистрирует её через POST /orders/:code/share и
+// принимает только на GET /orders/:code/shared (см. requireOrderShareAccess
+// в routes/postgresql/api.js). Эта ссылка физически не может отменить заказ,
+// повторить оплату или поставить оценку — даже если получатель перешлёт её
+// дальше или откроет с чужого устройства.
+//
+// Кэш share-токенов — отдельный localStorage-ключ, НЕ часть yaam_active_order
+// и не проходит через Web Lock критическую секцию владельческого состояния:
+// это независимая, гораздо менее критичная capability (потеря/рассинхрон
+// максимум означает генерацию новой ссылки, не порчу заказа).
+// ---------------------------------------------------------------------------
+function readShareTokenCache(){
+  try{return JSON.parse(localStorage.getItem(SHARE_TOKENS_STORAGE_KEY)||'{}');}catch(e){return{};}
+}
+function cacheShareToken(code,token){
+  const map=readShareTokenCache();
+  map[code]=token;
+  try{localStorage.setItem(SHARE_TOKENS_STORAGE_KEY,JSON.stringify(map));}catch(e){/* не критично — просто перегенерируем при следующем нажатии */}
+}
+async function ensureShareToken(code,accessToken){
+  const cached=readShareTokenCache()[code];
+  if(validCapability(cached,SHARE_TOKEN_PREFIX))return cached;
+  const fresh=randomCapability(SHARE_TOKEN_PREFIX);
+  await api.createShareLink(code,accessToken,fresh);
+  cacheShareToken(code,fresh);
+  return fresh;
+}
+function buildShareUrl(code,token){
+  return `${location.origin}${location.pathname}#shared=${encodeURIComponent(code)}:${encodeURIComponent(token)}`;
+}
+async function copyShareUrl(url){
+  try{
+    if(navigator.clipboard&&navigator.clipboard.writeText){
+      await navigator.clipboard.writeText(url);
+    }else{
+      const ta=document.createElement('textarea');
+      ta.value=url;ta.style.position='fixed';ta.style.opacity='0';
+      document.body.appendChild(ta);ta.select();
+      try{document.execCommand('copy');}finally{ta.remove();}
+    }
+    showToast('Ссылка скопирована');
+  }catch(e){
+    showToast('Не удалось скопировать ссылку');
+  }
+}
+// Вызывается кнопкой «Поделиться» на статус-экране владельца (см.
+// initStatusScreen(), #st-share-btn). Без бэкенда (demo) ссылку некому
+// обслужить на другом устройстве — честно сообщаем об этом, а не создаём
+// нерабочую ссылку.
+async function shareOrder(){
+  if(!USE_API||!currentOrderCode||!currentOrderAccessToken){
+    showToast('Ссылка «Поделиться» доступна только для заказов, оформленных через сервер');
+    return;
+  }
+  const btn=document.getElementById('st-share-btn');
+  if(btn)btn.disabled=true;
+  try{
+    const token=await ensureShareToken(currentOrderCode,currentOrderAccessToken);
+    const url=buildShareUrl(currentOrderCode,token);
+    if(navigator.share){
+      try{
+        await navigator.share({title:'YAAM — статус заказа',text:`Заказ ${currentOrderCode}`,url});
+      }catch(err){
+        // Пользователь сам закрыл системный лист «Поделиться» — это не
+        // ошибка, ничего не копируем и не показываем (не навязываем
+        // альтернативу тому, кто явно отказался делиться).
+        if(err&&err.name==='AbortError')return;
+        // Реальная техническая ошибка Web Share (нет доступных приложений,
+        // платформа не поддерживает конкретный тип данных и т.п.) — НЕ
+        // копируем молча: предлагаем явное действие, которое пользователь
+        // должен подтвердить сам.
+        yaamConfirm(
+          'Не удалось поделиться через приложения. Скопировать ссылку вместо этого?',
+          ()=>{copyShareUrl(url);},
+          {yes:'Скопировать ссылку',no:'Отмена'},
+        );
+      }
+    }else{
+      await copyShareUrl(url);
+    }
+  }catch(err){
+    showToast('Не удалось создать ссылку — проверьте соединение');
+  }finally{
+    if(btn)btn.disabled=false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Read-only просмотр статуса ПО ЧУЖОЙ ссылке «Поделиться» (#shared=CODE:TOKEN).
+//
+// Намеренно НЕ трогает currentOrderCode/currentOrderAccessToken/
+// yaam_active_order/saveOrderState — получатель ссылки может открыть её на
+// устройстве, где уже есть СВОЙ активный заказ, и это не должно его затереть
+// или подменить. Собственный, отдельный от pollOrderOnce() рендер: то же
+// самое DOM (#status), но без единого владельческого действия (cancel/
+// retry-payment/rate/«На главную»/демо-кнопки) — они либо скрыты, либо явно
+// заменены нейтральным read-only текстом.
+// ---------------------------------------------------------------------------
+let sharedViewPollTimer=null;
+function parseSharedHash(){
+  const h=location.hash;
+  if(!h||!h.startsWith('#shared='))return null;
+  const raw=h.slice('#shared='.length);
+  const sep=raw.indexOf(':');
+  if(sep<0)return null;
+  let code,token;
+  try{code=decodeURIComponent(raw.slice(0,sep));token=decodeURIComponent(raw.slice(sep+1));}catch(e){return null;}
+  if(!/^YAAM-\d+$/.test(code)||!validCapability(token,SHARE_TOKEN_PREFIX))return null;
+  return{code,token};
+}
+// Строит state состава заказа для read-only просмотра ИЗ ответа сервера
+// (toSharedOrderDTO), не из currentOrderItems/cart — та же экранирование
+// названий блюд, что и остальной пользовательский текст (esc()), в отличие
+// от orderItemsHTML() (владельческий экран, отдельная функция, не трогаем).
+function sharedOrderItemsHTML(order){
+  const rows=(order.items||[]).map(i=>`<div class="sumrow"><span>${i.qty} × ${esc(i.name)}</span><span>${i.price*i.qty} ₽</span></div>`).join('');
+  const total=Number.isFinite(order.items_total)?`<div class="sumrow total"><span>Итого</span><span>${order.items_total} ₽</span></div>`:'';
+  return rows+total;
+}
+function applySharedOrderToDom(order){
+  document.getElementById('st-num').textContent=order.public_code;
+  document.getElementById('st-items').innerHTML=sharedOrderItemsHTML(order);
+  document.getElementById('statusbg').style.display='block';
+  showStatusSpinner(false);
+  currentFulfillment=order.fulfillment_type==='pickup'?'pickup':'delivery';
+  showRestaurantPhone(order.restaurant_phone);
+
+  const REJECTED_LABELS={declined:'Ресторан отклонил заказ',timed_out:'Время ожидания истекло',cancelled:'Заказ отменён',payment_failed:'Оплата не прошла'};
+  if(order.status==='awaiting_payment'){
+    document.getElementById('st-progress').style.display='none';
+    document.getElementById('st-state').textContent='Ожидает оплаты';
+    document.getElementById('st-substate').style.display='none';
+    const ic=document.getElementById('st-icon');if(ic)ic.innerHTML=uiIcon('payment');
+  }else if(order.status==='awaiting_restaurant'){
+    document.getElementById('st-progress').style.display='none';
+    document.getElementById('st-state').textContent='Заказ отправлен, ждём ответа ресторана';
+    document.getElementById('st-substate').style.display='none';
+    const ic=document.getElementById('st-icon');if(ic)ic.innerHTML=uiIcon('clock');
+  }else if(stepSet().statusToStep[order.status]!==undefined){
+    statusStep=stepSet().statusToStep[order.status];
+    if(order.estimated_ready_minutes)curEstimatedMinutes=order.estimated_ready_minutes;
+    ratingSubmitted=true; // читатель чужой ссылки никогда не видит форму оценки
+    document.getElementById('st-progress').style.display='flex';
+    renderStatus();
+    if(statusStep===stepSet().steps.length-1){
+      document.getElementById('st-rating-wrap').innerHTML='<p class="rating-thanks">Это ссылка «Поделиться» — только просмотр статуса.</p>';
+    }
+  }else{
+    document.getElementById('st-progress').style.display='none';
+    document.getElementById('st-state').textContent=REJECTED_LABELS[order.status]||'Статус временно недоступен';
+    document.getElementById('st-substate').style.display='none';
+  }
+  // Read-only просмотр — ни одного владельческого действия. Выполняется
+  // ПОСЛЕДНИМ: renderStatus() выше сама переключает st-next/st-demowrap/
+  // st-final по statusStep (последний шаг vs нет) — эта правка должна
+  // побеждать после неё, иначе владельческие demo-кнопки снова появятся.
+  document.getElementById('st-next').style.display='none';
+  document.getElementById('st-demowrap').style.display='none';
+  document.getElementById('st-cancel-wrap').style.display='none';
+  document.getElementById('st-pending-pay-wrap').style.display='none';
+  document.getElementById('st-final').style.display='none';
+}
+async function pollSharedOrderOnce(code,token){
+  let order;
+  try{order=await api.getSharedOrder(code,token);}
+  catch(err){
+    clearInterval(sharedViewPollTimer);
+    document.getElementById('st-progress').innerHTML='';
+    document.getElementById('st-state').textContent='Ссылка недействительна или устарела';
+    document.getElementById('st-substate').style.display='none';
+    return;
+  }
+  applySharedOrderToDom(order);
+  if(['delivered','declined','timed_out','cancelled'].includes(order.status))clearInterval(sharedViewPollTimer);
+}
+async function openSharedOrder(code,token){
+  document.getElementById('st-num').textContent=code;
+  document.getElementById('st-items').innerHTML='';
+  document.getElementById('st-time').textContent='';
+  document.getElementById('statusbg').style.display='block';
+  showStatusSpinner(true);
+  go('status');
+  await pollSharedOrderOnce(code,token);
+  clearInterval(sharedViewPollTimer);
+  sharedViewPollTimer=setInterval(()=>pollSharedOrderOnce(code,token),POLL_INTERVAL_MS);
+}
+
 function cur(id){return document.getElementById(id).classList.contains('active');}
 function go(id){document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));document.getElementById(id).classList.add('active');document.querySelector('.dish-add').style.display=(id==='dish')?'block':'none';if(id!=='status'&&id!=='rejected')document.getElementById('statusbg').style.display='none';window.scrollTo(0,0);updateBar();if(id==='home'&&introFadeHandler)introFadeHandler();try{if(id!=='home')history.pushState({screen:id},'');else history.replaceState({screen:'home'},'');}catch(e){}}
 function resetAll(){
@@ -2090,5 +2289,15 @@ if(typeof IS_STAGING_MODE!=='undefined'&&IS_STAGING_MODE){
 }
 
 renderList();
-tryRestoreSession();
+// Ссылка «Поделиться» (#shared=CODE:TOKEN) обрабатывается ДО восстановления
+// собственной сессии посетителя — иначе tryRestoreSession() перехватила бы
+// экран своим активным заказом. Без бэкенда (USE_API=false, demo-режим)
+// такую ссылку обслуживать нечем — тихо игнорируем хэш, как обычную загрузку.
+const sharedLink=USE_API?parseSharedHash():null;
+if(sharedLink){
+  try{history.replaceState(history.state||{},'',location.pathname+location.search);}catch(e){/* не критично */}
+  openSharedOrder(sharedLink.code,sharedLink.token);
+}else{
+  tryRestoreSession();
+}
 initIntroLayerFX();

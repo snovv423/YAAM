@@ -123,4 +123,14 @@ const api = {
   devMarkPaid: (code, token) => apiRequest(`/api/orders/${code}/dev-confirm-payment`, {
     method: 'POST', headers: orderAccessHeaders(token),
   }),
+  // Фича «Поделиться заказом»: shareToken передаётся заголовком (не телом),
+  // тем же принципом, что и остальные секреты в этом файле — сервер
+  // регистрирует его read-only capability для заказа (см. orderShareService.js).
+  createShareLink: (code, orderAccessToken, newShareToken) => apiRequest(`/api/orders/${code}/share`, {
+    method: 'POST',
+    headers: { ...orderAccessHeaders(orderAccessToken), 'X-Share-Token': newShareToken },
+  }),
+  getSharedOrder: (code, shareToken) => apiRequest(`/api/orders/${code}/shared`, {
+    headers: { Authorization: `Bearer ${shareToken}` },
+  }),
 };

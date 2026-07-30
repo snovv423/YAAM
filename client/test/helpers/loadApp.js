@@ -194,14 +194,17 @@ function evalInContext(sandbox, code) {
 }
 
 // Останавливает все интервалы/таймауты, которые могли быть запущены во время
-// теста (qrInterval, preTimer, preAutoTimer, orderPollTimer) — чтобы один
-// тест не "звонил" в уже завершившийся тестовый процесс другого файла.
+// теста (qrInterval, preTimer, preAutoTimer, orderPollTimer, sharedViewPollTimer)
+// — чтобы один тест не "звонил" в уже завершившийся тестовый процесс другого
+// файла. sharedViewPollTimer — фича «Поделиться заказом» (openSharedOrder()),
+// тот же риск незавершённого setInterval, что и у orderPollTimer.
 function teardown(sandbox) {
   evalInContext(sandbox, `
     try{clearInterval(qrInterval);}catch(e){}
     try{clearInterval(preTimer);}catch(e){}
     try{clearTimeout(preAutoTimer);}catch(e){}
     try{clearInterval(orderPollTimer);}catch(e){}
+    try{clearInterval(sharedViewPollTimer);}catch(e){}
   `);
 }
 

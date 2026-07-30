@@ -149,7 +149,12 @@
 <!-- STATUS -->
 <div id="status" class="screen">
   <div class="stwrap">
-    <div class="stnum"><div class="lbl">Ваш заказ</div><div class="n order-code" id="st-num">YAAM-00001</div><div class="order-time" id="st-time"></div></div>
+    <div class="stnum">
+      <div class="lbl">Ваш заказ</div><div class="n order-code" id="st-num">YAAM-00001</div><div class="order-time" id="st-time"></div>
+      <!-- Показывается только владельцу заказа (initStatusScreen), не в
+           read-only просмотре по ссылке «Поделиться» (см. app.js). -->
+      <button class="ghost st-share-btn" id="st-share-btn" style="display:none" onclick="shareOrder()">Поделиться</button>
+    </div>
     <div class="st-spin" id="st-spin"></div>
     <div id="st-content">
       <div class="sticon" id="st-icon" aria-hidden="true"></div>

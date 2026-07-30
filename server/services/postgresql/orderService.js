@@ -1959,6 +1959,34 @@ function toPublicOrderDTO(order) {
   };
 }
 
+// Строгий allowlist для read-only ссылки «Поделиться заказом» — НЕ toPublicOrderDTO
+// (тот собран для владельца и не рассчитан на то, чтобы кто-то независимо
+// проверял его на утечку ПДн при каждом будущем изменении набора полей).
+// Явно перечисляет каждое разрешённое поле; всё, что не перечислено здесь
+// (customer_name/customer_phone/address/comment, commission_amount, id,
+// restaurant_id, rating, latest_refund_status, payment_expires_at, любые
+// внутренние/административные поля) отбрасывается по построению, даже если
+// когда-нибудь появится в объекте order. items — только name/price/qty
+// (order_items и так не хранит больше — см. getOrder()), явный .map() —
+// чтобы будущее расширение SELECT в getOrder() не протекло сюда молча.
+function toSharedOrderDTO(order) {
+  if (!order) return null;
+  const {
+    public_code, restaurant_name, restaurant_phone, fulfillment_type,
+    status, estimated_ready_minutes, items, items_total,
+  } = order;
+  return {
+    public_code,
+    restaurant_name,
+    restaurant_phone,
+    fulfillment_type,
+    status,
+    estimated_ready_minutes,
+    items: (items || []).map((item) => ({ name: item.name, price: item.price, qty: item.qty })),
+    items_total,
+  };
+}
+
 function toPublicPaymentDTO(payment) {
   if (!payment) return null;
   return {
@@ -2783,6 +2811,7 @@ module.exports = {
   parseBearerAuthorization,
   findAuthorizedOrderId,
   toPublicOrderDTO,
+  toSharedOrderDTO,
   toPublicPaymentDTO,
   createOrderAndResolve,
   recoverOrder,

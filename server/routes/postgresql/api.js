@@ -33,6 +33,7 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 const db = require('../../db/postgresql');
 const orderService = require('../../services/postgresql/orderService');
+const orderShareService = require('../../services/postgresql/orderShareService');
 const paymentService = require('../../services/paymentService');
 // YAAM HQ Stage 5B — тот же module-level singleton принцип, что и db.js
 // выше (читает process.env напрямую, не получает конфигурацию через
@@ -126,6 +127,28 @@ async function requireOrderAccess(req, res, next) {
     return next();
   } catch (err) {
     console.error('[api-postgresql] requireOrderAccess failed:', err.message);
+    return res.status(500).json({ error: 'Внутренняя ошибка сервера' });
+  }
+}
+
+// Фича «Поделиться заказом» (Web Share API): read-only аналог
+// requireOrderAccess, но принимает ТОЛЬКО share-токен (order_share_tokens,
+// см. orderShareService.js) — намеренно не даёт доступа к cancel/
+// retry-payment/rate роутам ниже, только к GET /orders/:code/shared.
+async function requireOrderShareAccess(req, res, next) {
+  res.set('Cache-Control', 'no-store');
+  try {
+    const token = orderShareService.parseBearerShareToken(req.get('authorization'));
+    if (!token) {
+      res.set('WWW-Authenticate', 'Bearer');
+      return res.status(401).json({ error: 'Требуется ссылка «Поделиться»' });
+    }
+    const orderId = await orderShareService.findAuthorizedOrderIdByShareToken(req.params.code, token);
+    if (!orderId) return res.status(404).json({ error: 'заказ не найден' });
+    req.order = await orderService.getOrder(orderId);
+    return next();
+  } catch (err) {
+    console.error('[api-postgresql] requireOrderShareAccess failed:', err.message);
     return res.status(500).json({ error: 'Внутренняя ошибка сервера' });
   }
 }
@@ -401,6 +424,30 @@ router.post('/orders/recover', orderCreateLimiter, requireBearerForCreate, async
 
 router.get('/orders/:code', orderReadLimiter, requireOrderAccess, (req, res) => {
   res.json(orderService.toPublicOrderDTO(req.order));
+});
+
+// Владелец (полный access_token) регистрирует read-only share-токен для
+// своей же ссылки «Поделиться» — сам shareToken передаётся заголовком
+// (X-Share-Token), не в теле, тем же принципом, что и остальные секреты
+// в этом файле (см. orderAccessHeaders() на клиенте).
+router.post('/orders/:code/share', orderMutationLimiter, requireOrderAccess, async (req, res) => {
+  try {
+    const shareToken = req.get('x-share-token');
+    await orderShareService.createOrReplaceShareToken(req.order.id, shareToken);
+    res.status(204).end();
+  } catch (err) {
+    res.status(errorStatus(err)).json({ error: err.message });
+  }
+});
+
+// Публичный read-only статус по ссылке «Поделиться» — доступен без
+// авторизации владельца, только по share-токену (см. requireOrderShareAccess
+// выше). НАМЕРЕННО не toPublicOrderDTO (тот собран для владельца, не для
+// независимо проверяемого allowlist'а на утечку ПДн) — отдельный строгий
+// allowlist toSharedOrderDTO (см. orderService.js), явно перечисляющий
+// каждое разрешённое поле.
+router.get('/orders/:code/shared', orderReadLimiter, requireOrderShareAccess, (req, res) => {
+  res.json(orderService.toSharedOrderDTO(req.order));
 });
 
 router.post('/orders/:code/cancel', orderMutationLimiter, requireOrderAccess, async (req, res) => {

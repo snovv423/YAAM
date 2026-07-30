@@ -428,6 +428,25 @@ CREATE TABLE IF NOT EXISTS order_access_credentials (
 );
 
 -- =========================================================================
+-- order_share_tokens (фича «Поделиться заказом», Web Share API)
+-- =========================================================================
+-- Read-only capability для публичной ссылки на статус заказа — НЕ путать с
+-- order_access_credentials.token_hash (полный владелец, может cancel/
+-- retry-payment/rate): этот токен принимается ТОЛЬКО GET-роутом статуса
+-- (см. requireOrderShareAccess в routes/postgresql/api.js), чтобы
+-- пересланная в мессенджере ссылка не давала постороннему управлять чужим
+-- заказом. Один активный share-токен на заказ (PK по order_id): повторная
+-- генерация (POST /orders/:code/share) заменяет предыдущий — старые
+-- розданные ссылки перестают работать. Это осознанный минимальный
+-- компромисс: клиент сначала переиспользует уже закэшированный локально
+-- токен и обращается сюда только при его отсутствии.
+CREATE TABLE IF NOT EXISTS order_share_tokens (
+  order_id INTEGER PRIMARY KEY REFERENCES orders(id) ON DELETE CASCADE,
+  token_hash BYTEA NOT NULL UNIQUE CHECK (length(token_hash) = 32),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- =========================================================================
 -- order_items
 -- =========================================================================
 CREATE TABLE IF NOT EXISTS order_items (
