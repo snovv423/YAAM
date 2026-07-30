@@ -1387,12 +1387,23 @@ function initStatusScreen(){
   document.getElementById('st-items').innerHTML=orderItemsHTML();
   document.getElementById('statusbg').style.display='block';
   showStatusSpinner(true);
-  // Кнопка «Поделиться» — только у владельца заказа (этот экран) и только
-  // при реальном бэкенде: без него ссылку некому обслужить на другом
-  // устройстве (см. shareOrder()). В read-only просмотре по чужой ссылке
-  // (openSharedOrder()) эта функция не вызывается — кнопка остаётся скрытой.
+  // Кнопка «Поделиться» скрыта по умолчанию здесь — до первого реального
+  // ответа сервера ЕЩЁ НЕИЗВЕСТНО, оплачен ли заказ (см. pollOrderOnce(),
+  // которая и включает её, только когда статус подтверждённо "после оплаты":
+  // awaiting_restaurant/accepted/preparing/courier/delivered). Показывать
+  // её здесь безусловно означало бы делиться и заказом, ожидающим оплаты
+  // (см. renderAwaitingPayment() — тот же экран #status).
   const shareBtn=document.getElementById('st-share-btn');
-  if(shareBtn)shareBtn.style.display=USE_API?'inline-flex':'none';
+  if(shareBtn)shareBtn.style.display='none';
+}
+// Единая точка включения/выключения «Поделиться» — вызывается ТОЛЬКО из
+// pollOrderOnce() по подтверждённому серверному статусу (awaiting_restaurant/
+// accepted/preparing/courier/delivered = оплата подтверждена), никогда по
+// предположению или локальному состоянию. USE_API — тот же гейт, что и
+// раньше (без бэкенда ссылку некому обслужить на другом устройстве).
+function setShareButtonVisible(visible){
+  const shareBtn=document.getElementById('st-share-btn');
+  if(shareBtn)shareBtn.style.display=(visible&&USE_API)?'inline-flex':'none';
 }
 function openStatus(){
   currentFulfillment=fulfillmentType;
@@ -1783,9 +1794,11 @@ async function pollOrderOnce(){
 
   if(order.status==='awaiting_payment'){
     showOrderDot(false); // ещё не оплачен — точка "оплачен и в работе" здесь не показывается
+    setShareButtonVisible(false); // не даём делиться неоплаченным заказом (см. renderAwaitingPayment ниже — тот же #status экран)
     renderAwaitingPayment(order);
   }else if(order.status==='awaiting_restaurant'){
     showOrderDot(true); // оплата подтверждена, заказ реально пошёл в работу
+    setShareButtonVisible(true);
     showStatusSpinner(false);
     document.getElementById('st-progress').style.display='none';
     document.getElementById('st-state').textContent='Заказ отправлен, ждём ответа ресторана';
@@ -1806,6 +1819,7 @@ async function pollOrderOnce(){
     document.getElementById('st-demowrap').style.display='none';
     document.getElementById('st-cancel-wrap').style.display='none';
     showOrderDot(true); // accepted/preparing/courier — renderStatus сам выключит на delivered
+    setShareButtonVisible(true);
     renderStatus();
     if(order.status==='delivered')stopOrderPolling();
   }else if(order.status==='declined'){
@@ -1989,6 +2003,11 @@ function sharedOrderItemsHTML(order){
 }
 function applySharedOrderToDom(order){
   document.getElementById('st-num').textContent=order.public_code;
+  // is_paid — безопасный boolean из toSharedOrderDTO (сервер), не сырой
+  // payment_status и не провайдерский код. #st-time здесь уже не занят
+  // владельческим "заказ оформлен в HH:MM" (openSharedOrder() очищает его),
+  // поэтому переиспользуем то же место для понятного read-only индикатора.
+  document.getElementById('st-time').textContent=order.is_paid?'Заказ оплачен':'';
   document.getElementById('st-items').innerHTML=sharedOrderItemsHTML(order);
   document.getElementById('statusbg').style.display='block';
   showStatusSpinner(false);

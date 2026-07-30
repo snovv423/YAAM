@@ -1969,6 +1969,14 @@ function toPublicOrderDTO(order) {
 // когда-нибудь появится в объекте order. items — только name/price/qty
 // (order_items и так не хранит больше — см. getOrder()), явный .map() —
 // чтобы будущее расширение SELECT в getOrder() не протекло сюда молча.
+// "Оплата подтверждена" = заказ реально пошёл в работу после awaiting_payment
+// (тот же набор статусов, которым client/js/app.js уже отмечает showOrderDot(true)
+// в pollOrderOnce()) — единственный источник истины для is_paid ниже, НЕ
+// технический payment_status/provider-код (те не входят в этот DTO вообще).
+const SHARED_ORDER_PAID_STATUSES = new Set([
+  'awaiting_restaurant', 'accepted', 'preparing', 'courier', 'delivered',
+]);
+
 function toSharedOrderDTO(order) {
   if (!order) return null;
   const {
@@ -1981,6 +1989,7 @@ function toSharedOrderDTO(order) {
     restaurant_phone,
     fulfillment_type,
     status,
+    is_paid: SHARED_ORDER_PAID_STATUSES.has(status),
     estimated_ready_minutes,
     items: (items || []).map((item) => ({ name: item.name, price: item.price, qty: item.qty })),
     items_total,

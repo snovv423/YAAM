@@ -183,6 +183,128 @@ test('shareOrder(): реальная техническая ошибка navigat
 });
 
 // ---------------------------------------------------------------------------
+// Кнопка «Поделиться» видна ТОЛЬКО после подтверждённой оплаты (см.
+// setShareButtonVisible() в pollOrderOnce()) — до этого заказ мог висеть
+// на экране #status в статусе awaiting_payment (см. renderAwaitingPayment(),
+// сценарий "вернулся назад с QR/обновил страницу"), и кнопка не должна
+// быть доступна в этот момент.
+// ---------------------------------------------------------------------------
+
+test('Поделиться: кнопка ОСТАЁТСЯ скрытой, пока заказ awaiting_payment (неоплачен)', async () => {
+  const sandbox = freshApp({ apiBaseUrl: 'https://api.example.invalid' });
+  sandbox.fetch = async () => ({
+    ok: true,
+    status: 200,
+    async json() {
+      return {
+        public_code: 'YAAM-00011', status: 'awaiting_payment', items_total: 500,
+        fulfillment_type: 'delivery', restaurant_phone: null, rating: null,
+        status_updated_at: new Date().toISOString().replace('T', ' ').slice(0, 19),
+      };
+    },
+  });
+  const accessToken = `yaam_ord_v1_${Buffer.alloc(32, 14).toString('base64url')}`;
+  await evalInContext(sandbox, `
+    currentOrderCode='YAAM-00011';
+    currentOrderAccessToken=${JSON.stringify(accessToken)};
+    initStatusScreen();
+  `);
+  assert.equal(sandbox.document.getElementById('st-share-btn').style.display, 'none', 'до первого poll кнопка скрыта по умолчанию');
+  await evalInContext(sandbox, 'pollOrderOnce()');
+  assert.equal(sandbox.document.getElementById('st-share-btn').style.display, 'none', 'awaiting_payment — оплата НЕ подтверждена, кнопка обязана остаться скрытой');
+  teardown(sandbox);
+});
+
+test('Поделиться: кнопка появляется после подтверждённого перехода в awaiting_restaurant (оплата подтверждена)', async () => {
+  const sandbox = freshApp({ apiBaseUrl: 'https://api.example.invalid' });
+  sandbox.fetch = async () => ({
+    ok: true,
+    status: 200,
+    async json() {
+      return {
+        public_code: 'YAAM-00012', status: 'awaiting_restaurant', items_total: 500,
+        fulfillment_type: 'delivery', restaurant_phone: null, rating: null,
+        status_updated_at: new Date().toISOString().replace('T', ' ').slice(0, 19),
+      };
+    },
+  });
+  const accessToken = `yaam_ord_v1_${Buffer.alloc(32, 15).toString('base64url')}`;
+  await evalInContext(sandbox, `
+    currentOrderCode='YAAM-00012';
+    currentOrderAccessToken=${JSON.stringify(accessToken)};
+    initStatusScreen();
+  `);
+  await evalInContext(sandbox, 'pollOrderOnce()');
+  assert.equal(sandbox.document.getElementById('st-share-btn').style.display, 'inline-flex', 'awaiting_restaurant означает подтверждённую оплату — кнопка обязана появиться');
+  teardown(sandbox);
+});
+
+test('Поделиться: кнопка видна на статусах прогресса после оплаты (preparing)', async () => {
+  const sandbox = freshApp({ apiBaseUrl: 'https://api.example.invalid' });
+  sandbox.fetch = async () => ({
+    ok: true,
+    status: 200,
+    async json() {
+      return {
+        public_code: 'YAAM-00013', status: 'preparing', items_total: 500,
+        fulfillment_type: 'delivery', restaurant_phone: null, rating: null,
+      };
+    },
+  });
+  const accessToken = `yaam_ord_v1_${Buffer.alloc(32, 16).toString('base64url')}`;
+  await evalInContext(sandbox, `
+    currentOrderCode='YAAM-00013';
+    currentOrderAccessToken=${JSON.stringify(accessToken)};
+    initStatusScreen();
+  `);
+  await evalInContext(sandbox, 'pollOrderOnce()');
+  assert.equal(sandbox.document.getElementById('st-share-btn').style.display, 'inline-flex');
+  teardown(sandbox);
+});
+
+// ---------------------------------------------------------------------------
+// is_paid на read-only странице — понятное «Заказ оплачен»
+// ---------------------------------------------------------------------------
+
+test('openSharedOrder(): is_paid=true показывает «Заказ оплачен» на read-only странице', async () => {
+  const sandbox = freshApp({ apiBaseUrl: 'https://api.example.invalid' });
+  sandbox.fetch = async () => ({
+    ok: true,
+    status: 200,
+    async json() {
+      return {
+        public_code: 'YAAM-00014', status: 'preparing', items_total: 500,
+        fulfillment_type: 'delivery', restaurant_phone: null, is_paid: true,
+        items: [{ name: 'Хинкали', price: 500, qty: 1 }],
+      };
+    },
+  });
+  const token = `yaam_shr_v1_${Buffer.alloc(32, 17).toString('base64url')}`;
+  await evalInContext(sandbox, `openSharedOrder('YAAM-00014', ${JSON.stringify(token)})`);
+  assert.equal(sandbox.document.getElementById('st-time').textContent, 'Заказ оплачен');
+  teardown(sandbox);
+});
+
+test('openSharedOrder(): is_paid=false (заказ ещё не оплачен) НЕ показывает «Заказ оплачен»', async () => {
+  const sandbox = freshApp({ apiBaseUrl: 'https://api.example.invalid' });
+  sandbox.fetch = async () => ({
+    ok: true,
+    status: 200,
+    async json() {
+      return {
+        public_code: 'YAAM-00015', status: 'awaiting_payment', items_total: 500,
+        fulfillment_type: 'delivery', restaurant_phone: null, is_paid: false,
+        items: [{ name: 'Хинкали', price: 500, qty: 1 }],
+      };
+    },
+  });
+  const token = `yaam_shr_v1_${Buffer.alloc(32, 18).toString('base64url')}`;
+  await evalInContext(sandbox, `openSharedOrder('YAAM-00015', ${JSON.stringify(token)})`);
+  assert.equal(sandbox.document.getElementById('st-time').textContent, '');
+  teardown(sandbox);
+});
+
+// ---------------------------------------------------------------------------
 // openSharedOrder() / applySharedOrderToDom() — read-only просмотр
 // ---------------------------------------------------------------------------
 

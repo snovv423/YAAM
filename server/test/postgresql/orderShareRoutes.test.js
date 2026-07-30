@@ -162,7 +162,7 @@ test('POST /orders/:code/share — владелец успешно регист�
 // когда-нибудь по ошибке начнёт спредить весь order-объект.
 const SHARED_DTO_ALLOWLIST = [
   'public_code', 'restaurant_name', 'restaurant_phone', 'fulfillment_type',
-  'status', 'estimated_ready_minutes', 'items', 'items_total',
+  'status', 'is_paid', 'estimated_ready_minutes', 'items', 'items_total',
 ].sort();
 
 test('GET /orders/:code/shared — DTO содержит РОВНО allowlist полей, не владельческий toPublicOrderDTO', async () => {
@@ -186,6 +186,40 @@ test('GET /orders/:code/shared — DTO содержит РОВНО allowlist п�
   assert.equal(sharedBody.status, 'awaiting_payment');
   assert.deepEqual(sharedBody.items, [{ name: 'Item', price: 500, qty: 1 }]);
   assert.equal(sharedBody.items_total, 500);
+});
+
+// ---------------------------------------------------------------------------
+// is_paid — безопасный производный признак (НЕ технический payment_status)
+// ---------------------------------------------------------------------------
+
+test('GET /orders/:code/shared — is_paid=false для awaiting_payment (заказ ещё не оплачен)', async () => {
+  const { order, payload } = await createOrderDirect();
+  const token = shareToken();
+  await fetch(`${mainBaseUrl}/api/orders/${order.public_code}/share`, {
+    method: 'POST',
+    headers: { ...auth(payload.orderAccessToken), 'X-Share-Token': token },
+  });
+  const res = await fetch(`${mainBaseUrl}/api/orders/${order.public_code}/shared`, { headers: auth(token) });
+  const body = await res.json();
+  assert.equal(body.status, 'awaiting_payment');
+  assert.equal(body.is_paid, false);
+});
+
+test('GET /orders/:code/shared — is_paid=true после подтверждённого перехода в awaiting_restaurant', async () => {
+  const { order, payload } = await createOrderDirect();
+  const token = shareToken();
+  await fetch(`${mainBaseUrl}/api/orders/${order.public_code}/share`, {
+    method: 'POST',
+    headers: { ...auth(payload.orderAccessToken), 'X-Share-Token': token },
+  });
+  await db.execute(
+    `UPDATE orders SET status = 'awaiting_restaurant', status_updated_at = NOW() WHERE public_code = $1`,
+    [order.public_code],
+  );
+  const res = await fetch(`${mainBaseUrl}/api/orders/${order.public_code}/shared`, { headers: auth(token) });
+  const body = await res.json();
+  assert.equal(body.status, 'awaiting_restaurant');
+  assert.equal(body.is_paid, true);
 });
 
 test('GET /orders/:code/shared — без Authorization даёт 401', async () => {
@@ -279,6 +313,9 @@ test('GET /orders/:code/shared — не содержит клиентских П
     // управляющие/платёжные/технические поля — присутствовали в
     // владельческом toPublicOrderDTO, но НЕ должны попадать сюда
     'rating', 'refund_status', 'payment_expires_at', 'status_updated_at',
+    // сырой технический статус платежа/провайдера — вместо него безопасный
+    // производный is_paid (см. отдельные тесты выше)
+    'payment_status', 'provider_payment_id', 'bank_status',
     // токены/секреты и Telegram-данные ресторана
     'access_token', 'token_hash', 'telegram_chat_id',
   ];
