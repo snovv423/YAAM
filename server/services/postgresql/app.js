@@ -392,6 +392,11 @@ function createPostgresqlApp({
   const health = createHealthCheck({
     getSchedulers: () => [scheduler, orderTimeoutScheduler, refundReconciliationScheduler],
     getBotState: () => (botAdapter ? botAdapter.getState() : { state: 'disabled' }),
+    // GIT_COMMIT_SHA — см. п.2 задания/health.js. Через уже существующий
+    // `env` параметр (по умолчанию process.env) — та же, уже установленная
+    // в этом файле схема тестируемости, что и validateAppEnv(env) выше, а
+    // не отдельное прямое чтение process.env внутри health.js.
+    getCommitSha: () => env.GIT_COMMIT_SHA,
   });
 
   let ready = false;

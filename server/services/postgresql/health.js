@@ -32,7 +32,19 @@ const db = require('../../db/postgresql');
 // сбой Telegram не должен превращать readiness в false (см.
 // server/docs/postgresql-application-assembly.md, раздел "Bot lifecycle и
 // readiness"), только наблюдаемое поле в ответе.
-function createHealthCheck({ getSchedulers = () => [], getBotState = () => null } = {}) {
+// getCommitSha() — какой именно commit реально обслуживает этот процесс,
+// без доступа по SSH (см. YAAM-HQ-Test-Environment-Deployment-Plan.md,
+// раздел 10 — на api-pg.yaam.su сегодня это нельзя проверить удалённо
+// вообще). Читает GIT_COMMIT_SHA из окружения деплоя (не из `git`
+// напрямую — на самом сервере может не быть .git вообще, если деплой идёт
+// архивом/tarball, а не git checkout) — 'unknown' безопасное значение по
+// умолчанию, если переменная не задана (не бросает, не путает с реальным
+// хэшем). Не участвует в `ok` — то же самое разделение "информационное
+// поле, не влияющее на смысл проверки", что уже применено к getBotState()
+// (см. header-комментарий выше).
+function createHealthCheck({
+  getSchedulers = () => [], getBotState = () => null, getCommitSha = () => 'unknown',
+} = {}) {
   async function checkDatabase() {
     try {
       await db.query('SELECT 1');
@@ -75,6 +87,7 @@ function createHealthCheck({ getSchedulers = () => [], getBotState = () => null 
     const pool = checkPool();
     const schedulers = checkSchedulers();
     const bot = getBotState();
+    const commitSha = getCommitSha();
     return {
       ok: database.ok,
       uptimeSec: Math.floor(process.uptime()),
@@ -82,6 +95,11 @@ function createHealthCheck({ getSchedulers = () => [], getBotState = () => null 
       pool,
       schedulers,
       bot,
+      // Строго не пустая произвольная строка — только либо реальный commit
+      // hash, либо ровно 'unknown'. Никаких других env-переменных/секретов
+      // это поле не раскрывает (см. п.2 задания) — только этот один вывод
+      // getCommitSha().
+      commitSha: typeof commitSha === 'string' && commitSha.trim() ? commitSha.trim() : 'unknown',
     };
   }
 

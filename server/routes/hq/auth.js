@@ -17,7 +17,7 @@ const { SESSION_COOKIE_NAME } = require('../../services/hq/session');
 const { hqRootPath } = require('../../services/hq/basePath');
 const ownerService = require('../../services/hq/ownerService');
 const { logSecurityEvent } = require('../../services/hq/securityLog');
-const { esc } = require('../../hq/layout');
+const { esc, renderTestBanner, testBannerStyle, TEST_BANNER_HEIGHT_PX } = require('../../hq/layout');
 const { createRequireHqAuth, loginRateLimiter } = require('./middleware');
 
 // Сравнение логина в постоянное время — не потому что логин секретный сам
@@ -60,6 +60,11 @@ function renderLoginPage({ csrfToken, error, linkBasePath, changed }) {
   const loginAction = `${linkBasePath}/login`;
   const staticScriptSrc = `${linkBasePath}/static/hq.js`;
   const notice = Object.prototype.hasOwnProperty.call(CHANGE_NOTICES, changed) ? CHANGE_NOTICES[changed] : null;
+  // HQ_ENV_LABEL — тот же баннер/геометрия, что и на авторизованных
+  // страницах (server/hq/layout.js) — общая функция, не дублированная
+  // копия, чтобы поведение двух шаблонов не могло разойтись.
+  const testBannerHtml = renderTestBanner();
+  const bannerOffset = testBannerHtml ? TEST_BANNER_HEIGHT_PX : 0;
   return `<!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -70,7 +75,8 @@ function renderLoginPage({ csrfToken, error, linkBasePath, changed }) {
 <style>
   :root{--bg:#0A2417;--panel:#123322;--txt:#F1F7F2;--txt2:rgba(241,247,242,.62);--amber:#FF9A2E;--bord:rgba(255,255,255,.14);--danger:#FF7059;--ok:#34D38C}
   *{box-sizing:border-box}
-  body{font-family:-apple-system,Manrope,sans-serif;background:var(--bg);color:var(--txt);margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+  ${testBannerHtml ? testBannerStyle() : ''}
+  body{font-family:-apple-system,Manrope,sans-serif;background:var(--bg);color:var(--txt);margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:${20 + bannerOffset}px 20px 20px}
   .card{width:100%;max-width:340px;background:var(--panel);border:1px solid var(--bord);border-radius:16px;padding:32px 28px}
   h1{font-size:19px;margin:0 0 24px;text-align:center;font-weight:800}
   label{display:block;font-size:12px;color:var(--txt2);font-weight:700;margin:14px 0 6px;text-transform:uppercase}
@@ -83,6 +89,7 @@ function renderLoginPage({ csrfToken, error, linkBasePath, changed }) {
 </style>
 </head>
 <body>
+${testBannerHtml}
 <form class="card" method="post" action="${loginAction}" id="hq-login-form">
   <h1>YAAM HQ</h1>
   <input type="hidden" name="_csrf" value="${esc(csrfToken)}">

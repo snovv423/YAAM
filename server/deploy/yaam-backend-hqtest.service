@@ -1,0 +1,50 @@
+# systemd unit для YAAM hqtest backend (server.postgresql.js, окружение
+# hqtest.yaam.su).
+#
+# ЭТО ШАБЛОН, НЕ ПРИМЕНЁННЫЙ НИ К ОДНОМУ РЕАЛЬНОМУ VPS — подготовлен без
+# доступа к реальной инфраструктуре (см. YAAM-HQ-Test-Environment-
+# Deployment-Plan.md за полным контекстом). Использует ТОТ ЖЕ код
+# (server.postgresql.js), что и yaam-backend-postgresql.service
+# (api-pg.yaam.su), но полностью ОТДЕЛЬНЫЙ процесс — свой рабочий каталог,
+# свой EnvironmentFile, свой порт, своя PostgreSQL-база. НЕ переиспользует
+# уже работающий процесс api-pg.yaam.su ни в каком виде.
+#
+# Почему второй независимый процесс безопасен (не то же самое, что вторая
+# копия SQLite-версии): PostgreSQL — клиент-серверная СУБД, singleInstance-
+# Lock.js (SQLite-специфичный PID-lock) здесь не используется и не нужен —
+# см. server/services/postgresql/lifecycle.js и server/docs/single-instance.md.
+#
+# Установка (вручную, на самом VPS — эта задача этого не выполняла):
+#   sudo mkdir -p /opt/yaam-hqtest
+#   # (git clone/checkout нужного commit в /opt/yaam-hqtest — см. план деплоя)
+#   sudo cp server/deploy/yaam-backend-hqtest.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now yaam-backend-hqtest
+#
+# Проверка:
+#   sudo systemctl status yaam-backend-hqtest        # active (running)
+#   curl -s http://127.0.0.1:3002/health/ready | jq . # {"ok":true,...,"commitSha":"<hash>"}
+
+[Unit]
+Description=YAAM hqtest backend (server.postgresql.js) — isolated test HQ instance, hqtest.yaam.su
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=yaam
+# Отдельный рабочий каталог — НЕ /opt/yaam (тот занят api-pg.yaam.su).
+# Отдельный checkout того же репозитория, на нужном commit (см. план
+# деплоя, раздел "Deploy с обязательной проверкой" — git checkout <hash>,
+# не git pull на ветке).
+WorkingDirectory=/opt/yaam-hqtest/server
+EnvironmentFile=/opt/yaam-hqtest/server/.env.hqtest
+ExecStart=/usr/bin/node server.postgresql.js
+Restart=on-failure
+RestartSec=5
+
+# Graceful shutdown — тот же контракт, что и у yaam-backend-postgresql.service
+# (services/postgresql/lifecycle.js обрабатывает SIGTERM/SIGINT).
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

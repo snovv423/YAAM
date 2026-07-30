@@ -302,6 +302,37 @@ test('C4: readiness() — ok:false с понятной ошибкой, если 
   }
 });
 
+// GIT_COMMIT_SHA (задание "hqtest deployment prep", п.2) — commitSha в
+// readiness-ответе, не меняет смысл ok/database/pool/schedulers/bot.
+test('C5: readiness() — commitSha="unknown" по умолчанию, без getCommitSha вообще', async () => {
+  const health = healthModule.createHealthCheck({ getSchedulers: () => [] });
+  const result = await health.readiness();
+  assert.equal(result.commitSha, 'unknown');
+  // Ничего из "смысла" readiness не изменилось этим полем.
+  assert.equal(result.ok, true);
+  assert.equal(result.database.ok, true);
+});
+
+test('C6: readiness() — commitSha из getCommitSha(), включая fallback на "unknown" для пустой/не-строки', async () => {
+  const withSha = healthModule.createHealthCheck({ getSchedulers: () => [], getCommitSha: () => 'abc123deadbeef' });
+  assert.equal((await withSha.readiness()).commitSha, 'abc123deadbeef');
+
+  const withEmptySha = healthModule.createHealthCheck({ getSchedulers: () => [], getCommitSha: () => '' });
+  assert.equal((await withEmptySha.readiness()).commitSha, 'unknown');
+
+  const withUndefinedSha = healthModule.createHealthCheck({ getSchedulers: () => [], getCommitSha: () => undefined });
+  assert.equal((await withUndefinedSha.readiness()).commitSha, 'unknown');
+
+  const withWhitespaceSha = healthModule.createHealthCheck({ getSchedulers: () => [], getCommitSha: () => '   ' });
+  assert.equal((await withWhitespaceSha.readiness()).commitSha, 'unknown');
+});
+
+test('C7: liveness() НЕ содержит commitSha — поле только в readiness (п.2 задания: "не меняя смысл live/readiness-проверок")', async () => {
+  const health = healthModule.createHealthCheck({ getSchedulers: () => [], getCommitSha: () => 'should-not-appear-in-liveness' });
+  const result = await health.liveness();
+  assert.equal('commitSha' in result, false);
+});
+
 // ===========================================================================
 // D. HTTP integration (server.postgresql.js)
 // ===========================================================================
@@ -344,6 +375,47 @@ test('D2: /health возвращает 503, когда БД недоступна
     } finally {
       db.query = originalQuery;
     }
+  } finally {
+    await instance.stop();
+  }
+});
+
+test('D3b: GET /health/ready отдаёт commitSha из GIT_COMMIT_SHA (env), без утечки других env-переменных', async () => {
+  const instance = serverModule.createApp({
+    port: 0,
+    schedulerIntervalMs: 1_000_000,
+    env: { ...process.env, GIT_COMMIT_SHA: 'd34db33fd34db33fd34db33fd34db33fd34db33' },
+  });
+  await instance.start();
+  try {
+    const { port } = instance.address();
+    const ready = await fetchJson(`http://127.0.0.1:${port}/health/ready`);
+    assert.equal(ready.status, 200);
+    assert.equal(ready.body.commitSha, 'd34db33fd34db33fd34db33fd34db33fd34db33');
+    // Смысл готовности не изменился этим полем.
+    assert.equal(ready.body.ok, true);
+    assert.equal(ready.body.database.ok, true);
+    // Не утекают ни DATABASE_URL, ни любой другой секрет/env-переменная —
+    // ответ содержит РОВНО ожидаемый набор верхнеуровневых полей.
+    assert.deepEqual(
+      Object.keys(ready.body).sort(),
+      ['bot', 'commitSha', 'database', 'ok', 'pool', 'schedulers', 'uptimeSec'].sort(),
+    );
+  } finally {
+    await instance.stop();
+  }
+});
+
+test('D3c: GET /health/ready без GIT_COMMIT_SHA отдаёт commitSha="unknown", не падает', async () => {
+  const envWithoutSha = { ...process.env };
+  delete envWithoutSha.GIT_COMMIT_SHA;
+  const instance = serverModule.createApp({ port: 0, schedulerIntervalMs: 1_000_000, env: envWithoutSha });
+  await instance.start();
+  try {
+    const { port } = instance.address();
+    const ready = await fetchJson(`http://127.0.0.1:${port}/health/ready`);
+    assert.equal(ready.status, 200);
+    assert.equal(ready.body.commitSha, 'unknown');
   } finally {
     await instance.stop();
   }

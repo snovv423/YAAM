@@ -20,6 +20,36 @@ function esc(value) {
     .replace(/'/g, '&#39;');
 }
 
+// Тестовая маркировка HQ (HQ_ENV_LABEL) — намеренно читает process.env
+// НАПРЯМУЮ, а не принимает параметром: layout() вызывается из ~50 мест
+// (routes/hq/pages.js, restaurants.js, settlements.js, payouts.js), и
+// страница логина (routes/hq/auth.js) вообще не использует layout() —
+// протаскивать один и тот же флаг через сигнатуры всех этих функций было
+// бы как раз тем, что легко забыть на одной из страниц. Прямое чтение
+// здесь гарантирует "несъёмность" по построению: НИ ОДНА страница HQ не
+// может случайно забыть его вывести, потому что ни одна не решает это сама.
+// Production никогда не задаёт HQ_ENV_LABEL — значит там renderTestBanner()
+// всегда возвращает '', полностью безобидно (fail-safe в сторону "баннера
+// нет", не "баннер показан там, где не должен").
+const TEST_BANNER_HEIGHT_PX = 32;
+
+function renderTestBanner() {
+  const label = process.env.HQ_ENV_LABEL;
+  if (!label) return '';
+  // Текст — фиксированный, НЕ зависит от значения переменной (значение —
+  // только boolean-триггер показа); само значение допускается небольшой
+  // экранированной подсказкой в скобках, чтобы отличать несколько тестовых
+  // окружений друг от друга, если их когда-нибудь станет больше одного.
+  return `<div class="hq-test-banner" role="alert">ТЕСТОВЫЙ РЕЖИМ — ДАННЫЕ И ОПЕРАЦИИ НЕ РЕАЛЬНЫЕ (${esc(label)})</div>`;
+}
+
+// CSS, общий для layout() (авторизованные страницы) и routes/hq/auth.js
+// (страница логина, свой отдельный HTML) — единственное место, определяющее
+// геометрию баннера, чтобы оба шаблона не могли разойтись в отступах.
+function testBannerStyle() {
+  return `.hq-test-banner{position:fixed;top:0;left:0;right:0;z-index:5;height:${TEST_BANNER_HEIGHT_PX}px;line-height:${TEST_BANNER_HEIGHT_PX}px;background:#c0303c;color:#fff;font-weight:800;font-size:11px;letter-spacing:.02em;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:0 12px}`;
+}
+
 // Stage 2.1 — clean-root routing: ссылки строятся из linkBasePath ('/hq'
 // локально, '' за отдельным поддоменом hq.yaam.su) — см.
 // services/hq/basePath.js. Пункт «Обзор» — особый случай (корень раздела,
@@ -54,6 +84,16 @@ function layout({ title, active, body, csrfToken, linkBasePath = '/hq' }) {
     return `<a href="${item.href}" class="${isActive ? 'on' : ''}"${isActive ? ' aria-current="page"' : ''}>${esc(item.label)}</a>`;
   }).join('\n  ');
 
+  // HQ_ENV_LABEL — см. renderTestBanner() выше. bannerOffset сдвигает ВСЕ
+  // остальные фиксированные элементы (мобильный header/нижняя навигация)
+  // и обычный поток (desktop sidebar+main) ровно на высоту баннера — та же
+  // величина применяется везде ниже, поэтому относительные отступы между
+  // элементами не меняются, просто всё целиком сдвигается вниз. Когда
+  // баннера нет (production), bannerOffset=0 — ни одна из этих строк не
+  // производит видимого эффекта.
+  const testBannerHtml = renderTestBanner();
+  const bannerOffset = testBannerHtml ? TEST_BANNER_HEIGHT_PX : 0;
+
   return `<!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -64,7 +104,8 @@ function layout({ title, active, body, csrfToken, linkBasePath = '/hq' }) {
 <style>
   :root{--bg:#0A2417;--panel:#123322;--txt:#F1F7F2;--txt2:rgba(241,247,242,.62);--amber:#FF9A2E;--bord:rgba(255,255,255,.14);--danger:#FF7059;--ok:#34D38C}
   *{box-sizing:border-box}
-  body{font-family:-apple-system,Manrope,sans-serif;background:var(--bg);color:var(--txt);margin:0;padding:0;min-height:100vh}
+  ${testBannerHtml ? testBannerStyle() : ''}
+  body{font-family:-apple-system,Manrope,sans-serif;background:var(--bg);color:var(--txt);margin:0;padding:${bannerOffset}px 0 0;min-height:100vh}
   a{color:inherit}
   .shell{display:flex;min-height:100vh}
   .side{width:220px;flex-shrink:0;border-right:1px solid var(--bord);padding:20px 14px;display:flex;flex-direction:column}
@@ -168,7 +209,7 @@ function layout({ title, active, body, csrfToken, linkBasePath = '/hq' }) {
   @media (max-width: 760px){
     .side{display:none}
     main{padding:76px 16px 90px}
-    .mobile-top{display:flex;position:fixed;top:0;left:0;right:0;z-index:2;background:var(--bg);border-bottom:1px solid var(--bord);align-items:center;justify-content:space-between;padding:14px 16px}
+    .mobile-top{display:flex;position:fixed;top:${bannerOffset}px;left:0;right:0;z-index:2;background:var(--bg);border-bottom:1px solid var(--bord);align-items:center;justify-content:space-between;padding:14px 16px}
     .mobile-top .brand{font-weight:800;font-size:15px}
     .mobile-top .logout-form{padding:0}
     .mobile-top .logout-btn{width:auto;padding:8px 14px}
@@ -185,6 +226,7 @@ function layout({ title, active, body, csrfToken, linkBasePath = '/hq' }) {
 </style>
 </head>
 <body>
+${testBannerHtml}
 <div class="shell">
   <aside class="side">
     <div class="brand">YAAM HQ</div>
@@ -213,4 +255,6 @@ function layout({ title, active, body, csrfToken, linkBasePath = '/hq' }) {
 </html>`;
 }
 
-module.exports = { layout, esc, buildNavItems };
+module.exports = {
+  layout, esc, buildNavItems, renderTestBanner, testBannerStyle, TEST_BANNER_HEIGHT_PX,
+};
