@@ -14,6 +14,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { startEmbeddedPostgres } = require('./helpers/embeddedPg');
+const { projectTodayStr: todayStr } = require('./helpers/projectDate');
 
 const SCHEMA_SQL = fs.readFileSync(path.join(__dirname, '../../db/postgresql/schema.sql'), 'utf8');
 
@@ -162,12 +163,6 @@ async function addRefund(db, paymentId, { amount, status = 'succeeded', reason =
     [paymentId, amount, status, reason, key, status === 'succeeded' ? (completedAt || new Date()) : null],
   );
   return rows.rows[0].id;
-}
-
-function todayStr(offsetDays = 0) {
-  const d = new Date(Date.now() + offsetDays * 24 * 60 * 60 * 1000);
-  const pad = (n) => String(n).padStart(2, '0');
-  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
 }
 
 // ---------------------------------------------------------------------------

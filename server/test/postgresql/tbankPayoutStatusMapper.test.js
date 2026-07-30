@@ -10,6 +10,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { startEmbeddedPostgres } = require('./helpers/embeddedPg');
+const { projectTodayStr: todayStr } = require('./helpers/projectDate');
 
 const SCHEMA_SQL = fs.readFileSync(path.join(__dirname, '../../db/postgresql/schema.sql'), 'utf8');
 
@@ -76,12 +77,6 @@ async function createOrderRow(db, { restaurantId, status, itemsTotal = 1000, com
 async function addSucceededPayment(db, orderId, amount) {
   const rows = await db.execute(`INSERT INTO payments (order_id, amount, status) VALUES ($1,$2,'succeeded') RETURNING id`, [orderId, amount]);
   return rows.rows[0].id;
-}
-
-function todayStr(offsetDays = 0) {
-  const d = new Date(Date.now() + offsetDays * 24 * 60 * 60 * 1000);
-  const pad = (n) => String(n).padStart(2, '0');
-  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
 }
 
 async function closedPeriodWithEarnings(db, settlementService, restaurantId, { itemsTotal = 1000, commissionAmount = 70 } = {}) {

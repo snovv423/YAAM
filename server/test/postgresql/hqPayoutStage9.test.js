@@ -13,6 +13,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { startEmbeddedPostgres } = require('./helpers/embeddedPg');
+const { projectTodayStr: todayStr } = require('./helpers/projectDate');
 
 const SCHEMA_SQL = fs.readFileSync(path.join(__dirname, '../../db/postgresql/schema.sql'), 'utf8');
 const OLD_STAGE9_SCHEMA_SQL = fs.readFileSync(
@@ -239,12 +240,6 @@ async function seedRestaurantPayoutReadiness(db, restaurantId, { defaultPurpose 
      VALUES ($1, $2, '2026-01-01', 'signed')`,
     [restaurantId, `Д-${restaurantId}`],
   );
-}
-
-function todayStr(offsetDays = 0) {
-  const d = new Date(Date.now() + offsetDays * 24 * 60 * 60 * 1000);
-  const pad = (n) => String(n).padStart(2, '0');
-  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
 }
 
 // Готовит закрытый период с одним заработанным заказом на ресторан — общая
