@@ -588,7 +588,11 @@ test('D2: nginx staging защищает capability-ссылки и не рас�
   const conf = fs.readFileSync(path.join(DEPLOY_DIR, 'nginx-yaam-staging.conf.template'), 'utf8');
 
   // Токен документа находится в пути — он не должен попасть в access_log.
-  assert.match(conf, /location \/d\/[\s\S]*?access_log off;/);
+  // "^~" обязателен: иначе regex-location перехватил бы запрос раньше и вернул
+  // сырой URI в общий лог (Stage 19.1, пункт 3 — реально найдено на hqtest).
+  assert.match(conf, /location \^~ \/d\/[\s\S]*?access_log off;/);
+  assert.match(conf, /location \^~ \/d\/[\s\S]*?Referrer-Policy "no-referrer"/);
+  assert.match(conf, /location \^~ \/d\/[\s\S]*?X-Robots-Tag "noindex, nofollow, noarchive"/);
   assert.match(conf, /autoindex off;/);
   assert.match(conf, /server_tokens off;/);
   assert.match(conf, /Strict-Transport-Security/);
@@ -796,14 +800,14 @@ test('MB2: изменение schema.sql не меняет смысл уже п�
   }
 });
 
-test('MB3: пустая база проходит строго 0001 -> 0002, объекты создаются по одному разу', async () => {
+test('MB3: пустая база проходит строго 0001 -> 0002 -> 0003 -> 0004, объекты создаются по одному разу', async () => {
   const databaseUrl = await freshDatabase('infra_mb3', { applySchema: false });
   process.env.DATABASE_URL = databaseUrl;
   const { db, migrator } = requireFresh();
 
   const result = await migrator.migrate({ logger: quietLogger });
   const order = result.applied.map((a) => a.version);
-  assert.deepEqual(order, [1, 2, 3], 'строгий порядок baseline -> 0002 -> 0003');
+  assert.deepEqual(order, [1, 2, 3, 4], 'строгий порядок baseline -> 0002 -> 0003 -> 0004');
   // Ни одна миграция на пустой базе не «отмечается» — все выполняются.
   assert.ok(result.applied.every((a) => a.adopted === false));
 
@@ -937,11 +941,20 @@ test('MB8: будущая миграция после baseline применяе�
         path.join(dir, f.file),
       );
     }
-    fs.writeFileSync(path.join(dir, '0004_future_probe.sql'),
+    // Номер берётся ЗА пределами реального каталога: иначе проба столкнулась
+    // бы с настоящей миграцией того же номера и тест проверял бы не механику,
+    // а собственную коллизию.
+    const nextVersion = files[files.length - 1].version + 1;
+    const probe = `${String(nextVersion).padStart(4, '0')}_future_probe.sql`;
+    fs.writeFileSync(path.join(dir, probe),
       'CREATE TABLE mb8_future (id INTEGER PRIMARY KEY);\n');
 
     const listed = migrator.listMigrationFiles(dir);
-    assert.deepEqual(listed.map((m) => m.version), [1, 2, 3, 4], 'порядок по номеру');
+    assert.deepEqual(
+      listed.map((m) => m.version),
+      [...files.map((f) => f.version), nextVersion],
+      'порядок по номеру',
+    );
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

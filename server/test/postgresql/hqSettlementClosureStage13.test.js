@@ -927,11 +927,19 @@ test('T7: GET /d/:token — 200 на валидном, 404 на мусорном
     // Документ отдан, но токен в тело страницы не попадает.
     assert.ok(!html.includes(issued.token), 'токен не должен возвращаться в теле');
     assert.equal(ok.headers.get('cache-control'), 'no-store, private');
-    assert.match(ok.headers.get('x-robots-tag') || '', /noindex/);
+    assert.equal(ok.headers.get('referrer-policy'), 'no-referrer');
+    // noarchive обязателен: без него поисковик, которому URL всё же достался,
+    // сохранит копию документа и после отзыва токена (Stage 19.1, пункт 3).
+    assert.equal(ok.headers.get('x-robots-tag'), 'noindex, nofollow, noarchive');
 
     // Мусорный токен.
     const bad = await fetch(`${base}/d/не-токен`);
     assert.equal(bad.status, 404);
+    // Страница отказа живёт по тому же URL с тем же секретом внутри, поэтому
+    // защитные заголовки нужны и на ней, а не только на успешном ответе.
+    assert.equal(bad.headers.get('referrer-policy'), 'no-referrer');
+    assert.equal(bad.headers.get('x-robots-tag'), 'noindex, nofollow, noarchive');
+    assert.equal(bad.headers.get('cache-control'), 'no-store, private');
 
     // Формально валидный, но несуществующий — тот же ответ, что и мусорный:
     // разница помогала бы перебору.
@@ -1083,5 +1091,62 @@ test('K7: дыра между закрытыми периодами подхва
   const periods = await db.query('SELECT * FROM settlement_periods ORDER BY period_from');
   assert.equal(periods.length, 3);
   assert.equal(periods.every((p) => p.status === 'closed'), true);
+  await db.close();
+});
+
+// Stage 19.1, пункт 4. Воспроизводит РЕАЛЬНОЕ состояние hqtest: внутри недели
+// лежат однодневные периоды, созданные вручную на раннем этапе. Детектор
+// сравнивал недели по равенству period_from и такие периоды не видел, поэтому
+// job каждые 15 минут пытался вставить неделю и каждый раз получал отказ от
+// EXCLUDE-ограничения. Неделя обязана уходить в blocked, а не в failed, и
+// диагностика — писаться один раз, а не на каждый запуск.
+test('K8: неделя, пересечённая однодневными периодами, блокируется без повторяющейся ошибки', async () => {
+  const databaseUrl = await freshDatabase('closure_k8');
+  process.env.DATABASE_URL = databaseUrl;
+  const { db, weekly } = requireFresh();
+  const restId = await createRestaurant(db, 'Кафе Пересечение');
+  await seedYaam(db);
+  await seedLegal(db, restId);
+
+  // Активность внутри недели 27.07–02.08.
+  await order(db, restId, { itemsTotal: 1000, commissionAmount: 70, deliveredAt: msk(2026, 7, 30, 12, 0) });
+
+  // Однодневные периоды ВНУТРИ этой недели — как на hqtest.
+  await db.execute(
+    `INSERT INTO settlement_periods (period_from, period_to, status, closed_at)
+     VALUES ('2026-07-30','2026-07-30','closed',NOW()),
+            ('2026-07-31','2026-07-31','closed',NOW())`,
+  );
+
+  const first = await weekly.runWeeklySettlementJob({ now: msk(2026, 8, 3, 7, 30), generateDocuments: false });
+  assert.equal(first.failed.length, 0, 'блокировка не должна выглядеть как сбой выполнения');
+  assert.equal(first.queued, 0, 'заблокированная неделя не ставится в очередь');
+  assert.equal(first.blocked.length, 1);
+  assert.equal(dstr(first.blocked[0].periodFrom), '2026-07-27');
+  assert.equal(dstr(first.blocked[0].periodTo), '2026-08-02');
+  assert.equal(first.blocked[0].overlaps.length, 2);
+
+  // Существующие периоды не тронуты.
+  const periods = await db.query('SELECT * FROM settlement_periods ORDER BY period_from');
+  assert.equal(periods.length, 2, 'job не создал и не удалил ни одного периода');
+
+  // Диагностика записана ровно один раз, а повтор запуска её НЕ дублирует.
+  const afterFirst = await db.query(
+    "SELECT COUNT(*)::int AS n FROM hq_audit_log WHERE action = 'settlement_week_blocked'",
+  );
+  assert.equal(afterFirst[0].n, 1);
+
+  await weekly.runWeeklySettlementJob({ now: msk(2026, 8, 3, 7, 45), generateDocuments: false });
+  await weekly.runWeeklySettlementJob({ now: msk(2026, 8, 3, 8, 0), generateDocuments: false });
+  const afterRepeat = await db.query(
+    "SELECT COUNT(*)::int AS n FROM hq_audit_log WHERE action = 'settlement_week_blocked'",
+  );
+  assert.equal(afterRepeat[0].n, 1, 'повторные запуски не должны множить одну и ту же диагностику');
+
+  // И ни одного settlement_job_failed — прежнее поведение писало его каждый раз.
+  const failures = await db.query(
+    "SELECT COUNT(*)::int AS n FROM hq_audit_log WHERE action = 'settlement_job_failed'",
+  );
+  assert.equal(failures[0].n, 0);
   await db.close();
 });

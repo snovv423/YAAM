@@ -2352,6 +2352,9 @@ ALTER TABLE hq_audit_log ADD CONSTRAINT hq_audit_log_action_check CHECK (action 
   'fiscal_receipt_retried',
   'settlement_backlog_queued',
   'settlement_backlog_deferred',
+  -- Stage 19.1: неделю нельзя закрыть из-за пересечения с существующим
+  -- периодом. Состояние, требующее решения владельца, а не сбой job.
+  'settlement_week_blocked',
   'settlement_carry_forward_applied',
   'settlement_carry_forward_accrued',
   'settlement_document_token_issued',

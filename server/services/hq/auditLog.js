@@ -111,6 +111,10 @@ const ACTIONS = [
   'fiscal_receipt_retried',
   'settlement_backlog_queued',
   'settlement_backlog_deferred',
+  // Stage 19.1: неделю нельзя закрыть, потому что её диапазон пересекается с
+  // уже существующим периодом. Это состояние, требующее решения владельца, а
+  // не сбой выполнения; пишется один раз на изменение состава блокировок.
+  'settlement_week_blocked',
   'settlement_carry_forward_applied',
   'settlement_carry_forward_accrued',
   'settlement_document_token_issued',

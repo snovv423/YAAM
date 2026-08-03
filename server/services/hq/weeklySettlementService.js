@@ -141,6 +141,9 @@ async function findDueWeeks(now = new Date()) {
   }
 
   const due = [];
+  // Недели, которые закрыть НЕВОЗМОЖНО без решения владельца (см. ниже).
+  // Возвращаются отдельно от очереди: это не ошибка выполнения, а состояние.
+  const blocked = [];
   for (const periodFrom of [...candidates].sort()) {
     const mondayLocal = new Date(`${periodFrom}T00:00:00Z`);
     const periodTo = formatDateOnly(new Date(mondayLocal.getTime() + 6 * MS_PER_DAY));
@@ -156,13 +159,38 @@ async function findDueWeeks(now = new Date()) {
       continue;
     }
 
+    // ЧАСТИЧНОЕ ПЕРЕСЕЧЕНИЕ. Совпадения по period_from недостаточно: в базе
+    // может лежать период с ДРУГОЙ границей, который тем не менее пересекает
+    // эту неделю (например, однодневные периоды 30.07 и 31.07 внутри недели
+    // 27.07–02.08, созданные вручную на раннем этапе). Ограничение БД
+    // EXCLUDE USING gist (daterange && ) считает по пересечению диапазонов, а
+    // детектор считал по равенству начала — из-за этого расхождения job
+    // каждый раз пытался вставить неделю и каждый раз получал отказ.
+    //
+    // Такая неделя НЕ ставится в очередь: закрыть её нельзя, пока владелец не
+    // решит, что делать с пересекающимися периодами. Автоматически ни удалять,
+    // ни изменять их нельзя — в них закрытые финансовые строки.
+    const overlapping = existingRows.filter(
+      (row) => dateOnly(row.period_from) <= periodTo && dateOnly(row.period_to) >= periodFrom,
+    );
+    if (overlapping.length > 0) {
+      blocked.push({
+        periodFrom,
+        periodTo,
+        overlaps: overlapping
+          .map((row) => `#${row.id} ${dateOnly(row.period_from)}–${dateOnly(row.period_to)} (${row.status})`)
+          .sort(),
+      });
+      continue;
+    }
+
     due.push({ periodFrom, periodTo, existingId: null });
   }
 
   // От СТАРЫХ к новым: пропущенные недели обязаны закрываться в
   // хронологическом порядке, иначе перенос долга (carry-forward) лёг бы не в
   // тот период.
-  return due;
+  return { due, blocked };
 }
 
 // DATE из pg приходит либо строкой, либо Date — нормализуем к 'YYYY-MM-DD'.
@@ -274,9 +302,15 @@ async function runWeeklySettlementJob({ now = new Date(), generateDocuments = tr
 
     await logAuditEvent({ action: 'settlement_job_started', restaurantId: null, details: null, ip: null });
 
-    const allDue = await findDueWeeks(now);
+    const { due: allDue, blocked } = await findDueWeeks(now);
     const closed = [];
     const failed = [];
+
+    // Заблокированные недели фиксируются РОВНО ОДИН РАЗ на каждое изменение
+    // состава блокировки, а не на каждый запуск job. Раньше такая неделя
+    // попадала в очередь, падала на ограничении БД и писала одну и ту же
+    // ошибку каждые 15 минут — шум, в котором утонула бы настоящая авария.
+    await reportBlockedWeeks(blocked);
 
     // ПАКЕТ: самые старые недели первыми. Хронологический порядок обязателен —
     // перенос долга ресторана между периодами (carry-forward) считается по
@@ -344,11 +378,12 @@ async function runWeeklySettlementJob({ now = new Date(), generateDocuments = tr
 
     await logAuditEvent({
       action: 'settlement_job_finished', restaurantId: null,
-      details: `закрыто периодов: ${closed.length}, с ошибкой: ${failed.length}, осталось в очереди: ${deferred.length}`,
+      details: `закрыто периодов: ${closed.length}, с ошибкой: ${failed.length}, осталось в очереди: ${deferred.length}`
+        + (blocked.length > 0 ? `, заблокировано недель: ${blocked.length}` : ''),
       ip: null,
     });
     return {
-      skipped: false, closed, failed,
+      skipped: false, closed, failed, blocked,
       queued: allDue.length, processed: batch.length, remaining: deferred.length,
       remainingWeeks: deferred,
     };
@@ -362,6 +397,45 @@ async function runWeeklySettlementJob({ now = new Date(), generateDocuments = tr
     }
     lockClient.release();
   }
+}
+
+// Диагностика заблокированных недель — РОВНО ОДНА запись на состояние, а не
+// одна на запуск. Дедупликация идёт по аудиту, а не по переменной в памяти:
+// иначе каждый рестарт сервиса начинал бы шуметь заново.
+//
+// Состояние «заблокировано» НЕ является ошибкой выполнения: job отработал
+// корректно и честно сообщил, что неделю нельзя закрыть без решения владельца.
+// Поэтому уровень — warn, а не error, и в failed эта неделя не попадает.
+async function reportBlockedWeeks(blocked) {
+  if (blocked.length === 0) return { reported: false, reason: 'nothing_blocked' };
+
+  // Подпись состояния: если состав блокировок не менялся — повторно не пишем.
+  const signature = blocked
+    .map((b) => `${b.periodFrom}–${b.periodTo} << ${b.overlaps.join(', ')}`)
+    .join(' | ');
+
+  try {
+    const previous = await db.query(
+      `SELECT details FROM hq_audit_log
+        WHERE action = 'settlement_week_blocked'
+        ORDER BY id DESC LIMIT 1`,
+    );
+    if (previous[0] && previous[0].details === signature) {
+      return { reported: false, reason: 'unchanged', signature };
+    }
+  } catch (err) {
+    // Не смогли прочитать аудит — сообщаем, дубль безопаснее молчания.
+    console.error('[weeklySettlement] не удалось проверить дубль блокировки:', err.message);
+  }
+
+  console.warn(
+    `[weeklySettlement] недель заблокировано пересекающимися периодами: ${blocked.length}. `
+    + `Требуется решение владельца. ${signature}`,
+  );
+  await logAuditEvent({
+    action: 'settlement_week_blocked', restaurantId: null, details: signature, ip: null,
+  });
+  return { reported: true, signature };
 }
 
 // Ленивый require — documentService зависит от settlementService, а тот от

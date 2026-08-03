@@ -71,10 +71,13 @@ server {
     # --- Capability-ссылки на расчётные документы --------------------------
     # Токен находится В ПУТИ, поэтому access_log для этого location выключен:
     # иначе секрет оседал бы в логах Nginx в открытом виде.
-    location /d/ {
+    # "^~" обязателен: без него любой regex-location перехватил бы запрос
+    # раньше и вернул бы сырой URI с токеном обратно в общий access_log.
+    location ^~ /d/ {
         access_log off;
         add_header Cache-Control "no-store, private" always;
-        add_header X-Robots-Tag "noindex, nofollow" always;
+        add_header Referrer-Policy "no-referrer" always;
+        add_header X-Robots-Tag "noindex, nofollow, noarchive" always;
         proxy_pass http://127.0.0.1:${YAAM_APP_PORT};
     }
 

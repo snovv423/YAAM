@@ -29,6 +29,7 @@ const documentLimiter = rateLimit({
   handler: (req, res) => {
     // В лог идут ip и путь БЕЗ токена: originalUrl содержал бы секрет.
     console.warn(`[documents] rate-limit ip=${req.ip} time=${new Date().toISOString()}`);
+    setCapabilityResponseHeaders(res);
     res.status(429).type('text/plain; charset=utf-8')
       .send('Слишком много запросов — попробуйте чуть позже.');
   },
@@ -47,8 +48,23 @@ const MESSAGES = {
   expired: ['Срок действия ссылки истёк. Запросите новую ссылку у YAAM.', 410],
 };
 
+// Токен находится В ПУТИ URL, поэтому защитные заголовки нужны на КАЖДОМ
+// ответе этого роута, а не только на успешном: страница «ссылка
+// недействительна» рендерится по тому же адресу с тем же секретом внутри, и
+// referrer/кэш утекли бы с неё точно так же.
+function setCapabilityResponseHeaders(res) {
+  // Токен персональный — никаких копий у посредников и в истории браузера.
+  res.set('Cache-Control', 'no-store, private');
+  // Без этого любой внешний ресурс на странице получил бы токен в Referer.
+  res.set('Referrer-Policy', 'no-referrer');
+  // noarchive — чтобы поисковик, которому URL всё же достался, не сохранил
+  // копию документа в кэше уже после отзыва или истечения токена.
+  res.set('X-Robots-Tag', 'noindex, nofollow, noarchive');
+}
+
 router.get('/:token', documentLimiter, async (req, res, next) => {
   try {
+    setCapabilityResponseHeaders(res);
     const result = await accessService.resolveToken(req.params.token, { ip: req.ip });
     if (!result.ok) {
       const [message, status] = MESSAGES[result.reason] || MESSAGES.not_found;
@@ -63,10 +79,6 @@ router.get('/:token', documentLimiter, async (req, res, next) => {
       );
     }
 
-    // Токен не даёт кэшировать документ у посредников: он персональный.
-    res.set('Cache-Control', 'no-store, private');
-    res.set('Referrer-Policy', 'no-referrer');
-    res.set('X-Robots-Tag', 'noindex, nofollow');
     return res.type('text/html; charset=utf-8').send(renderDocument(result.document));
   } catch (err) {
     return next(err);
