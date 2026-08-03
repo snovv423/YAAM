@@ -1250,7 +1250,7 @@ test('Stage9.5 #19c: POST prepare без CSRF-токена отклоняетс�
   }
 });
 
-test('Stage9.5 #19d: карточка выплаты показывает историю попыток и НЕ содержит кнопок «Выплатить»/«Отправить»/«Повторить»', async () => {
+test('Stage9.5 #19d: карточка выплаты показывает историю попыток и НЕ содержит кнопок «Выплатить»/«Отправить»/«Повторить» (T-Bank по-прежнему не подключён)', async () => {
   const databaseUrl = await freshDatabase('hq_detail_no_buttons');
   const { instance, base } = await startApp(databaseUrl);
   try {
@@ -1271,9 +1271,18 @@ test('Stage9.5 #19d: карточка выплаты показывает ист
     assert.equal(detailRes.status, 200);
     assert.ok(html.includes(attempt.payment_id), 'история попыток должна показывать payment_id');
     assert.ok(html.includes('тестовая причина отказа'), 'причина ошибки должна быть видна');
-    for (const forbidden of ['Выплатить', 'Отправить в банк', 'Повторить попытку', 'value="submit_attempt"', 'action="/hq/payouts']) {
+    // T-Bank по-прежнему не подключён (Stage 25, задание: "не подключать
+    // Т-Банк") — этих кнопок карточка не должна содержать НИКОГДА.
+    for (const forbidden of ['Выплатить', 'Отправить в банк', 'Повторить попытку', 'value="submit_attempt"']) {
       assert.ok(!html.includes(forbidden), `карточка не должна содержать "${forbidden}"`);
     }
+    // Stage 25, раздел 1: retryable=true возвращает обязательство в
+    // 'prepared', поэтому единственное write-действие карточки — ручное
+    // подтверждение уже совершённого владельцем перевода — теперь ОБЯЗАНО
+    // присутствовать (это не T-Bank-кнопка: форма ведёт на /confirm-manual,
+    // не на /submit-attempt или /retry).
+    assert.ok(html.includes(`action="/hq/payouts/${payout.id}/confirm-manual"`), 'должна быть форма ручного подтверждения выплаты в статусе prepared');
+    assert.ok(html.includes('Отметить выплаченной'), 'должна быть подпись действия ручного подтверждения');
   } finally {
     await stopApp(instance);
   }

@@ -10,7 +10,7 @@
 // отправки/повтора.
 // Тот же общий стиль панелей/таблиц, что и hq/settlementViews.js (Stage 8).
 const { esc } = require('./layout');
-const { STATUS_LABELS, ATTEMPT_STATUS_LABELS } = require('../services/hq/payoutService');
+const { STATUS_LABELS, ATTEMPT_STATUS_LABELS, ATTEMPT_METHOD_LABELS } = require('../services/hq/payoutService');
 const { READINESS_REASONS } = require('../services/hq/tbankPayoutReadiness');
 const { maskAccountForUi } = require('../services/hq/ruRequisites');
 
@@ -148,6 +148,51 @@ function renderReadinessSection({ readiness }) {
     </div>`;
 }
 
+// Stage 25 — единственное write-действие на карточке выплаты: подтверждение
+// уже совершённого владельцем перевода. Показывается ТОЛЬКО когда
+// status === 'prepared' (задание: "нельзя подтвердить заблокированную или
+// неподготовленную выплату" — на любом другом статусе кнопки нет вовсе,
+// сервер проверяет это же условие независимо).
+function renderManualConfirmSection({ payout, pendingRequisitesPreview, linkBasePath, csrfToken, error }) {
+  if (payout.status !== 'prepared') return '';
+  const base = `${linkBasePath}/payouts/${payout.id}`;
+
+  const requisitesRows = pendingRequisitesPreview
+    ? `
+      <tr><td>Получатель</td><td style="text-align:right">${esc(pendingRequisitesPreview.recipient_name)}</td></tr>
+      <tr><td>Банк получателя</td><td style="text-align:right">${esc(pendingRequisitesPreview.bank_name)}</td></tr>
+      <tr><td>Счёт получателя</td><td style="text-align:right">${esc(maskAccountForUi(pendingRequisitesPreview.account_number))}</td></tr>`
+    : `<tr><td colspan="2">Банковские реквизиты ресторана не заполнены — подтвердить нельзя, пока их не внесут в карточку ресторана.</td></tr>`;
+
+  return `
+    <div class="panel">
+      <div class="panel-title">Отметить выплаченной</div>
+      ${error ? `<div class="error" style="margin-bottom:12px">${esc(error)}</div>` : ''}
+      <div class="empty-state" style="margin-bottom:12px">
+        Это действие подтверждает УЖЕ СОВЕРШЁННЫЙ вами перевод через банк-клиент —
+        YAAM деньги не отправляет и банк не задействован. Проверьте реквизиты ниже
+        перед подтверждением: ${money(payout.amount)} ресторану «${esc(payout.restaurant_name)}»
+        за период ${esc(formatDateOnly(payout.period_from))} — ${esc(formatDateOnly(payout.period_to))}.
+      </div>
+      <table style="margin-bottom:14px">${requisitesRows}</table>
+      ${pendingRequisitesPreview ? `
+      <form method="post" action="${base}/confirm-manual"
+            onsubmit="return confirm('Подтвердить, что перевод ${money(payout.amount)} ресторану «${esc(payout.restaurant_name)}» уже выполнен?')">
+        <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
+        <label>Дата и время платежа
+          <input type="datetime-local" name="paid_at" required>
+        </label>
+        <label>Номер платёжного поручения / банковской операции
+          <input type="text" name="operation_reference" maxlength="64" required placeholder="Например, 000123">
+        </label>
+        <label>Комментарий (необязательно)
+          <textarea name="comment" maxlength="300" rows="2"></textarea>
+        </label>
+        <button type="submit">Отметить выплаченной</button>
+      </form>` : ''}
+    </div>`;
+}
+
 // Маскированный снимок реквизитов конкретной попытки (задание, раздел 5/10:
 // "snapshot реквизитов попытки в маскированном виде"; раздел 3: "read-only
 // overview показывает маскированные значения"). requisites — строка
@@ -170,7 +215,10 @@ function renderAttemptRequisites(requisites) {
 // Карточка выплаты (задание: "ресторан, период, сумму, статус, все даты,
 // заметки, внешний id (если появится)")
 // ---------------------------------------------------------------------------
-function renderPayoutDetail({ payout, attempts = [], requisitesByAttemptId = new Map(), readiness = null, linkBasePath }) {
+function renderPayoutDetail({
+  payout, attempts = [], requisitesByAttemptId = new Map(), readiness = null, linkBasePath,
+  csrfToken = '', error = null, pendingRequisitesPreview = null,
+}) {
   const attemptBlocks = attempts.length
     ? attempts.map((a) => `
       <li class="attempt-row">
@@ -178,8 +226,10 @@ function renderPayoutDetail({ payout, attempts = [], requisitesByAttemptId = new
           <span class="attempt-number">Попытка ${a.attempt_number}</span>
           <span class="status-badge ${attemptTone(a.status)}">${esc(ATTEMPT_STATUS_LABELS[a.status] || a.status)}</span>
         </div>
+        <div class="payout-row-sub">Способ: ${esc(ATTEMPT_METHOD_LABELS[a.method] || a.method)}${a.confirmed_by ? ` · Подтвердил: ${esc(a.confirmed_by)}` : ''}</div>
         <div class="payout-row-sub">Создана: ${esc(formatDateTime(a.created_at))}${a.request_started_at ? ` · Отправлена: ${esc(formatDateTime(a.request_started_at))}` : ''}${a.completed_at ? ` · Завершена: ${esc(formatDateTime(a.completed_at))}` : (a.failed_at ? ` · Ошибка: ${esc(formatDateTime(a.failed_at))}` : '')}</div>
-        <div class="payout-row-sub">ID для сверки с банком: <code>${esc(a.payment_id)}</code></div>
+        <div class="payout-row-sub">Номер операции: <code>${esc(a.payment_id)}</code></div>
+        ${a.method === 'manual' ? '<div class="empty-state">Подтверждено вручную владельцем HQ — банк не задействован, YAAM деньги не пересылал.</div>' : ''}
         ${a.bank_status ? `<div class="payout-row-sub">Статус банка: ${esc(a.bank_status)}</div>` : ''}
         ${a.error_message ? `<div class="attempt-error">${esc(a.error_message)}${a.status === 'failed' ? ` · Повтор ${a.retryable ? 'допустим' : 'требует решения оператора'}` : ''}</div>` : ''}
         <details class="attempt-requisites">
@@ -203,6 +253,7 @@ function renderPayoutDetail({ payout, attempts = [], requisitesByAttemptId = new
         ${payout.external_payout_id ? `<tr><td>Внешний ID</td><td style="text-align:right">${esc(payout.external_payout_id)}</td></tr>` : ''}
       </table>
     </div>
+    ${renderManualConfirmSection({ payout, pendingRequisitesPreview, linkBasePath, csrfToken, error })}
     ${renderReadinessSection({ readiness })}
 
     <div class="panel">

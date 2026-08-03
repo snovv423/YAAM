@@ -629,6 +629,11 @@ function createPostgresqlApp({
       linkBasePath: resolvedHqLinkBasePath,
       mediaProvider,
       sessionStore: hqSessionStore,
+      // Stage 25 — ручная выдача ссылок на документы (routes/hq/settlements.js)
+      // нуждается в том же publicBaseUrl, что уже используется weeklySettlement-
+      // Scheduler выше по файлу для автоматических Telegram-уведомлений — тот
+      // же источник истины, не второй.
+      publicBaseUrl: env.PUBLIC_BACKEND_URL || null,
     }));
   } else {
     console.warn('[app-postgresql] HQ_SESSION_SECRET не задан — YAAM HQ недоступен, пока его не задать в .env');

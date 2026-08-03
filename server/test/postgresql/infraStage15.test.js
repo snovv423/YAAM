@@ -800,14 +800,16 @@ test('MB2: изменение schema.sql не меняет смысл уже п�
   }
 });
 
-test('MB3: пустая база проходит строго 0001..0005, объекты создаются по одному разу', async () => {
+test('MB3: пустая база проходит строго 0001..0006, объекты создаются по одному разу', async () => {
   const databaseUrl = await freshDatabase('infra_mb3', { applySchema: false });
   process.env.DATABASE_URL = databaseUrl;
   const { db, migrator } = requireFresh();
 
   const result = await migrator.migrate({ logger: quietLogger });
   const order = result.applied.map((a) => a.version);
-  assert.deepEqual(order, [1, 2, 3, 4, 5], 'строгий порядок baseline -> 0002 -> 0003 -> 0004 -> 0005');
+  // Stage 25 добавила аддитивную миграцию 0006 (ручное подтверждение выплаты +
+  // восстановление категории вместе с блюдами) — порядок расширен, не изменён.
+  assert.deepEqual(order, [1, 2, 3, 4, 5, 6], 'строгий порядок baseline -> 0002 -> 0003 -> 0004 -> 0005 -> 0006');
   // Ни одна миграция на пустой базе не «отмечается» — все выполняются.
   assert.ok(result.applied.every((a) => a.adopted === false));
 

@@ -222,13 +222,15 @@ async function runSchemaAndInspect(t, databaseName) {
       assert.deepEqual(names, [...EXPECTED_TABLES].sort());
     });
 
-    await t.test('создаются все 52 внешних ключа', async () => {
+    await t.test('создаются все 53 внешних ключа', async () => {
+      // Stage 25 добавила один новый FK: menu_items.archived_with_category_id
+      // -> categories(id) (миграция 0006) — было 52, стало 53.
       const { rows } = await client.query(`
         SELECT count(*)::int AS n
         FROM information_schema.table_constraints
         WHERE constraint_schema = 'public' AND constraint_type = 'FOREIGN KEY'
       `);
-      assert.equal(rows[0].n, 52);
+      assert.equal(rows[0].n, 53);
     });
 
     await t.test('CHECK-ограничения присутствуют (>=12, включая новый на payments.status)', async () => {

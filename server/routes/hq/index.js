@@ -31,7 +31,10 @@ const { createRequireHqAuth } = require('./middleware');
 // Внутренний mount point роутера в services/postgresql/app.js ВСЕГДА '/hq' —
 // linkBasePath меняет только то, что сам роутер ПИШЕТ в свои же ответы
 // (redirect/href/form action/cookie path), не то, где Express его слушает.
-function createHqRouter({ sessionSecret, isProduction, linkBasePath, mediaProvider = null, sessionStore = null }) {
+function createHqRouter({
+  sessionSecret, isProduction, linkBasePath, mediaProvider = null, sessionStore = null,
+  publicBaseUrl = null,
+}) {
   if (!sessionSecret) {
     throw new Error('createHqRouter требует sessionSecret');
   }
@@ -86,7 +89,12 @@ function createHqRouter({ sessionSecret, isProduction, linkBasePath, mediaProvid
   // pagesRouter (тот же принцип, что и /restaurants выше), '/finance' САМ
   // ПО СЕБЕ (без /settlements) по-прежнему обрабатывается pagesRouter'ом
   // (существующий Stage 7 live-экран, только дополненный секцией периодов).
-  router.use('/finance/settlements', createRequireHqAuth(resolvedLinkBasePath), createSettlementsRouter({ linkBasePath: resolvedLinkBasePath }));
+  // Stage 25: publicBaseUrl нужен только для ручной выдачи ссылок на
+  // документы (issueDocumentLinks строит абсолютный /d/<token> URL) — без
+  // него createSettlementsRouter просто не показывает кнопку выдачи (см.
+  // routes/hq/settlements.js: canIssueDocumentLinks = Boolean(publicBaseUrl)),
+  // а не падает.
+  router.use('/finance/settlements', createRequireHqAuth(resolvedLinkBasePath), createSettlementsRouter({ linkBasePath: resolvedLinkBasePath, publicBaseUrl }));
   // YAAM HQ Stage 9: /payouts — read-only раздел (задание: "Пока Read
   // Only") + карточка выплаты, тот же принцип монтирования до pagesRouter.
   router.use('/payouts', createRequireHqAuth(resolvedLinkBasePath), createPayoutsRouter({ linkBasePath: resolvedLinkBasePath }));

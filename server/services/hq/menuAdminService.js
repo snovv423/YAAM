@@ -172,15 +172,41 @@ async function archiveCategory(restaurantId, categoryId) {
   return updated.rows[0] || null;
 }
 
-async function restoreCategory(restaurantId, categoryId) {
+// Stage 25 — закрытие Stage 24 MEDIUM-1: восстановление категории раньше
+// НИКОГДА не трогало блюда (даже те, что были заархивированы вместе с ней
+// через archiveCategoryWithItems) — категория возвращалась в рабочее меню
+// с 0 блюдами, и это выглядело как потеря данных. restoreLinkedItems даёт
+// владельцу явный выбор. Признак связи — archived_with_category_id
+// (проставляется в archiveCategoryWithItems), а НЕ совпадение archived_at:
+// два независимых archiveMenuItem() в разных запросах теоретически тоже
+// могут получить одинаковый NOW(), а явная ссылка не оставляет двусмысленности.
+// Блюда, заархивированные независимо ДО архивирования категории (archived_
+// with_category_id IS NULL), никогда не восстанавливаются автоматически —
+// именно это и обязано защищать это поле.
+async function restoreCategory(restaurantId, categoryId, { restoreLinkedItems = false } = {}) {
   const category = await getCategoryById(restaurantId, categoryId);
   if (!category) return null;
   if (!category.archived_at) throw new ValidationError('Категория не архивирована.');
-  const updated = await db.execute(
-    'UPDATE categories SET archived_at = NULL WHERE id = $1 AND restaurant_id = $2 RETURNING *',
-    [categoryId, restaurantId],
-  );
-  return updated.rows[0] || null;
+  return db.transaction(async (client) => {
+    const updated = await db.execute(
+      'UPDATE categories SET archived_at = NULL WHERE id = $1 AND restaurant_id = $2 RETURNING *',
+      [categoryId, restaurantId],
+      client,
+    );
+    let restoredItemsCount = 0;
+    if (restoreLinkedItems) {
+      const restoredItems = await db.execute(
+        `UPDATE menu_items
+            SET archived_at = NULL, archived_with_category_id = NULL, is_available = 0
+          WHERE restaurant_id = $1 AND archived_with_category_id = $2 AND archived_at IS NOT NULL
+          RETURNING id`,
+        [restaurantId, categoryId],
+        client,
+      );
+      restoredItemsCount = restoredItems.rows.length;
+    }
+    return { category: updated.rows[0] || null, restoredItemsCount };
+  });
 }
 
 // Перемещение — атомарный SWAP sort_order с соседней активной категорией
@@ -476,8 +502,13 @@ async function archiveCategoryWithItems(restaurantId, categoryId) {
   if (!category) return null;
   if (category.archived_at) throw new ValidationError('Категория уже архивирована.');
   return db.transaction(async (client) => {
+    // archived_with_category_id проставляется ЗДЕСЬ и только здесь (Stage 25)
+    // — это единственное место, где блюдо архивируется КАК СЛЕДСТВИЕ
+    // архивирования его категории. Блюда, уже архивированные независимо
+    // раньше (archived_at IS NULL исключает их из WHERE), эту метку не
+    // получают — restoreCategory обязана отличать одно от другого.
     await db.execute(
-      'UPDATE menu_items SET archived_at = NOW() WHERE category_id = $1 AND restaurant_id = $2 AND archived_at IS NULL',
+      'UPDATE menu_items SET archived_at = NOW(), archived_with_category_id = $1 WHERE category_id = $1 AND restaurant_id = $2 AND archived_at IS NULL',
       [category.id, restaurantId],
       client,
     );
@@ -547,10 +578,17 @@ async function listMenuArchive(restaurantId) {
      WHERE mi.restaurant_id = $1 AND mi.archived_at IS NOT NULL
      ORDER BY mi.archived_at DESC NULLS LAST, mi.id DESC
   `, [restaurantId]);
+  // linked_items_count — сколько СЕЙЧАС архивированных блюд провязаны с этой
+  // категорией через archived_with_category_id (Stage 25). Используется
+  // menuViews.renderMenuArchive, чтобы решить, показывать ли владельцу выбор
+  // из двух кнопок восстановления или только одну.
   const categories = await db.query(`
-    SELECT * FROM categories
-     WHERE restaurant_id = $1 AND archived_at IS NOT NULL
-     ORDER BY archived_at DESC NULLS LAST, id DESC
+    SELECT c.*,
+      (SELECT COUNT(*)::int FROM menu_items mi
+        WHERE mi.archived_with_category_id = c.id AND mi.archived_at IS NOT NULL) AS linked_items_count
+     FROM categories c
+     WHERE c.restaurant_id = $1 AND c.archived_at IS NOT NULL
+     ORDER BY c.archived_at DESC NULLS LAST, c.id DESC
   `, [restaurantId]);
   return { items, categories };
 }

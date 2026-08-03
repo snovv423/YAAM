@@ -123,7 +123,35 @@ function payoutCellLabel(l) {
   return { label: 'В обработке', tone: 'muted', date: null, reason: null };
 }
 
-function renderDocumentsBlock({ documents, period, linkBasePath }) {
+// Stage 25 — панель одноразового показа СВЕЖЕВЫПУЩЕННЫХ ссылок (закрытие
+// Stage 24 HIGH-2). Рендерится ТОЛЬКО в теле того самого POST-ответа, что
+// выпустил токены (routes/hq/settlements.js: renderPeriodDetail вызывается
+// напрямую, без redirect) — обновление страницы эту панель больше никогда не
+// покажет, потому что freshLinksByRestaurant не переживает сам HTTP-ответ.
+function renderFreshLinksPanel(restaurantId, restaurantName, links) {
+  const rows = links.map((l) => `
+    <li class="payout-row">
+      <div class="payout-row-main">
+        <div class="payout-row-name">${esc(l.text)}</div>
+        <div class="payout-row-sub"><code style="word-break:break-all">${esc(l.url)}</code></div>
+      </div>
+    </li>`).join('');
+  return `
+    <div class="panel">
+      <div class="panel-title">Ссылки для ${esc(restaurantName || `ресторана #${restaurantId}`)} — показаны один раз</div>
+      <div class="empty-state" style="margin-bottom:10px">
+        Скопируйте и передайте эти ссылки ресторану сейчас. Страница их больше не покажет —
+        при необходимости выпустите новые. Сама ссылка — это ключ доступа: передавайте её
+        так же аккуратно, как пароль, и только тому ресторану, которому она предназначена.
+      </div>
+      <ul class="payout-list">${rows}</ul>
+    </div>`;
+}
+
+function renderDocumentsBlock({
+  documents, period, linkBasePath, csrfToken = '', canIssueDocumentLinks = false,
+  freshLinksByRestaurant = null,
+}) {
   if (period.status !== 'closed') return '';
   const byRestaurant = new Map();
   for (const d of documents) {
@@ -131,9 +159,14 @@ function renderDocumentsBlock({ documents, period, linkBasePath }) {
     byRestaurant.get(d.restaurant_id)[d.kind] = d;
   }
 
+  const freshPanels = freshLinksByRestaurant
+    ? [...freshLinksByRestaurant.entries()].map(([restaurantId, links]) => {
+        const docs = byRestaurant.get(restaurantId) || {};
+        return renderFreshLinksPanel(restaurantId, restaurantNameFromDocs(docs), links);
+      }).join('')
+    : '';
+
   const rows = [...byRestaurant.entries()].map(([restaurantId, docs]) => {
-    const name = (docs.agent_report || docs.order_registry || {}).payload
-      ? null : null;
     const cell = (kind, label) => {
       const doc = docs[kind];
       if (!doc || doc.status !== 'generated') {
@@ -144,17 +177,30 @@ function renderDocumentsBlock({ documents, period, linkBasePath }) {
         <a class="btn ghost compact" href="${base}">Открыть</a>
         <a class="btn ghost compact" href="${base}?download=1">Скачать</a></span>`;
     };
-    void name;
+    // Кнопка выдачи ссылок доступна только когда есть хотя бы один реально
+    // сформированный документ — иначе POST сходил бы впустую и владелец
+    // получил бы только сообщение об ошибке вместо результата.
+    const hasGeneratedDoc = Object.values(docs).some((d) => d && d.status === 'generated');
+    const issueForm = canIssueDocumentLinks && hasGeneratedDoc
+      ? `
+        <form method="post" action="${linkBasePath}/finance/settlements/${period.id}/documents/${restaurantId}/issue-links"
+              onsubmit="return confirm('Выпустить новые защищённые ссылки на документы для этого ресторана? Ссылки будут показаны один раз.')">
+          <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
+          <button type="submit" class="ghost compact">Создать ссылки для ресторана</button>
+        </form>`
+      : '';
     return `
       <li class="payout-row">
         <div class="payout-row-main">
           <div class="payout-row-name">${esc(restaurantNameFromDocs(docs) || `Ресторан #${restaurantId}`)}</div>
           <div class="doc-actions">${cell('agent_report', 'Отчёт агента')}${cell('order_registry', 'Реестр заказов')}</div>
         </div>
+        ${issueForm}
       </li>`;
   }).join('');
 
   return `
+    ${freshPanels}
     <div class="panel">
       <div class="panel-title">Документы</div>
       <ul class="payout-list">${rows || '<li class="empty-state">Документы ещё не сформированы.</li>'}</ul>
@@ -173,7 +219,10 @@ function restaurantNameFromDocs(docs) {
     : null;
 }
 
-function renderSettlementPeriodDetail({ period, lines, preview, totals, csrfToken, linkBasePath, error, documents = [] }) {
+function renderSettlementPeriodDetail({
+  period, lines, preview, totals, csrfToken, linkBasePath, error, documents = [],
+  canIssueDocumentLinks = false, freshLinksByRestaurant = null,
+}) {
   const rows = lines.length
     ? lines.map((l) => {
         const payout = payoutCellLabel(l);
@@ -227,7 +276,9 @@ function renderSettlementPeriodDetail({ period, lines, preview, totals, csrfToke
       <ul class="payout-list">${rows}</ul>
     </div>
 
-    ${renderDocumentsBlock({ documents, period, linkBasePath })}
+    ${renderDocumentsBlock({
+      documents, period, linkBasePath, csrfToken, canIssueDocumentLinks, freshLinksByRestaurant,
+    })}
     <a class="btn ghost compact" href="${linkBasePath}/finance">← К финансам</a>
   `;
 }

@@ -49,6 +49,7 @@ const restaurantBankDetailsService = require('./restaurantBankDetailsService');
 const restaurantContractService = require('./restaurantContractService');
 const { buildPaymentPurpose } = require('./tbankPayoutReadiness');
 const { normalizeKppForTBank } = require('./tbankRequestMapper');
+const { PROJECT_TIMEZONE_OFFSET_MINUTES } = require('./dashboardMetrics');
 
 const OBLIGATION_STATUSES = ['prepared', 'processing', 'unknown', 'succeeded', 'blocked'];
 const OBLIGATION_TERMINAL_STATUSES = ['succeeded'];
@@ -527,6 +528,138 @@ async function markAttemptFailed(attemptId, { bankStatus = null, errorCode = nul
   });
 }
 
+// payment_id column: CHECK (char_length(payment_id) <= 64) — тот же предел,
+// что и у синтетических T-Bank id (generatePaymentId выше).
+const OPERATION_REFERENCE_MAX_LENGTH = 64;
+const MANUAL_PAYOUT_METHOD = 'manual';
+
+const ATTEMPT_METHOD_LABELS = {
+  tbank: 'Т-Банк',
+  manual: 'Ручное подтверждение владельцем',
+};
+
+// Форма отдаёт <input type="datetime-local"> — "YYYY-MM-DDTHH:mm", БЕЗ
+// часового пояса. `new Date(str)` в этом случае трактует строку как локальное
+// время ПРОЦЕССА СЕРВЕРА (ECMA-262) — то есть один и тот же ввод владельца
+// дал бы РАЗНЫЙ UTC на сервере в UTC и на сервере в Europe/Moscow. Здесь
+// строка разбирается явно как время ПРОЕКТА (тот же PROJECT_TIMEZONE_OFFSET_
+// MINUTES, что и весь остальной HQ — dashboardMetrics.js), не время процесса.
+function parseProjectLocalDateTime(value) {
+  const s = String(value || '').trim();
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(s);
+  if (!m) return null;
+  const [, y, mo, d, hh, mi, ss] = m;
+  const utcMs = Date.UTC(Number(y), Number(mo) - 1, Number(d), Number(hh), Number(mi), Number(ss || 0));
+  return new Date(utcMs - PROJECT_TIMEZONE_OFFSET_MINUTES * 60 * 1000);
+}
+
+// ---------------------------------------------------------------------------
+// confirmManualBankTransfer (Stage 25) — закрытие разрыва Stage 24 HIGH-1:
+// владелец перевёл деньги ресторану через свой банк-клиент вручную (T-Bank
+// ещё не подключён, задание, раздел 1) и должен зафиксировать этот факт в
+// YAAM. До этой функции выплата навсегда оставалась в 'prepared'.
+//
+// НЕ ВТОРОЙ ФИНАНСОВЫЙ КОНТУР. Обязательство проходит РОВНО ТЕ ЖЕ переходы,
+// что и будущая банковская попытка: prepared -> processing -> succeeded (обе
+// дуги уже разрешены fn_restaurant_payouts_valid_transition, схема не
+// менялась). Попытка вставляется СРАЗУ в 'succeeded' — это не обход
+// состояний: триггер payout_attempts ограничивает только UPDATE, не INSERT,
+// а для попытки, которую владелец описывает уже СОВЕРШЁННОЙ, промежуточных
+// "отправляется"/"в обработке банком" не было — утверждать обратное было бы
+// нечестно (задание: "нигде не написано, что YAAM сам отправил деньги через
+// банк").
+//
+// Реквизиты — тот же buildAndInsertAttemptRequisites, что и у банковской
+// попытки: без заполненных реквизитов и подписанного договора подтвердить
+// нельзя точно так же, как нельзя было бы отправить запрос в банк.
+//
+// completed_at (и попытки, и обязательства) — момент ФАКТИЧЕСКОГО платежа со
+// слов владельца (paidAt), а не момент клика в HQ: иначе поле лгало бы о
+// том, когда деньги на самом деле ушли.
+async function confirmManualBankTransfer(payoutId, {
+  operationReference, paidAt, confirmedBy = '',
+} = {}) {
+  const numericId = Number.parseInt(payoutId, 10);
+  if (!Number.isInteger(numericId) || numericId < 1) {
+    throw new ValidationError('Некорректный идентификатор выплаты.');
+  }
+
+  const trimmedRef = String(operationReference || '').trim();
+  if (!trimmedRef) {
+    throw new ValidationError('Номер платёжного поручения или банковской операции обязателен.');
+  }
+  if (trimmedRef.length > OPERATION_REFERENCE_MAX_LENGTH) {
+    throw new ValidationError(`Номер операции не должен превышать ${OPERATION_REFERENCE_MAX_LENGTH} символов.`);
+  }
+
+  // Строка формы ("YYYY-MM-DDTHH:mm") разбирается как время ПРОЕКТА
+  // (Europe/Moscow, PROJECT_TIMEZONE_OFFSET_MINUTES) — не время процесса
+  // сервера. Если значение уже Date (например, из теста), используем как
+  // есть — оно уже однозначно определено в UTC и повторная интерпретация
+  // строки к нему не относится.
+  const paidAtDate = paidAt instanceof Date ? paidAt : parseProjectLocalDateTime(paidAt);
+  if (!paidAt || !paidAtDate || Number.isNaN(paidAtDate.getTime())) {
+    throw new ValidationError('Укажите корректные дату и время платежа.');
+  }
+  // Небольшой запас на расхождение часов клиента/сервера — не строгая
+  // граница "ровно сейчас", а защита от очевидной опечатки в дате.
+  if (paidAtDate.getTime() > Date.now() + 5 * 60 * 1000) {
+    throw new ValidationError('Дата платежа не может быть в будущем.');
+  }
+
+  return db.transaction(async (client) => {
+    const payoutRows = await db.query('SELECT * FROM restaurant_payouts WHERE id = $1 FOR UPDATE', [numericId], client);
+    const payout = payoutRows[0];
+    if (!payout) throw new ValidationError('Выплата не найдена.');
+    if (payout.status !== 'prepared') {
+      throw new ValidationError(
+        `Отметить выплаченной вручную можно только выплату в статусе "${STATUS_LABELS.prepared}" `
+        + `(текущий статус: "${STATUS_LABELS[payout.status] || payout.status}").`,
+      );
+    }
+
+    // Обязательство: prepared -> processing. Та же дуга, что и первый шаг
+    // банковской попытки (markAttemptSubmitting) — используется тот же
+    // helper с той же защитой от гонки (conditional UPDATE + FOR UPDATE).
+    await transitionPayoutStatus(numericId, OBLIGATION_ACTIVE_ATTEMPT_ALLOWED_FROM, 'processing', client, ', processing_at = NOW()');
+
+    const nextNumberRows = await db.query(
+      `SELECT COALESCE(MAX(attempt_number), 0) + 1 AS next_number FROM payout_attempts WHERE payout_id = $1`,
+      [numericId], client,
+    );
+    const attemptNumber = nextNumberRows[0].next_number;
+
+    let inserted;
+    try {
+      inserted = await db.execute(
+        `INSERT INTO payout_attempts
+           (payout_id, attempt_number, payment_id, status, method, confirmed_by, completed_at, last_checked_at)
+         VALUES ($1,$2,$3,'succeeded',$4,$5,$6,NOW()) RETURNING *`,
+        [numericId, attemptNumber, trimmedRef, MANUAL_PAYOUT_METHOD, confirmedBy || '', paidAtDate],
+        client,
+      );
+    } catch (err) {
+      if (err.code === '23505') {
+        throw new ValidationError('Этот номер платёжного поручения уже использован для другой выплаты.');
+      }
+      throw err;
+    }
+    const attempt = inserted.rows[0];
+
+    // Иммутабельный снимок реквизитов — тот же механизм, что и у банковской
+    // попытки: без него владелец не смог бы даже увидеть, куда переводить.
+    await buildAndInsertAttemptRequisites(client, payout, attempt.id);
+
+    // Обязательство: processing -> succeeded. completed_at = ФАКТИЧЕСКИЙ
+    // момент платежа (paidAt), не NOW().
+    const updatedPayout = await transitionPayoutStatus(
+      numericId, ['processing'], 'succeeded', client, ', completed_at = $4', [paidAtDate],
+    );
+
+    return { payout: updatedPayout, attempt };
+  });
+}
+
 async function logPayoutBlockedEvent(payout) {
   const eventLogService = require('./eventLogService');
   const [row] = await db.query(`SELECT name FROM restaurants WHERE id = $1`, [payout.restaurant_id]);
@@ -541,14 +674,6 @@ async function logPayoutBlockedEvent(payout) {
 // ---------------------------------------------------------------------------
 // Чтение для UI
 // ---------------------------------------------------------------------------
-
-async function getPayoutForSettlementLine(settlementPeriodId, restaurantId) {
-  const rows = await db.query(
-    'SELECT * FROM restaurant_payouts WHERE settlement_period_id = $1 AND restaurant_id = $2',
-    [settlementPeriodId, restaurantId],
-  );
-  return rows[0] || null;
-}
 
 async function listPayoutsForPeriod(settlementPeriodId) {
   const rows = await db.query('SELECT * FROM restaurant_payouts WHERE settlement_period_id = $1', [settlementPeriodId]);
@@ -795,7 +920,10 @@ module.exports = {
   ATTEMPT_ACTIVE_STATUSES,
   ATTEMPT_TERMINAL_STATUSES,
   ATTEMPT_STATUS_LABELS,
+  ATTEMPT_METHOD_LABELS,
   MAX_ERROR_MESSAGE_LENGTH,
+  OPERATION_REFERENCE_MAX_LENGTH,
+  MANUAL_PAYOUT_METHOD,
   generatePaymentId,
   sanitizeErrorMessage,
   prepareRestaurantPayout,
@@ -805,11 +933,11 @@ module.exports = {
   markAttemptUnknown,
   markAttemptSucceeded,
   markAttemptFailed,
+  confirmManualBankTransfer,
   getPayoutById,
   getAttemptById,
   getAttemptRequisites,
   listAttemptsForPayout,
-  getPayoutForSettlementLine,
   listPayoutsForPeriod,
   listPayouts,
   getPayoutDetail,

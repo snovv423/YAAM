@@ -126,9 +126,9 @@ npm test
 cd server
 npm run test:postgresql
 
-# Клиентские тесты
+# Клиентские тесты (в client/ нет package.json — обычный node:test)
 cd client
-npm test
+node --test test/*.test.js
 
 # PostgreSQL staging application локально — только с безопасным env
 cd server

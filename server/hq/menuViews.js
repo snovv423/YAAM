@@ -193,19 +193,41 @@ function renderMenuArchive({ restaurant, archive, activeCategories, csrfToken, l
       </li>`;
   }).join('');
 
-  const categoryRows = archive.categories.map((c) => `
+  // Stage 25 — закрытие Stage 24 MEDIUM-1: если с категорией архивированы
+  // связанные блюда (linked_items_count > 0 из listMenuArchive, провязка —
+  // archived_with_category_id), владельцу нужен явный выбор, а не тихое
+  // «восстановили категорию — блюда пропали» или «восстановили категорию —
+  // и заодно что-то ещё чужое». Блюда, заархивированные независимо раньше,
+  // в это число не входят и второй кнопкой не восстанавливаются никогда.
+  const categoryRows = archive.categories.map((c) => {
+    const linkedCount = Number(c.linked_items_count) || 0;
+    const restoreButtons = linkedCount > 0
+      ? `
+        <form class="restore-form" method="post" action="${base}/categories/${c.id}/restore">
+          <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
+          <input type="hidden" name="restore_items" value="1">
+          <button type="submit" class="ghost compact">Восстановить категорию и ${linkedCount} ${pluralDishes(linkedCount)}</button>
+        </form>
+        <form class="restore-form" method="post" action="${base}/categories/${c.id}/restore">
+          <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
+          <button type="submit" class="ghost compact">Восстановить только категорию</button>
+        </form>`
+      : `
+        <form class="restore-form" method="post" action="${base}/categories/${c.id}/restore">
+          <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
+          <button type="submit" class="ghost compact">Восстановить</button>
+        </form>`;
+    return `
     <li class="dish-row archive-row">
       <div class="dish-link static">
         <span class="dish-main">
           <span class="dish-name">${esc(c.name)}</span>
-          <span class="dish-meta">Категория${c.archived_at ? ` · ${esc(formatArchivedAt(c.archived_at))}` : ''}</span>
+          <span class="dish-meta">Категория${c.archived_at ? ` · ${esc(formatArchivedAt(c.archived_at))}` : ''}${linkedCount > 0 ? ` · вместе с ней архивировано блюд: ${linkedCount}` : ''}</span>
         </span>
       </div>
-      <form class="restore-form" method="post" action="${base}/categories/${c.id}/restore">
-        <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
-        <button type="submit" class="ghost compact">Восстановить</button>
-      </form>
-    </li>`).join('');
+      ${restoreButtons}
+    </li>`;
+  }).join('');
 
   return `
     <h2>Архив меню</h2>

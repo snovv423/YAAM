@@ -186,7 +186,7 @@ function renderCreateForm({ values, error, linkBasePath, csrfToken }) {
         <button type="submit" id="rf-submit">Создать</button>
         ${error ? `<div class="error">${esc(error)}</div>` : ''}
       </form>
-      <div class="empty-state" style="margin-top:14px">Ресторан будет создан как черновик — клиентам не виден. Опубликуйте его на странице ресторана, когда данные будут готовы, затем откройте вручную для приёма заказов (управление меню появится на следующем этапе).</div>
+      <div class="empty-state" style="margin-top:14px">Ресторан будет создан как черновик — клиентам не виден. Опубликуйте его на странице ресторана, когда данные будут готовы, затем откройте вручную для приёма заказов.</div>
     </div>
   `;
 }

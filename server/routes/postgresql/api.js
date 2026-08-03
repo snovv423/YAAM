@@ -345,7 +345,21 @@ const ORDERS_COUNT_JOIN = `
     AND EXISTS (SELECT 1 FROM payments p WHERE p.order_id = o.id AND p.status = 'succeeded')
 `;
 
-router.get('/restaurants', async (req, res) => {
+// Stage 25 — закрытие Stage 24 MEDIUM-2: список/карточка ресторана уже
+// получают слабый ETag (Express res.json() по умолчанию), но без единого
+// явного Cache-Control браузер решает сам, сколько держать ответ в кэше —
+// на практике это давало задержку между сохранением в HQ и появлением
+// изменения у клиента. no-cache (НЕ no-store) означает «кэшируй, но всегда
+// сверься с сервером» — условный запрос с ETag по-прежнему может вернуть 304
+// и не тратить трафик, просто клиент больше не имеет права показать старый
+// ответ БЕЗ этой сверки. Фильтрация видимости (archived_at/published_at/
+// is_available) этим не затрагивается вообще.
+function setNoCacheHeader(req, res, next) {
+  res.set('Cache-Control', 'no-cache');
+  next();
+}
+
+router.get('/restaurants', setNoCacheHeader, async (req, res) => {
   try {
     const city = req.query.city;
     // YAAM HQ Stage 4: архивированный ресторан не должен появляться на
@@ -378,7 +392,7 @@ router.get('/restaurants', async (req, res) => {
   }
 });
 
-router.get('/restaurants/:id', async (req, res) => {
+router.get('/restaurants/:id', setNoCacheHeader, async (req, res) => {
   try {
     // Тот же фильтр, что и в списке выше (включая published_at IS NOT NULL,
     // Stage 4.1) — прямой запрос черновика/снятого с публикации/

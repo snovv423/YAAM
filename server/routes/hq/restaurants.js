@@ -535,13 +535,21 @@ function createRestaurantsRouter({ linkBasePath, mediaProvider = null }) {
     }
   });
 
+  // Stage 25 — закрытие Stage 24 MEDIUM-1: владелец явно выбирает
+  // restore_items=1 ("восстановить категорию и блюда") или ничего
+  // ("только категория") на странице архива (menuViews.renderMenuArchive
+  // рисует ДВЕ отдельные кнопки, когда есть связанные архивированные блюда).
+  // Блюда, заархивированные независимо ДО архивирования категории, этой
+  // опцией не восстанавливаются никогда — см. комментарий в restoreCategory.
   router.post('/:id/menu/categories/:categoryId/restore', requireCsrf, async (req, res, next) => {
     try {
-      const restored = await menuSvc.restoreCategory(req.restaurant.id, req.category.id);
-      if (restored) {
+      const restoreLinkedItems = req.body.restore_items === '1';
+      const result = await menuSvc.restoreCategory(req.restaurant.id, req.category.id, { restoreLinkedItems });
+      if (result && result.category) {
         await logAuditEvent({
           action: 'category_restored', restaurantId: req.restaurant.id,
-          details: `name: "${restored.name}"`, ip: req.ip,
+          details: `name: "${result.category.name}"${result.restoredItemsCount ? `, блюд восстановлено вместе с категорией: ${result.restoredItemsCount}` : ''}`,
+          ip: req.ip,
         });
       }
       res.redirect(`${linkBasePath}/restaurants/${req.restaurant.id}/menu/archive`);
