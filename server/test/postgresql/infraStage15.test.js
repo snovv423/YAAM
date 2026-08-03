@@ -543,6 +543,26 @@ test('L4: циклическая ссылка не роняет логгер', (
 // D — сгенерированные конфиги деплоя
 // ===========================================================================
 
+test('L5: access-лог приложения не печатает capability-токен из пути', () => {
+  // Дефект, найденный на staging при первом обращении к /d/<токен>:
+  // accessLogMiddleware печатал req.path как есть, и токен уходил в journald
+  // открытым текстом. Query string он не логировал, но секрет находится
+  // В САМОМ ПУТИ — против этого req.path не защищает.
+  const src = fs.readFileSync(path.join(__dirname, '../../services/postgresql/app.js'), 'utf8');
+  assert.match(src, /safeRoute\(req\)/, 'путь в access-логе обязан проходить через safeRoute');
+  assert.ok(
+    !/\$\{req\.method\} \$\{req\.path\}/.test(src),
+    'сырой req.path в access-логе недопустим: capability-токен находится в пути',
+  );
+
+  const token = `yaam_doc_v1_${'B'.repeat(43)}`;
+  // Смонтированный роутер срезает префикс /d, поэтому проверяются оба вида.
+  assert.equal(loggerModule.safeRoute({ originalUrl: `/d/${token}?x=1` }), '/d/:token');
+  const stripped = loggerModule.safeRoute({ url: `/${token}` });
+  assert.ok(!stripped.includes(token), 'токен не должен попадать в лог даже без префикса');
+  assert.match(stripped, /yaam_doc_v1_\[REDACTED\]/);
+});
+
 test('D1: шаблоны деплоя не содержат секретов и выдуманных доменов', () => {
   const files = fs.readdirSync(DEPLOY_DIR).filter((f) => !f.startsWith('.'));
   assert.ok(files.includes('nginx-yaam-staging.conf.template'));

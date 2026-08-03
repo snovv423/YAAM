@@ -37,6 +37,7 @@ const {
 const { createHealthCheck } = require('./health');
 const { createLifecycle } = require('./lifecycle');
 const { assertEnv } = require('../config/env');
+const { safeRoute } = require('../observability/logger');
 const { PgSessionStore } = require('../hq/pgSessionStore');
 const migrator = require('./migrator');
 const { startBot } = require('../../bot/postgresql');
@@ -213,15 +214,20 @@ function requestIdMiddleware(req, res, next) {
 
 // Логирует метод/путь/статус/длительность — намеренно НИКОГДА не тело
 // запроса и не заголовки (значит, ни Authorization/Bearer-токен заказа, ни
-// платёжные payload, ни PII клиента не попадают в лог). req.path, а не
-// req.originalUrl — на случай, если в будущем какой-то маршрут когда-нибудь
-// станет принимать чувствительные значения через query string.
+// платёжные payload, ни PII клиента не попадают в лог).
+//
+// ПУТЬ ПРОПУСКАЕТСЯ ЧЕРЕЗ safeRoute(). Раньше здесь был просто req.path с
+// пояснением, что query string не логируется. Этого стало недостаточно:
+// capability-маршрут документов принимает секрет ПРЯМО В ПУТИ (/d/<токен>),
+// и токен уходил в journald открытым текстом — обнаружено на staging при
+// первом же обращении к этому маршруту. safeRoute() маскирует его до
+// /d/:token и заодно вырезает узнаваемые формы секретов из остальных путей.
 function accessLogMiddleware(req, res, next) {
   const startedAt = process.hrtime.bigint();
   res.on('finish', () => {
     const durationMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
     console.log(
-      `[app-postgresql] ${req.method} ${req.path} ${res.statusCode} ${durationMs.toFixed(1)}ms id=${req.id}`
+      `[app-postgresql] ${req.method} ${safeRoute(req)} ${res.statusCode} ${durationMs.toFixed(1)}ms id=${req.id}`
     );
   });
   next();
