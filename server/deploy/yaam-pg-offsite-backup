@@ -24,7 +24,7 @@ heartbeat_url=
 # Те же базы и в том же порядке, что в yaam-pg-backup. Список задан явно:
 # «выгружать всё, что нашлось в каталоге» означало бы, что забытый или
 # посторонний файл молча уезжает в облако.
-databases=(yaam_production yaam_hqtest)
+databases=(yaam_staging_v2 yaam_production yaam_hqtest)
 
 fail() {
   printf 'ERROR: %s\n' "$*" >&2
