@@ -295,7 +295,7 @@ async function runWeeklySettlementJob({ now = new Date(), generateDocuments = tr
     locked = lockRes.rows[0].acquired === true;
     if (!locked) {
       return {
-        skipped: true, reason: 'already_running', closed: [], failed: [],
+        skipped: true, reason: 'already_running', closed: [], failed: [], blocked: [],
         queued: 0, processed: 0, remaining: 0, remainingWeeks: [],
       };
     }
