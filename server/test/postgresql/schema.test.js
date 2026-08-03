@@ -16,6 +16,9 @@ const { startEmbeddedPostgres } = require('./helpers/embeddedPg');
 const SCHEMA_SQL = fs.readFileSync(path.join(__dirname, '../../db/postgresql/schema.sql'), 'utf8');
 
 const EXPECTED_TABLES = [
+  // Stage 22 — реестр отвергнутых webhook и счётчик номеров документов.
+  'webhook_rejections',
+  'document_number_counters',
   'restaurants', 'categories', 'menu_items', 'orders', 'order_access_credentials',
   // Фича «Поделиться заказом» — read-only share-токен, отдельный от
   // order_access_credentials (см. orderShareService.js).
@@ -211,7 +214,7 @@ async function runSchemaAndInspect(t, databaseName) {
       await client.query(SCHEMA_SQL);
     });
 
-    await t.test('создаются все 38 таблиц', async () => {
+    await t.test('создаются все 40 таблиц', async () => {
       const { rows } = await client.query(
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename`
       );
@@ -219,13 +222,13 @@ async function runSchemaAndInspect(t, databaseName) {
       assert.deepEqual(names, [...EXPECTED_TABLES].sort());
     });
 
-    await t.test('создаются все 51 внешний ключ', async () => {
+    await t.test('создаются все 52 внешних ключа', async () => {
       const { rows } = await client.query(`
         SELECT count(*)::int AS n
         FROM information_schema.table_constraints
         WHERE constraint_schema = 'public' AND constraint_type = 'FOREIGN KEY'
       `);
-      assert.equal(rows[0].n, 51);
+      assert.equal(rows[0].n, 52);
     });
 
     await t.test('CHECK-ограничения присутствуют (>=12, включая новый на payments.status)', async () => {

@@ -49,6 +49,7 @@ const defaultLogger = createLogger();
 // (см. header-комментарий выше).
 function createHealthCheck({
   getSchedulers = () => [], getBotState = () => null, getCommitSha = () => 'unknown',
+  getFinancialHealth = () => null,
   logger = defaultLogger,
 } = {}) {
   async function checkDatabase() {
@@ -126,6 +127,10 @@ function createHealthCheck({
     const pool = checkPool();
     const schedulers = checkSchedulers();
     const bot = getBotState();
+    // Stage 22: финансовая готовность отделена от технической. Приложение
+    // может быть полностью живым и при этом иметь необъяснённое расхождение
+    // в расчётах — тогда `ok` остаётся true, но состояние видно явно.
+    const financial = getFinancialHealth();
     const commitSha = getCommitSha();
     const migrations = await checkMigrations();
     const config = checkConfig();
@@ -138,6 +143,7 @@ function createHealthCheck({
       pool,
       schedulers,
       bot,
+      ...(financial ? { financial } : {}),
       // Строго не пустая произвольная строка — только либо реальный commit
       // hash, либо ровно 'unknown'. Никаких других env-переменных/секретов
       // это поле не раскрывает (см. п.2 задания) — только этот один вывод

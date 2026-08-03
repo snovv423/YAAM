@@ -1090,7 +1090,203 @@ async function markPaid(orderId, paymentId) {
   // их нужно реально вернуть, не только зарезервировать обязательство (тот
   // же fire-and-forget post-commit принцип, что и в остальных трёх местах).
   if (lateRefundRow) scheduleRefundProcessing(lateRefundRow.id);
+  // Stage 22 (CRITICAL-2): чек прихода ставится в очередь ПОСЛЕ
+  // зафиксированного финансового перехода и только на штатном пути оплаты.
+  // Ошибка кассы не имеет права откатить уже прошедший платёж, поэтому
+  // enqueue вынесен за транзакцию и не бросает наружу.
+  if (changed) scheduleReceipt('payment', { orderId, paymentId });
   return updated;
+}
+
+// Постановка чека в очередь. Идемпотентна по построению: idempotency key чека
+// детерминированно выводится из paymentId/refundId, а повторный enqueue
+// возвращает существующую строку и не создаёт вторую.
+function scheduleReceipt(kind, { orderId, paymentId = null, refundId = null }) {
+  const fiscal = require('../fiscalization/fiscalReceiptService');
+  return fiscal
+    .enqueueReceipt({ kind, orderId, paymentId, refundId, provider: resolveFiscalProvider() })
+    .catch((err) => {
+      console.error(`[orderService] не удалось поставить чек (${kind}) заказа ${orderId}:`, err.message);
+    });
+}
+
+function resolveFiscalProvider() {
+  return process.env.FISCAL_PROVIDER || 'mock';
+}
+
+// ---------------------------------------------------------------------------
+// applyConfirmedPaymentSuccess(orderId, paymentId, { source }) — Stage 22
+// ---------------------------------------------------------------------------
+//
+// Единая точка «провайдер подтвердил успех платежа» для webhook и сверки.
+//
+// ЗАЧЕМ ОНА ПОЯВИЛАСЬ. markPaid() начинается с выборки платежа со статусом
+// 'pending' и при неудаче делает `if (!payment) return` — чистый идемпотентный
+// no-op для повторного webhook. Но ровно та же ветка молча проглатывала
+// СОВЕРШЕННО ДРУГОЙ случай: провайдер подтверждает успех платежа, который у
+// нас числится failed, потому что заказ уже оплачен ВТОРОЙ попыткой.
+// Покупатель заплатил дважды, в системе оставался один платёж, следа и алерта
+// не было (Stage 21, HIGH-1).
+//
+// МОДЕЛЬ. Каноническая правда провайдера сохраняется целиком: лишний платёж
+// записывается как настоящий успешный и помечается ссылкой на тот, который он
+// дублирует (payments.duplicate_of_payment_id). Уникальный индекс
+// ux_payments_one_counted_per_order гарантирует, что УЧИТЫВАЕМЫЙ платёж у
+// заказа ровно один — но лишний при этом не теряется, а становится видимым и
+// возвращаемым.
+//
+// Возврат лишнего списания идёт через тот же reserveRefundRow с собственной
+// причиной 'duplicate_payment'. Второй вызов не создаёт второго возврата:
+// reserveRefundRow идемпотентна по частичному уникальному индексу.
+// Ленивый require: services/hq/auditLog требует db/postgresql, а этот модуль
+// уже им пользуется — прямой импорт на верхнем уровне создал бы цикл при
+// загрузке HQ-слоя. Тот же приём, что у eventLogService ниже.
+function logAuditEvent(entry) {
+  return require('../hq/auditLog').logAuditEvent(entry);
+}
+
+async function applyConfirmedPaymentSuccess(orderId, paymentId, { source = 'webhook' } = {}) {
+  if (!Number.isInteger(paymentId)) throw new Error('paymentId обязателен');
+
+  const rows = await db.query(
+    'SELECT * FROM payments WHERE id = $1 AND order_id = $2',
+    [paymentId, orderId],
+  );
+  const payment = rows[0];
+  if (!payment) return { outcome: 'noop', reason: 'payment_not_found' };
+
+  // Нормальный путь: платёж ещё активен — это обычное подтверждение оплаты.
+  if (payment.status === 'creating' || payment.status === 'pending') {
+    await markPaid(orderId, paymentId);
+    return { outcome: 'applied', paymentId };
+  }
+
+  // Уже учтён как успешный (или уже возвращён) — повторное подтверждение.
+  if (payment.status === 'succeeded' || payment.status === 'refunded') {
+    return { outcome: 'noop', reason: 'already_settled' };
+  }
+
+  // Остался единственный случай: провайдер говорит «успех», а у нас платёж
+  // failed. Это либо запоздавшее уведомление по попытке, которую мы сочли
+  // неудачной, либо реальное второе списание.
+  return recordDuplicatePaymentSuccess(payment, { source });
+}
+
+async function recordDuplicatePaymentSuccess(payment, { source }) {
+  let duplicateRefundRow = null;
+  let blocked = false;
+  let canonicalId = null;
+
+  await db.transaction(async (client) => {
+    // Учитываемый платёж заказа — тот, который не помечен дублем и уже
+    // доведён до расчётного статуса.
+    const canonicalRows = await db.query(
+      `SELECT id, status FROM payments
+        WHERE order_id = $1 AND duplicate_of_payment_id IS NULL
+          AND status IN ('succeeded', 'refunded') AND id <> $2
+        ORDER BY id LIMIT 1`,
+      [payment.order_id, payment.id],
+      client,
+    );
+    const canonical = canonicalRows[0];
+
+    if (!canonical) {
+      // Учитываемого платежа нет: значит эта попытка и есть настоящая оплата,
+      // просто мы ошибочно сочли её неудачной. Возвращаем её в расчёт, а не
+      // объявляем дублем — иначе деньги остались бы неучтёнными.
+      const revived = await db.execute(
+        `UPDATE payments SET status = 'succeeded', updated_at = NOW()
+          WHERE id = $1 AND status = 'failed'`,
+        [payment.id],
+        client,
+      );
+      if (revived.rowCount !== 1) throw refundInvariant('не удалось восстановить подтверждённый платёж');
+      return;
+    }
+
+    canonicalId = canonical.id;
+    // Лишнее списание: фиксируем как успешное, но помеченное дублем.
+    // Уникальный индекс не сработает — дубли из него исключены.
+    const marked = await db.execute(
+      `UPDATE payments SET status = 'succeeded', duplicate_of_payment_id = $2, updated_at = NOW()
+        WHERE id = $1 AND status = 'failed'`,
+      [payment.id, canonical.id],
+      client,
+    );
+    if (marked.rowCount !== 1) throw refundInvariant('не удалось пометить дубль платежа');
+
+    duplicateRefundRow = await reserveRefundRow(payment, 'duplicate_payment', client);
+    if (!duplicateRefundRow) blocked = true;
+  });
+
+  if (canonicalId === null) {
+    // Ветка «восстановили платёж»: заказ мог остаться в payment_failed —
+    // дальше им занимается обычный поток (повторная оплата уже невозможна,
+    // потому что учитываемый платёж теперь есть).
+    await logAuditEvent({
+      action: 'payment_reconciled', restaurantId: null,
+      details: `платёж #${payment.id}: провайдер подтвердил успех ранее отклонённой попытки (${source})`,
+      ip: null,
+    });
+    return { outcome: 'applied', paymentId: payment.id, revived: true };
+  }
+
+  await logAuditEvent({
+    action: 'payment_duplicate_detected', restaurantId: null,
+    details: `заказ #${payment.order_id}: платёж #${payment.id} подтверждён провайдером как успешный, `
+      + `но учитываемый платёж уже есть (#${canonicalId}); источник: ${source}`,
+    ip: null,
+  });
+  await reportDuplicatePaymentEvent(payment, canonicalId, { blocked });
+
+  if (duplicateRefundRow) {
+    scheduleRefundProcessing(duplicateRefundRow.id);
+    return {
+      outcome: 'duplicate', paymentId: payment.id, canonicalPaymentId: canonicalId,
+      refundId: duplicateRefundRow.id, blocked: false,
+    };
+  }
+
+  await logAuditEvent({
+    action: 'payment_duplicate_refund_blocked', restaurantId: null,
+    details: `заказ #${payment.order_id}: лишнее списание по платежу #${payment.id} `
+      + 'не может быть возвращено автоматически — требуется решение владельца',
+    ip: null,
+  });
+  return {
+    outcome: 'duplicate', paymentId: payment.id, canonicalPaymentId: canonicalId,
+    refundId: null, blocked: true,
+  };
+}
+
+// Финансовая аномалия обязана быть видна владельцу, а не только в аудите.
+async function reportDuplicatePaymentEvent(payment, canonicalId, { blocked }) {
+  try {
+    const eventLogService = require('../hq/eventLogService');
+    const rows = await db.query(
+      `SELECT o.public_code, o.restaurant_id, r.name AS restaurant_name
+         FROM orders o LEFT JOIN restaurants r ON r.id = o.restaurant_id
+        WHERE o.id = $1`,
+      [payment.order_id],
+    );
+    const row = rows[0] || {};
+    const tail = blocked
+      ? 'Автоматический возврат невозможен — требуется решение владельца.'
+      : 'Лишняя сумма отправлена в автоматический возврат.';
+    await eventLogService.createEvent({
+      category: 'payment_issue',
+      restaurantId: row.restaurant_id || null,
+      restaurantName: row.restaurant_name || null,
+      orderId: payment.order_id,
+      orderPublicCode: row.public_code || null,
+      message: `Двойное списание по заказу: подтверждён лишний платёж на ${payment.amount} ₽ `
+        + `(учитываемый платёж #${canonicalId}). ${tail}`,
+    });
+  } catch (err) {
+    // Событие — наблюдаемость, а не часть финансового перехода: его сбой не
+    // должен отменять уже зафиксированный дубль.
+    console.error('[orderService] не удалось записать событие о дубле платежа:', err.message);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1456,6 +1652,15 @@ async function finalizeRefundSucceeded(refundId, providerRefundId) {
 
     const finalRows = await db.query('SELECT * FROM refunds WHERE id = $1', [refundId], client);
     return finalRows[0];
+  }).then(async (finalRefund) => {
+    // Чек возврата — зеркало чека прихода, ставится после подтверждённого
+    // возврата. Повторный webhook сюда не доходит: выше стоит идемпотентный
+    // выход по status='succeeded'.
+    const paymentRows = await db.query('SELECT order_id FROM payments WHERE id = $1', [finalRefund.payment_id]);
+    if (paymentRows[0]) {
+      scheduleReceipt('refund', { orderId: paymentRows[0].order_id, refundId: finalRefund.id });
+    }
+    return finalRefund;
   });
 }
 
@@ -2951,6 +3156,7 @@ module.exports = {
   restaurantAdvance,
   cancelByCustomer,
   finalizeRefundSucceeded,
+  applyConfirmedPaymentSuccess,
   finalizeRefundFailed,
   sweepTimeouts,
   reserveRetryAttempt,

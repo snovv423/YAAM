@@ -154,6 +154,37 @@ function inspectEnv(env = process.env) {
       errors.push('YOOKASSA_SECRET_KEY должен быть тестовым ключом (префикс test_), пока live не разрешён.');
     }
   }
+  // --- Фискализация (Stage 22, CRITICAL-2): fail-closed ---
+  //
+  // Приём РЕАЛЬНЫХ денег без кассы — нарушение 54-ФЗ с первой транзакции, а
+  // не бухгалтерская неточность. Поэтому live-режим блокируется на уровне
+  // конфигурации, а не «замечанием в отчёте».
+  //
+  // Sandbox и mock остаются разрешёнными: это явно обозначенный тестовый
+  // режим, в котором чеки ставятся в очередь и обрабатываются mock-кассой.
+  // Отсутствие кассы при этом НЕ считается production-ready — см. warning ниже.
+  const liveMoney = provider === 'yookassa' && env.YOOKASSA_ENV === 'live';
+  const fiscalProvider = String(env.FISCAL_PROVIDER || '').trim();
+  const fiscalReady = fiscalProvider !== '' && fiscalProvider !== 'mock';
+  const fiscalLegalReady = String(env.FISCAL_LEGAL_CONFIRMED || '').trim() === 'true';
+  if (liveMoney) {
+    if (!fiscalReady) {
+      errors.push('Live-приём платежей запрещён: FISCAL_PROVIDER не задан или указывает на mock-кассу.');
+    }
+    if (!fiscalLegalReady) {
+      errors.push(
+        'Live-приём платежей запрещён: признаки 54-ФЗ (предмет расчёта, признак агента, ставка НДС) '
+        + 'не подтверждены юридически — FISCAL_LEGAL_CONFIRMED не выставлен.',
+      );
+    }
+  } else if (isProdLike && !fiscalReady) {
+    // Не ошибка: sandbox/mock — законный тестовый режим. Но состояние обязано
+    // быть замечено, чтобы «работает» не приняли за «готово к деньгам».
+    warnings.push(
+      'Фискализация работает в тестовом режиме (mock-касса) — приём реальных денег невозможен.',
+    );
+  }
+
   // Staging не имеет права работать боевыми ключами даже случайно.
   if (mode === 'staging' && !isBlank(env.YOOKASSA_SECRET_KEY)
       && String(env.YOOKASSA_SECRET_KEY).startsWith('live_')) {

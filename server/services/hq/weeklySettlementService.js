@@ -398,6 +398,17 @@ async function runWeeklySettlementJob({
       console.error(`[weeklySettlement] backlog: осталось ${deferred.length} недель, продолжим следующим запуском`);
     }
 
+    // Stage 22 (HIGH-3): проверка инвариантов сразу после закрытия — самый
+    // ранний момент, когда расхождение вообще может появиться. Её сбой не
+    // отменяет уже закрытые периоды.
+    if (closed.length > 0) {
+      try {
+        await require('./settlementInvariantMonitor').runInvariantCheck({ now });
+      } catch (err) {
+        console.error('[weeklySettlement] проверка инвариантов после закрытия не выполнена:', err.message);
+      }
+    }
+
     await logAuditEvent({
       action: 'settlement_job_finished', restaurantId: null,
       details: `закрыто периодов: ${closed.length}, с ошибкой: ${failed.length}, осталось в очереди: ${deferred.length}`

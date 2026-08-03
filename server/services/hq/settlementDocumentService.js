@@ -46,20 +46,29 @@ function resolveAcceptanceTerms(env = process.env) {
 // счётчик ниже только предлагает следующий свободный номер.
 const KIND_CODE = { agent_report: 'АО', order_registry: 'РЗ' };
 
+// Stage 22 (закрытие MEDIUM-1). Раньше номер читался запросом «последний
+// номер» и увеличивался на единицу БЕЗ блокировки: два одновременных
+// формирования получали ОДИН номер, один INSERT проходил, второй падал на
+// UNIQUE — и документ не создавался вовсе.
+//
+// Теперь номер выдаёт счётчик: INSERT ... ON CONFLICT DO UPDATE RETURNING —
+// одна атомарная операция, которая сама сериализует конкурентов на строке
+// счётчика внутри той же транзакции. UNIQUE на document_number остаётся, но
+// как последняя защита, а не как основной алгоритм.
 async function nextDocumentNumber(kind, year, client = null) {
   const prefix = `YAAM-${KIND_CODE[kind]}-${year}-`;
-  const rows = await db.query(
-    `SELECT document_number FROM settlement_documents
-      WHERE document_number LIKE $1 ORDER BY id DESC LIMIT 1`,
-    [`${prefix}%`],
+  const numericYear = Number(year);
+  const rows = await db.execute(
+    `INSERT INTO document_number_counters (kind, year, last_number)
+     VALUES ($1, $2, 1)
+     ON CONFLICT (kind, year) DO UPDATE
+       SET last_number = document_number_counters.last_number + 1,
+           updated_at = NOW()
+     RETURNING last_number`,
+    [kind, numericYear],
     client,
   );
-  let next = 1;
-  if (rows[0]) {
-    const m = /-(\d+)(?:-и\d+)?$/.exec(rows[0].document_number);
-    if (m) next = Number(m[1]) + 1;
-  }
-  return `${prefix}${String(next).padStart(4, '0')}`;
+  return `${prefix}${String(rows.rows[0].last_number).padStart(4, '0')}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -451,7 +460,82 @@ async function getDocumentById(documentId) {
   return rows[0] || null;
 }
 
+// ---------------------------------------------------------------------------
+// Повтор формирования отсутствующих документов (Stage 22, закрытие MEDIUM-2)
+// ---------------------------------------------------------------------------
+//
+// Документы формировались ОДИН раз — при закрытии периода. Ошибка была
+// изолирована правильно (период не откатывается), но повтора не существовало:
+// упавшая генерация означала, что документов у ресторана просто нет, пока
+// владелец не заметит и не запустит формирование вручную.
+//
+// Эта функция проходит закрытые периоды и достраивает недостающее.
+
+// Больше попыток не делаем: если документ не собрался столько раз, проблема
+// не в удаче, и повторять её бесконечно — только шуметь.
+const MAX_GENERATION_ATTEMPTS = 5;
+
+async function retryMissingDocuments({ limit = 20, now = new Date(), env = process.env } = {}) {
+  // Строки закрытых периодов, у которых нет ГОТОВОГО документа нужного вида.
+  //
+  // Корректирующие версии не мешают: у них тот же period/restaurant/kind и
+  // status='generated', поэтому строка с корректировкой не считается
+  // «недостающей». Отсутствующий исходный документ и наличие корректировки —
+  // разные вещи, и здесь мы ищем именно первое.
+  const missing = await db.query(
+    `SELECT srl.settlement_period_id AS period_id, srl.restaurant_id, k.kind
+       FROM settlement_restaurant_lines srl
+       JOIN settlement_periods sp ON sp.id = srl.settlement_period_id
+       CROSS JOIN (SELECT unnest($1::text[]) AS kind) k
+      WHERE sp.status = 'closed'
+        AND NOT EXISTS (
+          SELECT 1 FROM settlement_documents d
+           WHERE d.settlement_period_id = srl.settlement_period_id
+             AND d.restaurant_id = srl.restaurant_id
+             AND d.kind = k.kind
+             AND d.status = 'generated'
+        )
+        AND COALESCE((
+          SELECT MAX(d2.generation_attempts) FROM settlement_documents d2
+           WHERE d2.settlement_period_id = srl.settlement_period_id
+             AND d2.restaurant_id = srl.restaurant_id
+             AND d2.kind = k.kind
+        ), 0) < $2
+      ORDER BY srl.settlement_period_id, srl.restaurant_id
+      LIMIT $3`,
+    [DOCUMENT_KINDS, MAX_GENERATION_ATTEMPTS, limit],
+  );
+
+  const results = { checked: missing.length, created: 0, failed: 0 };
+  for (const row of missing) {
+    // eslint-disable-next-line no-await-in-loop
+    const res = await ensureDocument(row.period_id, row.restaurant_id, row.kind, { now, env });
+    if (res.created) {
+      results.created += 1;
+      // eslint-disable-next-line no-await-in-loop
+      await logAuditEvent({
+        action: 'settlement_document_regenerated', restaurantId: row.restaurant_id,
+        details: `${DOCUMENT_KIND_LABELS[row.kind]} для периода #${row.period_id} создан повторной попыткой`,
+        ip: null,
+      });
+    } else if (!res.document) {
+      results.failed += 1;
+      // Счётчик попыток — на строке-неудаче, если она есть; иначе создаём
+      // маркерную запись невозможно (нет номера), поэтому просто считаем.
+      // eslint-disable-next-line no-await-in-loop
+      await db.execute(
+        `UPDATE settlement_documents SET generation_attempts = generation_attempts + 1
+          WHERE settlement_period_id = $1 AND restaurant_id = $2 AND kind = $3`,
+        [row.period_id, row.restaurant_id, row.kind],
+      );
+    }
+  }
+  return results;
+}
+
 module.exports = {
+  MAX_GENERATION_ATTEMPTS,
+  retryMissingDocuments,
   DOCUMENT_KINDS,
   DOCUMENT_KIND_LABELS,
   ACCEPTANCE_TERMS_ENV,

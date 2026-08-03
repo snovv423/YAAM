@@ -33,6 +33,8 @@ const { buildCorsOptions } = require('../../config/cors');
 const {
   createPauseExpiryScheduler, createOrderTimeoutScheduler, createRefundReconciliationScheduler,
   createWeeklySettlementScheduler,
+  createPaymentReconciliationScheduler,
+  createFinancialHealthScheduler,
 } = require('./scheduler');
 const { createHealthCheck } = require('./health');
 const { createLifecycle } = require('./lifecycle');
@@ -356,6 +358,10 @@ function createPostgresqlApp({
   // тестам, которые не хотят фонового прогона job во время своих сценариев.
   weeklySettlementIntervalMs,
   weeklySettlementRunOnStart = true,
+  paymentReconciliationIntervalMs,
+  paymentReconciliationRunOnStart = false,
+  financialHealthIntervalMs,
+  financialHealthRunOnStart = true,
   bootstrapOptions,
   // Stage 15: сколько ждать завершения активных HTTP-запросов при выключении.
   // Без предела httpServer.close() висит вечно на keep-alive-соединениях, и
@@ -441,6 +447,20 @@ function createPostgresqlApp({
     limit: refundReconciliationLimit,
   });
 
+  // Stage 22 (CRITICAL-1): без этого планировщика потерянный webhook не
+  // обнаруживался ничем — деньги покупателя выпадали из учёта полностью.
+  const paymentReconciliationScheduler = createPaymentReconciliationScheduler({
+    intervalMs: paymentReconciliationIntervalMs,
+    runOnStart: paymentReconciliationRunOnStart,
+  });
+
+  // Stage 22 (HIGH-3 + MEDIUM-2): контроль расчётных инвариантов и достройка
+  // недостающих документов закрытых периодов.
+  const financialHealthScheduler = createFinancialHealthScheduler({
+    intervalMs: financialHealthIntervalMs,
+    runOnStart: financialHealthRunOnStart,
+  });
+
   const botEnabled = Boolean(resolvedBotToken || botClient);
   const botAdapter = botEnabled ? createBotLifecycleAdapter({ token: resolvedBotToken, botClient }) : null;
   if (!botEnabled) {
@@ -451,7 +471,13 @@ function createPostgresqlApp({
   // периодические sweep'ы, как и в Stage 6) — состояние бота отдельное,
   // наблюдаемое поле readiness(), не участвующее в `ok` (см. health.js).
   const health = createHealthCheck({
-    getSchedulers: () => [scheduler, orderTimeoutScheduler, refundReconciliationScheduler, weeklySettlementScheduler],
+    getSchedulers: () => [
+      scheduler, orderTimeoutScheduler, refundReconciliationScheduler, weeklySettlementScheduler,
+      paymentReconciliationScheduler, financialHealthScheduler,
+    ],
+    // Финансовая готовность отделена от технической: приложение может быть
+    // технически живым, но иметь необъяснённое расхождение в расчётах.
+    getFinancialHealth: () => require('../hq/settlementInvariantMonitor').getFinancialHealth(),
     getBotState: () => (botAdapter ? botAdapter.getState() : { state: 'disabled' }),
     // GIT_COMMIT_SHA — см. п.2 задания/health.js. Через уже существующий
     // `env` параметр (по умолчанию process.env) — та же, уже установленная
@@ -633,7 +659,12 @@ function createPostgresqlApp({
       httpServer.once('error', reject);
     });
 
-    const baseSchedulers = [scheduler, orderTimeoutScheduler, refundReconciliationScheduler, weeklySettlementScheduler];
+    const baseSchedulers = [
+      scheduler, orderTimeoutScheduler, refundReconciliationScheduler, weeklySettlementScheduler,
+      // Stage 22: без этих двух потерянный платёж и расхождение в расчётах
+      // остались бы необнаруженными — то, ради чего этап и делается.
+      paymentReconciliationScheduler, financialHealthScheduler,
+    ];
     lifecycle = createLifecycle({
       schedulers: botAdapter ? [...baseSchedulers, botAdapter] : baseSchedulers,
       httpServer,

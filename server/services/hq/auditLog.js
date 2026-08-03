@@ -115,6 +115,15 @@ const ACTIONS = [
   // уже существующим периодом. Это состояние, требующее решения владельца, а
   // не сбой выполнения; пишется один раз на изменение состава блокировок.
   'settlement_week_blocked',
+  // Stage 22 — финансовая безопасность runtime.
+  'payment_reconciled',
+  'payment_reconcile_failed',
+  'payment_duplicate_detected',
+  'payment_duplicate_refund_blocked',
+  'settlement_invariant_violated',
+  'settlement_invariant_recovered',
+  'webhook_rejected',
+  'settlement_document_regenerated',
   'settlement_carry_forward_applied',
   'settlement_carry_forward_accrued',
   'settlement_document_token_issued',

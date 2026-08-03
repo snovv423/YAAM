@@ -215,11 +215,11 @@ test('L7: повторный запуск ничего не применяет',
   process.env.DATABASE_URL = url;
   const { db, migrator } = requireFresh();
   const first = await migrator.migrate({ logger: quiet });
-  assert.equal(first.applied.length, 4);
+  assert.equal(first.applied.length, 5);
   const second = await migrator.migrate({ logger: quiet });
   assert.deepEqual(second.applied, []);
   const rows = await db.query('SELECT version FROM schema_migrations ORDER BY version');
-  assert.deepEqual(rows.map((r) => r.version), [1, 2, 3, 4]);
+  assert.deepEqual(rows.map((r) => r.version), [1, 2, 3, 4, 5]);
   await db.close();
 });
 
@@ -428,9 +428,9 @@ test('L13: конкурентный запуск применяет каждую
   const total = results.reduce((n, r) => n + r.applied.length, 0);
 
   const rows = await db.query('SELECT version, count(*)::int n FROM schema_migrations GROUP BY version ORDER BY version');
-  assert.deepEqual(rows.map((r) => r.version), [1, 2, 3, 4]);
+  assert.deepEqual(rows.map((r) => r.version), [1, 2, 3, 4, 5]);
   assert.ok(rows.every((r) => r.n === 1), 'каждая версия записана ровно один раз');
-  assert.equal(total, 4, 'суммарно применено ровно четыре миграции');
+  assert.equal(total, 5, 'суммарно применено ровно пять миграций');
   await db.close();
 });
 
@@ -438,13 +438,13 @@ test('L13: конкурентный запуск применяет каждую
 // 14-15. Пустая база и согласованность справочника
 // ===========================================================================
 
-test('L14: пустая база проходит строго 0001 -> 0002 -> 0003 -> 0004', async () => {
+test('L14: пустая база проходит строго 0001 -> 0002 -> 0003 -> 0004 -> 0005', async () => {
   await cluster.createDatabase('lg_empty');
   process.env.DATABASE_URL = cluster.connectionString('lg_empty');
   const { db, migrator } = requireFresh();
 
   const result = await migrator.migrate({ logger: quiet });
-  assert.deepEqual(result.applied.map((a) => a.version), [1, 2, 3, 4]);
+  assert.deepEqual(result.applied.map((a) => a.version), [1, 2, 3, 4, 5]);
   // На пустой базе НИЧЕГО не отмечается — всё выполняется.
   assert.ok(result.applied.every((a) => a.adopted === false));
 
@@ -467,7 +467,14 @@ test('L15: schema.sql соответствует итоговой цепочке
 
   const chainClient = cluster.getClient('lg_ref_chain');
   await chainClient.connect();
-  for (const f of ['0001_baseline.sql', '0002_hq_sessions.sql', '0003_stage13_stage14_upgrade.sql']) {
+  // Список берётся из каталога, а не зашивается: жёстко перечисленные файлы
+  // молча устаревают при каждой новой миграции. Так и произошло — перечень
+  // остановился на 0003 и не заметил 0004, потому что та не добавляла
+  // объектов; 0005 добавила таблицы, и расхождение вскрылось.
+  const migrationDir = path.join(__dirname, '../../db/postgresql/migrations');
+  const chainFiles = fs.readdirSync(migrationDir).filter((f) => f.endsWith('.sql')).sort();
+  for (const f of chainFiles) {
+    // eslint-disable-next-line no-await-in-loop
     await chainClient.query(migrationSql(f));
   }
 
@@ -507,7 +514,7 @@ test('L16: 0003 не содержит разрушающих операций и
 
   const { migrator } = requireFresh();
   const files = migrator.listMigrationFiles();
-  assert.deepEqual(files.map((f) => f.version), [1, 2, 3, 4]);
+  assert.deepEqual(files.map((f) => f.version), [1, 2, 3, 4, 5]);
   const m3 = files.find((f) => f.version === 3);
   assert.doesNotThrow(() => migrator.assertNotSilentlyDestructive(m3));
   // 0004 (Stage 19.1) — только расширение CHECK-списка аудита: ни одной

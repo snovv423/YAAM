@@ -416,10 +416,15 @@ test('D3b: GET /health/ready отдаёт commitSha из GIT_COMMIT_SHA (env), �
     // (непринятая миграция и запрещающая запуск конфигурация обязаны делать
     // инстанс not ready). Набор проверяется целиком именно для того, чтобы
     // новое поле нельзя было добавить незаметно.
+    // Stage 22 добавил financial — состояние расчётных инвариантов. Оно
+    // отделено от `ok` намеренно: приложение может быть технически живым и
+    // при этом иметь необъяснённое расхождение в расчётах.
     assert.deepEqual(
       Object.keys(ready.body).sort(),
-      ['bot', 'commitSha', 'config', 'database', 'migrations', 'ok', 'pool', 'schedulers', 'uptimeSec'].sort(),
+      ['bot', 'commitSha', 'config', 'database', 'financial', 'migrations', 'ok', 'pool', 'schedulers', 'uptimeSec'].sort(),
     );
+    // financial не раскрывает ни данных, ни имён таблиц — только состояние.
+    assert.deepEqual(Object.keys(ready.body.financial).sort(), ['checkedAt', 'state', 'summary', 'violations']);
     // config не раскрывает ни текстов ошибок, ни имён переменных.
     assert.deepEqual(Object.keys(ready.body.config).sort(), ['mode', 'ok', 'problems']);
     assert.deepEqual(Object.keys(ready.body.migrations).sort(), ['applied', 'ok', 'total']);

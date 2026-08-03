@@ -33,6 +33,8 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 const db = require('../../db/postgresql');
 const orderService = require('../../services/postgresql/orderService');
+const webhookRejectionService = require('../../services/postgresql/webhookRejectionService');
+const { payloadFingerprint } = require('../../services/postgresql/paymentReconciliationService');
 const orderShareService = require('../../services/postgresql/orderShareService');
 const paymentService = require('../../services/paymentService');
 // YAAM HQ Stage 5B — тот же module-level singleton принцип, что и db.js
@@ -509,9 +511,18 @@ if (process.env.PAYMENT_PROVIDER === 'yookassa') {
 
   router.post('/webhooks/payment', express.raw({ type: 'application/json', limit: '64kb' }), async (req, res) => {
     const logId = req.id || 'n/a';
+    // Отпечаток тела считается ДО любых проверок: он нужен и для отказа, и
+    // для дедупликации повторов. Само тело нигде не сохраняется.
+    const fingerprint = payloadFingerprint(Buffer.isBuffer(req.body) ? req.body.toString('utf8') : '');
+    const reject = (reason, httpStatus, detail, providerObjectId = null, eventType = 'unknown') =>
+      webhookRejectionService.record({
+        provider: 'yookassa', eventType, reason, payloadFingerprint: fingerprint,
+        providerObjectId, httpStatus, detailSafe: detail, requestId: logId,
+      });
     try {
       if (enforceIpAllowlist && !isTrustedYookassaIp(req.ip)) {
         console.error(`[api-postgresql] webhook rejected: untrusted source IP id=${logId}`);
+        await reject('untrusted_source', 403, 'источник вне списка доверенных адресов');
         return res.status(403).json({ error: 'forbidden' });
       }
 
@@ -521,6 +532,7 @@ if (process.env.PAYMENT_PROVIDER === 'yookassa') {
       const event = await paymentService.verifyWebhook(req.body.toString('utf8'), req.headers);
       if (!event) {
         console.error(`[api-postgresql] webhook rejected: unverifiable notification id=${logId}`);
+        await reject('unverifiable', 400, 'канонический запрос не подтвердил уведомление');
         return res.status(400).json({ error: 'invalid webhook notification' });
       }
 
@@ -528,12 +540,15 @@ if (process.env.PAYMENT_PROVIDER === 'yookassa') {
         const refund = await orderService.getRefundByProviderRefundId(event.providerRefundId);
         if (!refund) {
           console.error(`[api-postgresql] refund webhook rejected: unknown provider_refund_id id=${logId}`);
+          await reject('unknown_refund', 404, 'возврат провайдера отсутствует в базе', event.providerRefundId, 'refund');
           return res.status(404).json({ error: 'refund not found' });
         }
         const amountOk = event.amount === Number(refund.amount).toFixed(2);
         const paymentOk = event.providerPaymentId === refund.provider_payment_id;
         if (!amountOk || event.currency !== 'RUB' || !paymentOk) {
           console.error(`[api-postgresql] refund webhook rejected: identity/amount mismatch id=${logId} refund=${refund.id}`);
+          const why = !amountOk ? 'amount_mismatch' : (event.currency !== 'RUB' ? 'currency_mismatch' : 'refund_identity_mismatch');
+          await reject(why, 400, `возврат #${refund.id}: расхождение уведомления с записью`, event.providerRefundId, 'refund');
           return res.status(400).json({ error: 'refund mismatch' });
         }
         await orderService.finalizeRefundSucceeded(refund.id, event.providerRefundId);
@@ -542,12 +557,14 @@ if (process.env.PAYMENT_PROVIDER === 'yookassa') {
       }
 
       if (event.type !== 'payment') {
+        await reject('unsupported_event', 400, `тип события: ${String(event.type).slice(0, 40)}`);
         return res.status(400).json({ error: 'unsupported webhook event' });
       }
 
       const payment = await orderService.getPaymentByProviderPaymentId(event.providerPaymentId);
       if (!payment) {
         console.error(`[api-postgresql] webhook rejected: unknown provider_payment_id id=${logId}`);
+        await reject('unknown_payment', 404, 'платёж провайдера отсутствует в базе', event.providerPaymentId, 'payment');
         return res.status(404).json({ error: 'payment not found' });
       }
 
@@ -560,16 +577,41 @@ if (process.env.PAYMENT_PROVIDER === 'yookassa') {
         console.error(
           `[api-postgresql] webhook rejected: amount/currency mismatch id=${logId} payment=${payment.id}`
         );
+        await reject(amountOk ? 'currency_mismatch' : 'amount_mismatch', 400,
+          `платёж #${payment.id}: расхождение суммы или валюты`, event.providerPaymentId, 'payment');
         return res.status(400).json({ error: 'amount or currency mismatch' });
       }
 
-      if (event.status === 'succeeded') await orderService.markPaid(payment.order_id, payment.id);
-      else if (event.status === 'failed') await orderService.markPaymentFailed(payment.order_id, payment.id);
+      // Stage 22: подтверждение успеха идёт через applyConfirmedPaymentSuccess,
+      // а не напрямую в markPaid. Разница видна только в одном случае — когда
+      // провайдер подтверждает успех платежа, который у нас числится failed:
+      // раньше это молча игнорировалось, теперь фиксируется как дубль и
+      // отправляется в возврат (Stage 21, HIGH-1).
+      if (event.status === 'succeeded') {
+        const applied = await orderService.applyConfirmedPaymentSuccess(payment.order_id, payment.id, {
+          source: 'webhook',
+        });
+        if (applied.outcome === 'duplicate') {
+          await webhookRejectionService.record({
+            provider: 'yookassa',
+            eventType: 'payment',
+            reason: 'succeeded_for_inactive_attempt',
+            payloadFingerprint: fingerprint,
+            providerObjectId: event.providerPaymentId,
+            httpStatus: 200,
+            detailSafe: `подтверждён лишний платёж, учитываемый платёж #${applied.canonicalPaymentId}`,
+            requestId: logId,
+          });
+        }
+      } else if (event.status === 'failed') {
+        await orderService.markPaymentFailed(payment.order_id, payment.id);
+      }
 
       console.log(`[api-postgresql] webhook applied: payment=${payment.id} status=${event.status} id=${logId}`);
       res.json({ ok: true });
     } catch (err) {
       console.error(`[api-postgresql] webhook processing failed id=${logId}:`, err.message);
+      await reject('internal_error', 500, err.message);
       res.status(500).json({ error: 'Внутренняя ошибка сервера' });
     }
   });

@@ -252,7 +252,95 @@ function createWeeklySettlementScheduler({
   };
 }
 
+// ---------------------------------------------------------------------------
+// Сверка платежей с провайдером (Stage 22, закрытие CRITICAL-1)
+// ---------------------------------------------------------------------------
+//
+// Тот же принцип, что у сверки возвратов: таймер — только «когда посмотреть»,
+// а что именно сверять, job вычисляет заново из состояния базы. Пропущенный
+// тик и рестарт процесса ничего не теряют.
+const DEFAULT_PAYMENT_RECONCILIATION_INTERVAL_MS = 5 * 60 * 1000;
+
+function createPaymentReconciliationScheduler({
+  intervalMs = DEFAULT_PAYMENT_RECONCILIATION_INTERVAL_MS, runOnStart = false, limit, onError,
+} = {}) {
+  let timer = null;
+  let running = false;
+
+  async function tick() {
+    if (running) return;
+    running = true;
+    try {
+      const service = require('./paymentReconciliationService');
+      await service.runPaymentReconciliation(limit !== undefined ? { limit } : undefined);
+    } catch (err) {
+      if (onError) onError(err);
+      else console.error('[scheduler/postgresql] runPaymentReconciliation failed:', err.message);
+    } finally {
+      running = false;
+    }
+  }
+
+  return {
+    start() {
+      if (timer) return;
+      timer = setInterval(tick, intervalMs);
+      if (typeof timer.unref === 'function') timer.unref();
+      if (runOnStart) tick().catch(() => {});
+    },
+    stop() { if (timer) { clearInterval(timer); timer = null; } },
+    isRunning() { return timer !== null; },
+    tick,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Контроль расчётных инвариантов и достройка документов (Stage 22)
+// ---------------------------------------------------------------------------
+//
+// Две проверки в одном таймере намеренно: обе редкие, обе фоновые, обе про
+// целостность уже закрытых периодов. Отдельный таймер для каждой добавил бы
+// только шум в readiness.
+const DEFAULT_FINANCIAL_HEALTH_INTERVAL_MS = 60 * 60 * 1000;
+
+function createFinancialHealthScheduler({
+  intervalMs = DEFAULT_FINANCIAL_HEALTH_INTERVAL_MS, runOnStart = true, onError,
+} = {}) {
+  let timer = null;
+  let running = false;
+
+  async function tick() {
+    if (running) return;
+    running = true;
+    try {
+      await require('../hq/settlementInvariantMonitor').runInvariantCheck();
+      await require('../hq/settlementDocumentService').retryMissingDocuments();
+    } catch (err) {
+      if (onError) onError(err);
+      else console.error('[scheduler/postgresql] financial health check failed:', err.message);
+    } finally {
+      running = false;
+    }
+  }
+
+  return {
+    start() {
+      if (timer) return;
+      timer = setInterval(tick, intervalMs);
+      if (typeof timer.unref === 'function') timer.unref();
+      if (runOnStart) tick().catch(() => {});
+    },
+    stop() { if (timer) { clearInterval(timer); timer = null; } },
+    isRunning() { return timer !== null; },
+    tick,
+  };
+}
+
 module.exports = {
+  createPaymentReconciliationScheduler,
+  createFinancialHealthScheduler,
+  DEFAULT_PAYMENT_RECONCILIATION_INTERVAL_MS,
+  DEFAULT_FINANCIAL_HEALTH_INTERVAL_MS,
   createWeeklySettlementScheduler,
   DEFAULT_WEEKLY_SETTLEMENT_INTERVAL_MS,
   createPauseExpiryScheduler,
