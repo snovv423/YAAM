@@ -427,6 +427,13 @@ function createPostgresqlApp({
   const weeklySettlementScheduler = createWeeklySettlementScheduler({
     intervalMs: weeklySettlementIntervalMs,
     runOnStart: weeklySettlementRunOnStart,
+    // Уведомление ресторана о готовых документах периода. Бот спрашивается в
+    // момент тика (см. комментарий в scheduler.js), поэтому botAdapter ниже
+    // по файлу — к первому тику он уже создан.
+    getBot: () => (botAdapter ? botAdapter.getBot() : null),
+    // База для capability-ссылок. В production/staging env.js уже требует эту
+    // переменную; в dev её может не быть — тогда ссылки просто не выдаются.
+    publicBaseUrl: env.PUBLIC_BACKEND_URL || null,
   });
 
   const refundReconciliationScheduler = createRefundReconciliationScheduler({

@@ -775,8 +775,21 @@ test('H3: группа не подключена и ошибка adapter — д�
     assert.equal(failed.reason, 'send_failed');
 
     // Оба случая в аудите, документы на месте.
-    const audit = await db.query("SELECT COUNT(*)::int AS c FROM hq_audit_log WHERE action = 'settlement_notification_failed'");
-    assert.equal(audit[0].c, 2);
+    //
+    // Событий три, а не два: с Stage 19.2 сам job после закрытия периода тоже
+    // пытается уведомить ресторан, и в этом тесте бот в job не передан —
+    // попытка честно фиксируется как 'bot_unavailable'. Проверяем не голое
+    // число, а состав: две проверяемые здесь причины плюс попытка job.
+    const audit = await db.query(
+      "SELECT details FROM hq_audit_log WHERE action = 'settlement_notification_failed' ORDER BY id",
+    );
+    assert.equal(audit.length, 3);
+    assert.equal(audit.filter((r) => /Telegram-группа ресторана не подключена/.test(r.details)).length, 2,
+      'группа не подключена: попытка job при закрытии периода и явная проверка выше');
+    assert.equal(audit.filter((r) => /network down/.test(r.details)).length, 1,
+      'сбой adapter зафиксирован ровно один раз');
+    // Токен не попадает в аудит ни при одной из причин.
+    assert.ok(!audit.some((r) => /yaam_doc_v1_/.test(r.details)), 'в аудите не должно быть токена');
     const periodId = (await db.query('SELECT id FROM settlement_periods'))[0].id;
     const docs = await documentService.listDocumentsForPeriod(periodId);
     assert.equal(docs.length, 2, 'документы не зависят от доставки уведомления');

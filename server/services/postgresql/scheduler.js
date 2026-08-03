@@ -194,6 +194,16 @@ const DEFAULT_WEEKLY_SETTLEMENT_INTERVAL_MS = 15 * 60 * 1000;
 
 function createWeeklySettlementScheduler({
   intervalMs = DEFAULT_WEEKLY_SETTLEMENT_INTERVAL_MS, runOnStart = true, onError,
+  // Уведомление ресторана о готовых документах закрытого периода.
+  //
+  // getBot — функция, а не сам клиент: бот запускается и останавливается
+  // независимо от планировщика, поэтому клиент нужно спрашивать в момент
+  // тика, а не запоминать при создании (иначе после рестарта бота здесь
+  // остался бы мёртвый объект).
+  //
+  // publicBaseUrl — база для capability-ссылок (PUBLIC_BACKEND_URL). Пустое
+  // значение допустимо: ссылки просто не выдаются, документы остаются в HQ.
+  getBot = null, publicBaseUrl = null,
 } = {}) {
   let timer = null;
   let running = false;
@@ -206,7 +216,10 @@ function createWeeklySettlementScheduler({
     running = true;
     try {
       const weeklySettlementService = require('../hq/weeklySettlementService');
-      await weeklySettlementService.runWeeklySettlementJob();
+      await weeklySettlementService.runWeeklySettlementJob({
+        bot: typeof getBot === 'function' ? getBot() : null,
+        publicBaseUrl,
+      });
     } catch (err) {
       if (onError) onError(err);
       else console.error('[scheduler/postgresql] runWeeklySettlementJob failed:', err.message);

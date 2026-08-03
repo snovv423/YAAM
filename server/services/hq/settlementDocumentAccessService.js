@@ -30,6 +30,21 @@ const TOKEN_RE = new RegExp(`^${TOKEN_PREFIX}[A-Za-z0-9_-]{43}$`);
 // это бессрочный риск. По истечении владелец выдаёт новую из HQ.
 const DEFAULT_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
+// Сколько ДЕЙСТВУЮЩИХ токенов может существовать у одного документа.
+//
+// ЗАЧЕМ ОГРАНИЧЕНИЕ. Открытый токен существует ровно один раз — в момент
+// выдачи. Значит «отправить ссылку ещё раз» физически означает «выпустить
+// новый токен», и без верхней границы любой повторяющийся вызов (повторный
+// запуск job, повторная отправка уведомления, ретрай) наращивал бы число
+// действующих ключей к одному и тому же документу неограниченно. Каждый из
+// них — самостоятельный доступ, который переживёт и рассылку, и переписку.
+//
+// Три — чтобы законный повтор (сообщение не дошло, ресторан просит ещё раз)
+// работал, но счёт не рос. При выпуске сверх лимита самая старая действующая
+// ссылка отзывается: у документа всегда не более трёх живых ключей, и
+// последняя выданная ссылка всегда рабочая.
+const MAX_ACTIVE_TOKENS_PER_DOCUMENT = 3;
+
 function generateToken() {
   return `${TOKEN_PREFIX}${crypto.randomBytes(32).toString('base64url')}`;
 }
@@ -45,7 +60,10 @@ function hashToken(token) {
 // Выдаёт токен на конкретный документ. Проверяет, что документ действительно
 // принадлежит указанному ресторану — иначе токен связал бы ресторан с чужим
 // документом.
-async function issueToken(documentId, { ttlMs = DEFAULT_TTL_MS, now = new Date(), ip = null } = {}) {
+async function issueToken(documentId, {
+  ttlMs = DEFAULT_TTL_MS, now = new Date(), ip = null,
+  maxActive = MAX_ACTIVE_TOKENS_PER_DOCUMENT,
+} = {}) {
   const rows = await db.query(
     'SELECT id, restaurant_id, kind, status FROM settlement_documents WHERE id = $1',
     [documentId],
@@ -54,6 +72,11 @@ async function issueToken(documentId, { ttlMs = DEFAULT_TTL_MS, now = new Date()
   if (!document) return null;
   // Незавершённый документ отдавать ресторану нечего.
   if (document.status !== 'generated') return null;
+
+  // Верхняя граница числа живых ключей (см. MAX_ACTIVE_TOKENS_PER_DOCUMENT).
+  // Отзыв идёт ДО вставки: иначе в момент между вставкой и отзывом у
+  // документа оказалось бы на один действующий токен больше лимита.
+  const revokedForLimit = await enforceActiveTokenLimit(document, { now, ip, maxActive });
 
   const token = generateToken();
   const expiresAt = new Date(now.getTime() + ttlMs);
@@ -71,7 +94,60 @@ async function issueToken(documentId, { ttlMs = DEFAULT_TTL_MS, now = new Date()
     ip,
   });
 
-  return { token, tokenId: inserted.rows[0].id, documentId: document.id, expiresAt };
+  return {
+    token, tokenId: inserted.rows[0].id, documentId: document.id, expiresAt,
+    revokedForLimit,
+  };
+}
+
+// Считает ДЕЙСТВУЮЩИЕ токены документа: не отозванные и не просроченные.
+// Просроченные не отзываются и не удаляются — они уже не работают, а история
+// выдач нужна аудиту.
+async function countActiveTokens(documentId, { now = new Date() } = {}) {
+  const rows = await db.query(
+    `SELECT COUNT(*)::int AS n FROM settlement_document_access_tokens
+      WHERE document_id = $1 AND revoked_at IS NULL AND expires_at > $2`,
+    [documentId, now],
+  );
+  return rows[0].n;
+}
+
+// Освобождает место под новый токен: если действующих уже maxActive и больше,
+// отзывает самые СТАРЫЕ, оставляя ровно maxActive-1. Возвращает число
+// отозванных.
+//
+// Почему отзыв старых, а не отказ в выдаче: открытый токен существует лишь в
+// момент создания, поэтому «повторно отдать ту же ссылку» невозможно в
+// принципе. Отказ означал бы, что законный повтор уведомления уходит без
+// рабочей ссылки. Отзыв старых сохраняет и границу, и работоспособность
+// последней выданной ссылки.
+async function enforceActiveTokenLimit(document, { now = new Date(), ip = null, maxActive }) {
+  if (!Number.isInteger(maxActive) || maxActive < 1) return 0;
+
+  const stale = await db.query(
+    `SELECT id FROM settlement_document_access_tokens
+      WHERE document_id = $1 AND revoked_at IS NULL AND expires_at > $2
+      ORDER BY id ASC`,
+    [document.id, now],
+  );
+  const excess = stale.length - (maxActive - 1);
+  if (excess <= 0) return 0;
+
+  const ids = stale.slice(0, excess).map((r) => r.id);
+  await db.execute(
+    `UPDATE settlement_document_access_tokens
+        SET revoked_at = NOW()
+      WHERE id = ANY($1) AND revoked_at IS NULL`,
+    [ids],
+  );
+  await logAuditEvent({
+    action: 'settlement_document_token_revoked', restaurantId: document.restaurant_id,
+    // Идентификаторы, не токены.
+    details: `отозвано ${ids.length} старых ссылок документа #${document.id}: `
+      + `достигнут предел действующих ссылок (${maxActive})`,
+    ip,
+  });
+  return ids.length;
 }
 
 // Проверяет токен и возвращает документ. Различает причины отказа, но НАРУЖУ
@@ -171,20 +247,42 @@ async function revokeTokensForDocument(documentId, { ip = null } = {}) {
   return updated.rows.length;
 }
 
-function buildDocumentUrl(publicBaseUrl, token) {
+// База обязана быть АБСОЛЮТНЫМ http(s)-адресом. Пустое, относительное или
+// испорченное значение переменной окружения не должно превращаться в ссылку
+// вида "undefined/d/<token>" или "/d/<token>": такая ссылка не откроется, но
+// токен в ней уже выпущен и уже ушёл в сообщение. Лучше не дать ссылки вовсе
+// (документы остаются доступны владельцу в HQ), чем выдать нерабочую.
+function normalizePublicBaseUrl(publicBaseUrl) {
   if (!publicBaseUrl) return null;
-  return `${String(publicBaseUrl).replace(/\/$/, '')}/d/${token}`;
+  let parsed;
+  try {
+    parsed = new URL(String(publicBaseUrl));
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return null;
+  if (!parsed.hostname) return null;
+  return `${parsed.origin}${parsed.pathname.replace(/\/+$/, '')}`;
+}
+
+function buildDocumentUrl(publicBaseUrl, token) {
+  const base = normalizePublicBaseUrl(publicBaseUrl);
+  if (!base || !isValidTokenFormat(token)) return null;
+  return `${base}/d/${token}`;
 }
 
 module.exports = {
   TOKEN_PREFIX,
   DEFAULT_TTL_MS,
+  MAX_ACTIVE_TOKENS_PER_DOCUMENT,
   generateToken,
   isValidTokenFormat,
   hashToken,
   issueToken,
+  countActiveTokens,
   resolveToken,
   revokeToken,
   revokeTokensForDocument,
+  normalizePublicBaseUrl,
   buildDocumentUrl,
 };

@@ -287,7 +287,13 @@ async function closeWeek({ periodFrom, periodTo, existingId }, { now = new Date(
 //
 // Advisory-лока НЕ блокирующая (pg_try_advisory_lock): если job уже идёт на
 // другом процессе, второй запуск тихо выходит, а не ждёт и не дублирует.
-async function runWeeklySettlementJob({ now = new Date(), generateDocuments = true } = {}) {
+async function runWeeklySettlementJob({
+  now = new Date(), generateDocuments = true,
+  // Уведомление ресторана о готовых документах. Передаются СВЕРХУ (scheduler
+  // получает их от приложения): этот модуль не должен знать ни про
+  // process.env, ни про то, как устроен bot-клиент.
+  bot = null, publicBaseUrl = null, notifyRestaurants = true,
+} = {}) {
   const lockClient = await db.getPool().connect();
   let locked = false;
   try {
@@ -295,7 +301,7 @@ async function runWeeklySettlementJob({ now = new Date(), generateDocuments = tr
     locked = lockRes.rows[0].acquired === true;
     if (!locked) {
       return {
-        skipped: true, reason: 'already_running', closed: [], failed: [], blocked: [],
+        skipped: true, reason: 'already_running', closed: [], failed: [], blocked: [], notified: [],
         queued: 0, processed: 0, remaining: 0, remainingWeeks: [],
       };
     }
@@ -305,6 +311,7 @@ async function runWeeklySettlementJob({ now = new Date(), generateDocuments = tr
     const { due: allDue, blocked } = await findDueWeeks(now);
     const closed = [];
     const failed = [];
+    const notified = [];
 
     // Заблокированные недели фиксируются РОВНО ОДИН РАЗ на каждое изменение
     // состава блокировки, а не на каждый запуск job. Раньше такая неделя
@@ -352,6 +359,21 @@ async function runWeeklySettlementJob({ now = new Date(), generateDocuments = tr
             // изолирована (статус «Ошибка» у документа, а не откат бухгалтерии).
             // eslint-disable-next-line no-await-in-loop
             await safeGenerateDocuments(result.periodId);
+
+            // Единственная runtime-точка выдачи capability-ссылок. Стоит
+            // ЗДЕСЬ, а не в отдельном проходе, по трём причинам:
+            //   1) документы уже созданы и неизменяемы — ссылке есть на что
+            //      указывать;
+            //   2) ветка достижима ТОЛЬКО при result.closed, то есть на
+            //      переходе периода в closed. Повторный запуск job получает
+            //      alreadyClosed и сюда не попадает — токены не плодятся;
+            //   3) финансовая часть уже зафиксирована, поэтому любая ошибка
+            //      уведомления не может её откатить.
+            if (notifyRestaurants) {
+              // eslint-disable-next-line no-await-in-loop
+              const sent = await safeNotifyRestaurants(result, { bot, publicBaseUrl });
+              notified.push(...sent);
+            }
           }
         }
       } catch (err) {
@@ -383,7 +405,7 @@ async function runWeeklySettlementJob({ now = new Date(), generateDocuments = tr
       ip: null,
     });
     return {
-      skipped: false, closed, failed, blocked,
+      skipped: false, closed, failed, blocked, notified,
       queued: allDue.length, processed: batch.length, remaining: deferred.length,
       remainingWeeks: deferred,
     };
@@ -436,6 +458,50 @@ async function reportBlockedWeeks(blocked) {
     action: 'settlement_week_blocked', restaurantId: null, details: signature, ip: null,
   });
   return { reported: true, signature };
+}
+
+// Уведомление ресторанов закрытого периода о готовности документов.
+//
+// ГЛАВНОЕ СВОЙСТВО: не может повлиять на уже закрытый период. Период
+// зафиксирован и неизменяем к моменту вызова; здесь только чтение документов,
+// выпуск capability-ссылок и отправка. Любая ошибка — своя на каждый
+// ресторан — записывается и не прерывает ни остальные рестораны, ни job.
+//
+// Токен НИКОГДА не попадает ни в лог, ни в аудит: наружу отдаётся только
+// признак наличия ссылок и их количество.
+async function safeNotifyRestaurants(result, { bot = null, publicBaseUrl = null } = {}) {
+  const sent = [];
+  // Ленивый require — тот же приём и по той же причине, что у documentService.
+  const notificationService = require('./settlementNotificationService');
+
+  // Рестораны берём из строк уже закрытого периода: ровно те, у кого есть
+  // финансовый результат. Ресторан без строки уведомлять не о чем.
+  const restaurantIds = [...new Set((result.lines || []).map((l) => l.restaurantId ?? l.restaurant_id))]
+    .filter((id) => Number.isInteger(id));
+
+  for (const restaurantId of restaurantIds) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      const outcome = await notificationService.notifyRestaurantAboutDocuments(
+        result.periodId, restaurantId, { bot, publicBaseUrl },
+      );
+      sent.push({ periodId: result.periodId, restaurantId, sent: outcome.sent, reason: outcome.reason });
+    } catch (err) {
+      // Сообщение об ошибке может содержать что угодно, но не токен: сюда
+      // он не передаётся вовсе. Период при этом остаётся закрытым.
+      console.error(
+        `[weeklySettlement] уведомление ресторана #${restaurantId} о документах периода `
+        + `${result.periodId} не удалось: ${err.message}`,
+      );
+      // eslint-disable-next-line no-await-in-loop
+      await logAuditEvent({
+        action: 'settlement_notification_failed', restaurantId,
+        details: `период #${result.periodId}: ${err.message}`, ip: null,
+      });
+      sent.push({ periodId: result.periodId, restaurantId, sent: false, reason: 'exception' });
+    }
+  }
+  return sent;
 }
 
 // Ленивый require — documentService зависит от settlementService, а тот от

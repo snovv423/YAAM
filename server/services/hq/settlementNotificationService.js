@@ -89,8 +89,15 @@ function buildDocumentsMessage({ line, period, documentLinks = [] }) {
 // /d/<token> и открывает РОВНО ОДИН документ — ни HQ, ни другие периоды, ни
 // документы других ресторанов через неё недоступны.
 async function issueDocumentLinks(periodId, restaurantId, publicBaseUrl) {
-  if (!publicBaseUrl) return [];
+  // База проверяется ДО выпуска: токен, для которого невозможно собрать
+  // адрес, был бы выпущен впустую — он занял бы место в лимите действующих
+  // ссылок документа и остался бы жить в базе, никому не пригодившись.
+  const base = accessService.normalizePublicBaseUrl(publicBaseUrl);
+  if (!base) return [];
+
   const all = await documentService.listDocumentsForPeriod(periodId);
+  // Фильтр по restaurant_id — первая граница: чужой документ сюда не попадёт.
+  // Вторая — внутри issueToken, который сам сверяет владельца документа.
   const mine = all.filter((d) => d.restaurant_id === restaurantId && d.status === 'generated');
 
   const links = [];
@@ -98,10 +105,15 @@ async function issueDocumentLinks(periodId, restaurantId, publicBaseUrl) {
     // eslint-disable-next-line no-await-in-loop
     const issued = await accessService.issueToken(doc.id);
     if (!issued) continue;
-    links.push({
-      text: DOCUMENT_LINK_LABELS[doc.kind] || 'Документ',
-      url: accessService.buildDocumentUrl(publicBaseUrl, issued.token),
-    });
+    const url = accessService.buildDocumentUrl(base, issued.token);
+    // Собрать адрес не удалось уже после выпуска — ссылку не отдаём и токен
+    // сразу отзываем, чтобы он не остался действующим ключом без применения.
+    if (!url) {
+      // eslint-disable-next-line no-await-in-loop
+      await accessService.revokeToken(issued.tokenId);
+      continue;
+    }
+    links.push({ text: DOCUMENT_LINK_LABELS[doc.kind] || 'Документ', url });
   }
   return links;
 }

@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# YAAM — шифрованная offsite-копия логических backup PostgreSQL.
+#
+# Это ФАКТИЧЕСКИ РАБОТАЮЩИЙ скрипт VPS
+# (/usr/local/sbin/yaam-pg-offsite-backup).
+#
+# Stage 19.2: обрабатываются ОБЕ базы одним проходом. Heartbeat отправляется
+# ровно один раз и только после того, как ОБЕ базы проверены и загружены —
+# иначе «зелёный» мониторинг означал бы «хотя бы одна база жива», а это не то,
+# что нужно знать.
+set -Eeuo pipefail
+umask 077
+export AWS_EC2_METADATA_DISABLED=true
+
+credentials_file=/etc/yaam/offsite-backup.env
+alerting_file=/etc/yaam/alerting.env
+identity_file=/etc/yaam/offsite-backup.agekey
+backup_dir=/var/backups/yaam
+state_dir=/var/lib/yaam/offsite-backup
+work_parent=${state_dir}/tmp
+work_dir=
+heartbeat_url=
+
+# Те же базы и в том же порядке, что в yaam-pg-backup. Список задан явно:
+# «выгружать всё, что нашлось в каталоге» означало бы, что забытый или
+# посторонний файл молча уезжает в облако.
+databases=(yaam_production yaam_hqtest)
+
+fail() {
+  printf 'ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+[[ -r "$credentials_file" ]] || fail "credentials file is not readable"
+[[ -r "$identity_file" ]] || fail "age identity is not readable"
+[[ -r "$alerting_file" ]] || fail "alerting file is not readable"
+
+set -a
+# shellcheck disable=SC1090
+source "$credentials_file"
+# shellcheck disable=SC1090
+source "$alerting_file"
+set +a
+
+: "${AWS_ACCESS_KEY_ID:?missing AWS_ACCESS_KEY_ID}"
+: "${AWS_SECRET_ACCESS_KEY:?missing AWS_SECRET_ACCESS_KEY}"
+: "${AWS_DEFAULT_REGION:?missing AWS_DEFAULT_REGION}"
+: "${S3_ENDPOINT_URL:?missing S3_ENDPOINT_URL}"
+: "${S3_BUCKET:?missing S3_BUCKET}"
+: "${BETTERSTACK_BACKUP_HEARTBEAT_URL:?missing BETTERSTACK_BACKUP_HEARTBEAT_URL}"
+heartbeat_url="$BETTERSTACK_BACKUP_HEARTBEAT_URL"
+
+cleanup() {
+  status=$?
+  trap - EXIT
+  if [[ -n "$work_dir" ]]; then
+    rm -rf -- "$work_dir"
+  fi
+  # Любой ненулевой выход — включая сбой на ВТОРОЙ базе, когда первая уже
+  # уехала, — гасит heartbeat. Частичный успех успехом не считается.
+  if (( status != 0 )) && [[ -n "$heartbeat_url" ]]; then
+    curl --fail --silent --show-error --max-time 10 "${heartbeat_url}/fail" >/dev/null || true
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
+
+install -d -o root -g root -m 0700 "$state_dir" "$work_parent"
+work_dir="$(mktemp -d "${work_parent}/run.XXXXXXXX")"
+recipient="$(age-keygen -y "$identity_file")"
+upload_timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+object_date="$(date -u +%Y/%m/%d)"
+
+uploaded_keys=()
+
+for database in "${databases[@]}"; do
+  latest_record="$(find "$backup_dir" -maxdepth 1 -type f -name "${database}_*.dump" \
+    -printf '%T@ %p\n' | sort -nr | head -n 1)"
+  [[ -n "$latest_record" ]] || fail "no local dump found for ${database}"
+  latest_dump="${latest_record#* }"
+  [[ -f "$latest_dump" ]] || fail "latest dump for ${database} disappeared"
+
+  dump_size="$(stat -c '%s' "$latest_dump")"
+  (( dump_size >= 1024 )) || fail "latest dump for ${database} is unexpectedly small"
+
+  # Свежесть проверяется отдельно для каждой базы: устаревшая копия одной из
+  # них — это уже сбой, даже если вторая снялась пять минут назад.
+  now_epoch="$(date -u +%s)"
+  dump_epoch="$(stat -c '%Y' "$latest_dump")"
+  dump_age_seconds="$((now_epoch - dump_epoch))"
+  (( dump_age_seconds <= 129600 )) || fail "latest local dump for ${database} is older than 36 hours"
+
+  pg_restore --list "$latest_dump" >/dev/null
+
+  dump_basename="$(basename "$latest_dump")"
+  # Имя объекта содержит имя базы (оно уже есть в dump_basename), поэтому в
+  # бакете видно, что именно лежит, без скачивания и расшифровки.
+  object_basename="${dump_basename%.dump}_offsite_${upload_timestamp}.dump.age"
+  encrypted_file="${work_dir}/${object_basename}"
+  checksum_file="${encrypted_file}.sha256"
+  object_key="daily/${object_date}/${database}/${object_basename}"
+
+  age --encrypt --recipient "$recipient" --output "$encrypted_file" "$latest_dump"
+  encrypted_size="$(stat -c '%s' "$encrypted_file")"
+  (( encrypted_size > dump_size )) || fail "encrypted artifact for ${database} is invalid"
+
+  (
+    cd "$work_dir"
+    sha256sum "$object_basename" > "${object_basename}.sha256"
+  )
+
+  aws --endpoint-url "$S3_ENDPOINT_URL" s3 cp \
+    "$encrypted_file" "s3://${S3_BUCKET}/${object_key}" --only-show-errors
+  aws --endpoint-url "$S3_ENDPOINT_URL" s3 cp \
+    "$checksum_file" "s3://${S3_BUCKET}/${object_key}.sha256" --only-show-errors
+
+  remote_size="$(aws --endpoint-url "$S3_ENDPOINT_URL" s3api head-object \
+    --bucket "$S3_BUCKET" --key "$object_key" --query ContentLength --output text)"
+  [[ "$remote_size" == "$encrypted_size" ]] || fail "remote object size mismatch for ${database}"
+
+  printf '%s\n' "$object_key" > "${state_dir}/last-object-key.${database}"
+  printf '%s\n' "$encrypted_size" > "${state_dir}/last-object-size.${database}"
+  uploaded_keys+=("$object_key")
+
+  printf 'uploaded %s: key=%s bytes=%s source_age_seconds=%s\n' \
+    "$database" "$object_key" "$encrypted_size" "$dump_age_seconds"
+done
+
+(( ${#uploaded_keys[@]} == ${#databases[@]} )) \
+  || fail "uploaded ${#uploaded_keys[@]} of ${#databases[@]} databases"
+
+success_timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+printf '%s\n' "$success_timestamp" > "${state_dir}/last-success.utc"
+
+# Heartbeat — последним действием и только здесь: до этой строки любая
+# проверка любой из баз могла бы прервать выполнение.
+curl --fail --silent --show-error --max-time 10 "$heartbeat_url" >/dev/null
+
+printf 'all %s databases uploaded offsite\n' "${#databases[@]}"

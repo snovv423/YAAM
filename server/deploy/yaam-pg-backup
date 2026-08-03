@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# YAAM — ежедневный локальный логический backup PostgreSQL.
+#
+# Это ФАКТИЧЕСКИ РАБОТАЮЩИЙ скрипт VPS (/usr/local/sbin/yaam-pg-backup), а не
+# черновик: репозиторий обязан содержать ровно то, что стоит на сервере,
+# иначе восстановление опирается на догадку. Прежний шаблон
+# deploy/backup-postgresql.sh описывал ДРУГУЮ схему (gpg, одна база) и с
+# реальностью не совпадал.
+#
+# Stage 19.2: базы стало две. Обе обслуживаются ОДНИМ механизмом — один
+# скрипт, один service, один timer. Второй параллельной системы нет.
+#
+# СЕКРЕТЫ НЕ ЗАШИТЫ. Пароли берутся из PGPASSFILE (обычно /opt/yaam/.pgpass,
+# права 600). Пароль в командной строке был бы виден в `ps` любому
+# пользователю системы.
+set -uo pipefail
+umask 077
+
+backup_dir=/var/backups/yaam
+retention_days=14
+timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+
+# Список баз: "<база>:<роль>". Роль важна — у каждой базы свой владелец, и
+# роль production не имеет прав на таблицы hqtest (проверено: pg_dump падает
+# на "permission denied for table restaurants").
+databases=(
+  "yaam_production:yaam_app"
+  "yaam_hqtest:yaam_hqtest_app"
+)
+
+failures=0
+
+for entry in "${databases[@]}"; do
+  database="${entry%%:*}"
+  role="${entry##*:}"
+
+  temporary_file="${backup_dir}/.${database}_${timestamp}.dump.tmp"
+  final_file="${backup_dir}/${database}_${timestamp}.dump"
+
+  # Дамп сначала во временный файл: прерванный на середине pg_dump не должен
+  # оставить укороченный файл с «правильным» именем — offsite-скрипт принял
+  # бы его за годную копию.
+  if ! pg_dump \
+      --format=custom \
+      --host=127.0.0.1 \
+      --port=5432 \
+      --username="$role" \
+      --dbname="$database" \
+      --file="$temporary_file"; then
+    printf 'ERROR: pg_dump failed for database %s\n' "$database" >&2
+    rm -f "$temporary_file"
+    failures=$((failures + 1))
+    # ПРОДОЛЖАЕМ со следующей базой: сбой одной базы не должен лишать
+    # резервной копии остальные. Общий код возврата всё равно будет ненулевым.
+    continue
+  fi
+
+  size="$(stat -c '%s' "$temporary_file" 2>/dev/null || echo 0)"
+  # Пустой или подозрительно маленький дамп — это провалившийся backup,
+  # который выглядит успешным.
+  if (( size < 1024 )); then
+    printf 'ERROR: dump for %s is unexpectedly small (%s bytes)\n' "$database" "$size" >&2
+    rm -f "$temporary_file"
+    failures=$((failures + 1))
+    continue
+  fi
+
+  # Читаемость архива проверяется здесь, а не только при восстановлении:
+  # непрочитываемый дамп обнаружится в день создания, а не в день аварии.
+  if ! pg_restore --list "$temporary_file" >/dev/null 2>&1; then
+    printf 'ERROR: dump for %s is not readable by pg_restore\n' "$database" >&2
+    rm -f "$temporary_file"
+    failures=$((failures + 1))
+    continue
+  fi
+
+  mv "$temporary_file" "$final_file"
+  chmod 600 "$final_file"
+
+  # Контрольная сумма рядом с архивом: позволяет доказать целостность копии,
+  # не расшифровывая и не восстанавливая её.
+  ( cd "$backup_dir" && sha256sum "$(basename "$final_file")" > "$(basename "$final_file").sha256" )
+  chmod 600 "${final_file}.sha256"
+
+  printf 'ok: %s -> %s (%s bytes)\n' "$database" "$final_file" "$size"
+
+  # Ротация ТОЛЬКО своей базы и только ПОСЛЕ успешной проверки текущей копии.
+  # Шаблон имени включает имя базы, поэтому копии production и hqtest не
+  # могут удалить или перезаписать друг друга.
+  find "$backup_dir" -maxdepth 1 -type f -name "${database}_*.dump" -mtime "+${retention_days}" -delete
+  find "$backup_dir" -maxdepth 1 -type f -name "${database}_*.dump.sha256" -mtime "+${retention_days}" -delete
+done
+
+if (( failures > 0 )); then
+  printf 'ERROR: %s of %s database backups failed\n' "$failures" "${#databases[@]}" >&2
+  exit 1
+fi
+
+printf 'all %s database backups completed\n' "${#databases[@]}"
