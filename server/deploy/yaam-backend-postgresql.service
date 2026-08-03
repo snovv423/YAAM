@@ -45,11 +45,34 @@ ExecStart=/usr/bin/node server.postgresql.js
 Restart=on-failure
 RestartSec=5
 
-# Graceful shutdown: services/postgresql/lifecycle.js (Stage 6) обрабатывает
+# Graceful shutdown: services/postgresql/lifecycle.js обрабатывает
 # SIGTERM/SIGINT — снимает signal listeners, останавливает schedulers/бота,
-# закрывает HTTP-сервер (ждёт in-flight запросы), закрывает пул PostgreSQL.
-# TimeoutStopSec — запас сверх обычного (почти мгновенного) завершения.
-TimeoutStopSec=15
+# закрывает HTTP-сервер и пул PostgreSQL.
+#
+# Stage 15: у приложения СВОЙ предел ожидания активных запросов (15 секунд,
+# SHUTDOWN_TIMEOUT_MS). TimeoutStopSec обязан быть БОЛЬШЕ — иначе systemd
+# пришлёт SIGKILL раньше, чем приложение успеет закрыться само, и
+# «graceful» окажется не graceful ровно при деплое. 30 > 15 с запасом.
+TimeoutStopSec=30
+KillSignal=SIGTERM
+
+# Stage 15 — минимальное ужесточение прав. Приложению не нужен ни root, ни
+# запись куда-либо, кроме своего каталога данных.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+# Каталоги, куда приложению писать РАЗРЕШЕНО (медиа-хранилище, если оно
+# локальное). Всё остальное файловое дерево только для чтения.
+ReadWritePaths=/opt/yaam/data
+
+# Логи уходят в journald структурированным JSON (services/observability/logger.js).
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=yaam-backend-pg
 
 # Множественные инстансы этого юнита (в отличие от SQLite-версии) физически
 # БЕЗОПАСНЫ на уровне БД (PostgreSQL — клиент-серверная СУБД) — но этот

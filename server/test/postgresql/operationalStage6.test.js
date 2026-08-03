@@ -288,15 +288,30 @@ test('C3: readiness() отражает остановленный scheduler', as
   assert.equal(result.schedulers[0].running, false);
 });
 
-test('C4: readiness() — ok:false с понятной ошибкой, если БД недоступна (симулировано)', async () => {
-  const health = healthModule.createHealthCheck({ getSchedulers: () => [] });
+// Stage 15 изменил этот тест сознательно: раньше readiness отдавал наружу
+// СЫРОЕ сообщение драйвера pg. Оно способно содержать строку подключения с
+// паролем, имя пользователя и хост, а /health/ready анонимен — это была
+// прямая утечка. Теперь наружу уходит только факт недоступности, а
+// подробности пишутся в лог с редактированием.
+test('C4: readiness() — ok:false без утечки сообщения драйвера, если БД недоступна', async () => {
+  const health = healthModule.createHealthCheck({
+    getSchedulers: () => [],
+    logger: { error: () => {}, warn: () => {}, info: () => {} },
+  });
   const originalQuery = db.query;
-  db.query = async () => { throw new Error('симулированный обрыв соединения'); };
+  db.query = async () => {
+    throw new Error('симулированный обрыв: postgres://yaam:SUPERSECRET@10.0.0.5:5432/yaam');
+  };
   try {
     const result = await health.readiness();
     assert.equal(result.ok, false);
     assert.equal(result.database.ok, false);
-    assert.match(result.database.error, /симулированный обрыв/);
+    assert.equal(result.database.error, 'database unavailable');
+    // Ни пароля, ни хоста, ни имени пользователя в ответе быть не должно.
+    const serialized = JSON.stringify(result);
+    assert.ok(!serialized.includes('SUPERSECRET'));
+    assert.ok(!serialized.includes('10.0.0.5'));
+    assert.ok(!serialized.includes('симулированный обрыв'));
   } finally {
     db.query = originalQuery;
   }
@@ -397,10 +412,17 @@ test('D3b: GET /health/ready отдаёт commitSha из GIT_COMMIT_SHA (env), �
     assert.equal(ready.body.database.ok, true);
     // Не утекают ни DATABASE_URL, ни любой другой секрет/env-переменная —
     // ответ содержит РОВНО ожидаемый набор верхнеуровневых полей.
+    // Stage 15 добавил два поля: migrations и config — обе части готовности
+    // (непринятая миграция и запрещающая запуск конфигурация обязаны делать
+    // инстанс not ready). Набор проверяется целиком именно для того, чтобы
+    // новое поле нельзя было добавить незаметно.
     assert.deepEqual(
       Object.keys(ready.body).sort(),
-      ['bot', 'commitSha', 'database', 'ok', 'pool', 'schedulers', 'uptimeSec'].sort(),
+      ['bot', 'commitSha', 'config', 'database', 'migrations', 'ok', 'pool', 'schedulers', 'uptimeSec'].sort(),
     );
+    // config не раскрывает ни текстов ошибок, ни имён переменных.
+    assert.deepEqual(Object.keys(ready.body.config).sort(), ['mode', 'ok', 'problems']);
+    assert.deepEqual(Object.keys(ready.body.migrations).sort(), ['applied', 'ok', 'total']);
   } finally {
     await instance.stop();
   }

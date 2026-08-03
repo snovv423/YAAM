@@ -271,7 +271,15 @@ async function settingsPageAndCsrf(port, cookie) {
   return { html, csrf: extractCsrf(html) };
 }
 
-test('B4-B10: смена логина/пароля, logout после смены, старые cookie недействительны, security log', async () => {
+// Stage 14 обновил этот сценарий в двух местах, оба намеренно:
+//   1) смена логина УДАЛЕНА — HQ существует только для владельца YAAM,
+//      менять логин не у кого; маршрут отдаёт 404, а не просто скрыт в UI;
+//   2) успешная смена пароля больше НЕ выбрасывает владельца на форму входа:
+//      текущая сессия продолжает работать, а все остальные (вторая вкладка,
+//      другое устройство) становятся недействительными. Это не ослабление:
+//      украденная сессия теряет доступ в обоих вариантах — проверяется ниже
+//      отдельной второй сессией.
+test('B4-B10: смена пароля, судьба текущей и остальных сессий, security log', async () => {
   const databaseUrl = await freshDatabase('yaam_hq_change_creds_test');
   const { hashPassword: hp } = require('../../services/hq/passwordHash');
   const initialHash = await hp('InitialOwnerPass123!');
@@ -287,45 +295,22 @@ test('B4-B10: смена логина/пароля, logout после смены
   const db = require('../../db/postgresql');
 
   try {
-    // --- B4: смена логина, неверный текущий пароль сначала (B5) ---
     let { cookie } = await login(port, { username: 'owner', password: 'InitialOwnerPass123!' });
-
     let { html, csrf } = await settingsPageAndCsrf(port, cookie);
-    let body = new URLSearchParams({ _csrf: csrf, currentPassword: 'WRONG-password', newLogin: 'shouldnothappen' });
-    let res = await fetch(`http://127.0.0.1:${port}/hq/settings/change-login`, {
-      method: 'POST', redirect: 'manual',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie },
-      body: body.toString(),
-    });
-    assert.equal(res.status, 401, 'B5: неверный текущий пароль должен отклонить смену логина');
-    assert.match(await res.text(), /Неверный текущий пароль/);
-    const stillOldLogin = await login(port, { username: 'owner', password: 'InitialOwnerPass123!' });
-    assert.equal(stillOldLogin.status, 302, 'логин не должен был поменяться после отклонённой попытки');
+    let body;
+    let res;
 
-    // --- B4: смена логина, верный текущий пароль ---
-    ({ html, csrf } = await settingsPageAndCsrf(port, cookie));
-    body = new URLSearchParams({ _csrf: csrf, currentPassword: 'InitialOwnerPass123!', newLogin: 'newowner' });
+    // --- Смена логина удалена целиком ---
     res = await fetch(`http://127.0.0.1:${port}/hq/settings/change-login`, {
       method: 'POST', redirect: 'manual',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie },
-      body: body.toString(),
+      body: new URLSearchParams({ _csrf: csrf, currentPassword: 'InitialOwnerPass123!', newLogin: 'x' }).toString(),
     });
-    assert.equal(res.status, 302);
-    assert.equal(res.headers.get('location'), '/hq/login?changed=login');
+    assert.equal(res.status, 404, 'маршрут смены логина должен быть удалён, а не скрыт');
+    // Логин по-прежнему работает — ничего не изменилось.
+    assert.equal((await login(port, { username: 'owner', password: 'InitialOwnerPass123!' })).status, 302);
 
-    // старая сессия немедленно недействительна (логаут произошёл при самой смене).
-    const afterChangeSameCookie = await fetch(`http://127.0.0.1:${port}/hq`, { headers: { Cookie: cookie }, redirect: 'manual' });
-    assert.equal(afterChangeSameCookie.status, 302);
-    assert.equal(afterChangeSameCookie.headers.get('location'), '/hq/login');
-
-    const oldLoginNoLongerWorks = await login(port, { username: 'owner', password: 'InitialOwnerPass123!' });
-    assert.equal(oldLoginNoLongerWorks.status, 401, 'старый логин не должен работать после смены');
-
-    const newLoginWorks = await login(port, { username: 'newowner', password: 'InitialOwnerPass123!' });
-    assert.equal(newLoginWorks.status, 302, 'новый логин с тем же паролем должен работать');
-    cookie = newLoginWorks.cookie;
-
-    // --- B6/B7/B8/B9: смена пароля ---
+    // --- B7: неверный текущий пароль ---
     ({ html, csrf } = await settingsPageAndCsrf(port, cookie));
     body = new URLSearchParams({ _csrf: csrf, currentPassword: 'WRONG', newPassword: 'ValidNewPass123!', confirmPassword: 'ValidNewPass123!' });
     res = await fetch(`http://127.0.0.1:${port}/hq/settings/change-password`, {
@@ -336,6 +321,7 @@ test('B4-B10: смена логина/пароля, logout после смены
     assert.equal(res.status, 401, 'B7: неверный текущий пароль должен отклонить смену пароля');
     assert.match(await res.text(), /Неверный текущий пароль/);
 
+    // --- B8: пароли не совпадают ---
     ({ html, csrf } = await settingsPageAndCsrf(port, cookie));
     body = new URLSearchParams({ _csrf: csrf, currentPassword: 'InitialOwnerPass123!', newPassword: 'ValidNewPass123!', confirmPassword: 'DOES-NOT-MATCH' });
     res = await fetch(`http://127.0.0.1:${port}/hq/settings/change-password`, {
@@ -346,6 +332,7 @@ test('B4-B10: смена логина/пароля, logout после смены
     assert.equal(res.status, 400, 'B8: несовпадающее повторение пароля должно быть отклонено');
     assert.match(await res.text(), /не совпадают/);
 
+    // --- B9: слишком короткий ---
     ({ html, csrf } = await settingsPageAndCsrf(port, cookie));
     body = new URLSearchParams({ _csrf: csrf, currentPassword: 'InitialOwnerPass123!', newPassword: 'short', confirmPassword: 'short' });
     res = await fetch(`http://127.0.0.1:${port}/hq/settings/change-password`, {
@@ -356,9 +343,13 @@ test('B4-B10: смена логина/пароля, logout после смены
     assert.equal(res.status, 400, 'B9: слишком короткий пароль должен быть отклонён');
     assert.match(await res.text(), /не короче/);
 
-    // Ни одна из отклонённых попыток не должна была тронуть текущую сессию.
     const stillLoggedIn = await fetch(`http://127.0.0.1:${port}/hq`, { headers: { Cookie: cookie } });
-    assert.equal(stillLoggedIn.status, 200, 'отклонённые попытки смены пароля не должны были разлогинить текущую сессию');
+    assert.equal(stillLoggedIn.status, 200, 'отклонённые попытки не должны разлогинивать');
+
+    // --- Вторая сессия: она обязана умереть после смены пароля ---
+    const second = await login(port, { username: 'owner', password: 'InitialOwnerPass123!' });
+    assert.equal(second.status, 302);
+    assert.equal((await fetch(`http://127.0.0.1:${port}/hq`, { headers: { Cookie: second.cookie } })).status, 200);
 
     // --- B6: успешная смена пароля ---
     ({ html, csrf } = await settingsPageAndCsrf(port, cookie));
@@ -369,27 +360,45 @@ test('B4-B10: смена логина/пароля, logout после смены
       body: body.toString(),
     });
     assert.equal(res.status, 302);
-    assert.equal(res.headers.get('location'), '/hq/login?changed=password');
+    assert.equal(res.headers.get('location'), '/hq/settings?changed=password',
+      'после успеха владелец остаётся в настройках, а не выбрасывается на вход');
 
-    const oldPasswordNoLongerWorks = await login(port, { username: 'newowner', password: 'InitialOwnerPass123!' });
+    // Текущая сессия жива и видит подтверждение.
+    const afterChange = await fetch(`http://127.0.0.1:${port}/hq/settings?changed=password`, { headers: { Cookie: cookie } });
+    assert.equal(afterChange.status, 200, 'текущая сессия должна продолжать работать');
+    assert.match(await afterChange.text(), /Пароль изменён/);
+
+    // А ВТОРАЯ сессия — мертва.
+    const secondAfter = await fetch(`http://127.0.0.1:${port}/hq`, {
+      headers: { Cookie: second.cookie }, redirect: 'manual',
+    });
+    assert.equal(secondAfter.status, 302, 'остальные сессии обязаны стать недействительными');
+    assert.equal(secondAfter.headers.get('location'), '/hq/login');
+
+    const oldPasswordNoLongerWorks = await login(port, { username: 'owner', password: 'InitialOwnerPass123!' });
     assert.equal(oldPasswordNoLongerWorks.status, 401, 'старый пароль не должен работать после смены');
-
-    const newPasswordWorks = await login(port, { username: 'newowner', password: 'ValidNewPass123!' });
+    const newPasswordWorks = await login(port, { username: 'owner', password: 'ValidNewPass123!' });
     assert.equal(newPasswordWorks.status, 302, 'новый пароль должен работать');
 
-    // --- B10: security log содержит ожидаемую последовательность событий ---
+    // --- B10: security log ---
     const events = await db.query('SELECT event_type FROM hq_security_log ORDER BY id');
     const types = events.map((e) => e.event_type);
     assert.ok(types.includes('login_success'));
     assert.ok(types.includes('login_failed'));
-    assert.ok(types.includes('login_change'));
     assert.ok(types.includes('password_change'));
-    // Ни один тип события не хранит пароль/хеш — сама таблица физически не
-    // имеет для этого колонки (см. db/postgresql/schema.sql), но также
-    // явно проверим, что ни в одной строке лога нет намёка на пароль.
     const allRows = await db.query('SELECT * FROM hq_security_log');
     for (const row of allRows) {
       assert.ok(!Object.keys(row).some((k) => /password|hash/i.test(k)), 'hq_security_log не должен иметь колонок, похожих на пароль/хеш');
+    }
+
+    // Пароль не попадает и в бизнес-аудит: только факт и причина отказа.
+    const audit = await db.query(
+      "SELECT action, details FROM hq_audit_log WHERE action LIKE 'owner_password%' ORDER BY id");
+    assert.ok(audit.length >= 2, 'успех и отказ обязаны быть в аудите');
+    for (const a of audit) {
+      assert.ok(!String(a.details).includes('ValidNewPass123!'));
+      assert.ok(!String(a.details).includes('InitialOwnerPass123!'));
+      assert.ok(!/WRONG/.test(String(a.details)));
     }
   } finally {
     await instance.stop();

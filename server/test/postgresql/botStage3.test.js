@@ -118,7 +118,7 @@ function sqliteRenderOrderNewText(order) {
   const fulfillmentLine = order.fulfillment_type === 'pickup'
     ? '🏃 Самовывоз (курьер не нужен)'
     : `🛵 Доставка\nАдрес: ${order.address}`;
-  return `🆕 Новый заказ ${order.public_code}\n\n${itemsList}\n\nИтого: ${order.items_total} ₽\n${fulfillmentLine}\nТелефон: ${order.customer_phone}\nКомментарий: ${order.comment || '—'}\n\nОтветьте в течение 3 минут, иначе заказ отменится автоматически.`;
+  return `🆕 Новый заказ ${order.public_code}\n\n${itemsList}\n\nИтого: ${order.items_total} ₽\n${fulfillmentLine}\nТелефон: ${order.customer_phone}\nКомментарий: ${order.comment || '—'}\n\nОтветьте в течение 5 минут, иначе заказ отменится автоматически.`;
 }
 
 // ===========================================================================
@@ -215,7 +215,10 @@ test('B3: /start НЕВАЛИДНЫЙКОД — "Код не найден", ни
   }
 });
 
-test('B4: повторный /start тем же кодом из того же чата — безопасен (идемпотентный UPDATE, без ошибки)', async () => {
+// docs/HQ-PRODUCT-SPEC.md, раздел «Telegram»: код ОДНОРАЗОВЫЙ. Прежнее
+// поведение (повторный /start тем же кодом снова «подключает») больше не
+// действует — код гасится той же транзакцией, что и привязка.
+test('B4: повторный /start тем же кодом — код уже погашен, второй раз не подключает', async () => {
   const code = `CODE${uniqueSuffix().toUpperCase()}`;
   const restaurant = await pgCreateRestaurant({ connectCode: code });
   const fakeBot = new FakeTelegramBot();
@@ -223,16 +226,22 @@ test('B4: повторный /start тем же кодом из того же ч
   try {
     await fakeBot.triggerText('chat-b4', `/start ${code}`);
     await fakeBot.triggerText('chat-b4', `/start ${code}`);
-    const rows = await db.query('SELECT telegram_chat_id FROM restaurants WHERE id = $1', [restaurant.id]);
+    const rows = await db.query('SELECT telegram_chat_id, connect_code FROM restaurants WHERE id = $1', [restaurant.id]);
     assert.equal(rows[0].telegram_chat_id, 'chat-b4');
+    assert.equal(rows[0].connect_code, null, 'код должен быть погашен сразу после привязки');
     assert.equal(fakeBot.sentMessages.length, 2);
-    assert.match(fakeBot.sentMessages[1].text, /подключён/);
+    assert.match(fakeBot.sentMessages[0].text, /подключён/);
+    assert.match(fakeBot.sentMessages[1].text, /не найден или уже использован/);
   } finally {
     handlers.stop();
   }
 });
 
-test('B5: /start другим кодом из УЖЕ привязанного чата — не течёт в данные другого ресторана', async () => {
+// docs/HQ-PRODUCT-SPEC.md: одна Telegram-группа не может обслуживать два
+// ресторана. Прежнее поведение («последняя привязка побеждает», ресторан А
+// молча оставался с устаревшим chat_id) заменено явным отказом — на уровне
+// сервиса и частичным UNIQUE-индексом ux_restaurants_telegram_chat в схеме.
+test('B5: /start другим кодом из УЖЕ привязанного чата — отказ, вторая привязка не создаётся', async () => {
   const codeA = `CODEA${uniqueSuffix().toUpperCase()}`;
   const codeB = `CODEB${uniqueSuffix().toUpperCase()}`;
   const restaurantA = await pgCreateRestaurant({ connectCode: codeA, name: 'Ресторан А' });
@@ -243,16 +252,11 @@ test('B5: /start другим кодом из УЖЕ привязанного ч
     await fakeBot.triggerText('chat-b5', `/start ${codeA}`);
     await fakeBot.triggerText('chat-b5', `/start ${codeB}`);
     const rowsA = await db.query('SELECT telegram_chat_id FROM restaurants WHERE id = $1', [restaurantA.id]);
-    const rowsB = await db.query('SELECT telegram_chat_id FROM restaurants WHERE id = $1', [restaurantB.id]);
-    // Известное, унаследованное от SQLite-оригинала (и не устраняемое здесь
-    // без изменения схемы — telegram_chat_id НЕ UNIQUE ни в одной из версий)
-    // поведение: "последняя привязка побеждает" на уровне конкретного
-    // ресторана, БЕЗ проверки, что чат уже был привязан к другому. Ресторан А
-    // молча остаётся с УСТАРЕВШИМ chat_id (не течёт чужих данных, но и не
-    // отвязывается автоматически) — тест фиксирует РЕАЛЬНОЕ поведение, не
-    // гипотетическое "правильное".
-    assert.equal(rowsA[0].telegram_chat_id, 'chat-b5', 'ресторан А не отвязан автоматически — известное ограничение схемы, не Stage 3');
-    assert.equal(rowsB[0].telegram_chat_id, 'chat-b5');
+    const rowsB = await db.query('SELECT telegram_chat_id, connect_code FROM restaurants WHERE id = $1', [restaurantB.id]);
+    assert.equal(rowsA[0].telegram_chat_id, 'chat-b5', 'первая (легитимная) привязка сохраняется');
+    assert.equal(rowsB[0].telegram_chat_id, null, 'второй ресторан НЕ привязывается к уже занятой группе');
+    assert.equal(rowsB[0].connect_code, codeB, 'код второго ресторана не погашен — привязки не было');
+    assert.match(fakeBot.sentMessages[1].text, /уже привязана к другому ресторану/);
   } finally {
     handlers.stop();
   }
@@ -397,7 +401,11 @@ async function notifyAndGetAcceptDeclineData(fakeBot, handlers, opts) {
   return { order, sent };
 }
 
-test('D1: Принять — заказ accepted, edit + cook-time кнопки, answerCallbackQuery вызван', async () => {
+// docs/HQ-PRODUCT-SPEC.md, раздел «Выбор времени приготовления»: «Принять» —
+// ПЕРВЫЙ из двух шагов и сам по себе заказ не принимает; заказ переходит в
+// accepted только после выбора 30/45/60. Именно так «без выбора времени
+// заказ нельзя принять» обеспечивается структурно.
+test('D1: Принять — заказ ЕЩЁ не принят, показан выбор 30/45/60, answerCallbackQuery вызван', async () => {
   const fakeBot = new FakeTelegramBot();
   const handlers = botModule.createBotHandlers(fakeBot);
   try {
@@ -405,11 +413,13 @@ test('D1: Принять — заказ accepted, edit + cook-time кнопки,
     await fakeBot.triggerCallbackQuery({ id: 'cb1', data: `accept:${order.id}`, chatId: sent.chatId, messageId: sent.messageId });
 
     const rows = await db.query('SELECT status FROM orders WHERE id = $1', [order.id]);
-    assert.equal(rows[0].status, 'accepted');
+    assert.equal(rows[0].status, 'awaiting_restaurant', 'без выбора времени заказ не принимается');
     assert.equal(fakeBot.editedMessages.length, 1);
-    assert.equal(fakeBot.editedMessages[0].text, '✅ Заказ принят.');
-    assert.equal(fakeBot.sentMessages.length, 2, 'должно было прийти сообщение с выбором времени готовки');
-    assert.match(fakeBot.sentMessages[1].text, /сколько времени на готовку/);
+    assert.match(fakeBot.editedMessages[0].text, /выберите время приготовления/i);
+    assert.equal(fakeBot.sentMessages.length, 2, 'должно было прийти сообщение с выбором времени');
+    assert.match(fakeBot.sentMessages[1].text, /за сколько приготовите/i);
+    const buttons = fakeBot.sentMessages[1].opts.reply_markup.inline_keyboard[0];
+    assert.deepEqual(buttons.map((b) => b.text), ['30 мин', '45 мин', '60 мин']);
     assert.equal(fakeBot.answeredCallbacks.length, 1);
   } finally {
     handlers.stop();
@@ -442,10 +452,10 @@ test('D3: полный delivery-цикл — accepted -> cook_time(preparing) ->
   try {
     const { order, sent } = await notifyAndGetAcceptDeclineData(fakeBot, handlers, { fulfillmentType: 'delivery' });
     await fakeBot.triggerCallbackQuery({ id: 'a', data: `accept:${order.id}`, chatId: sent.chatId, messageId: sent.messageId });
-    await fakeBot.triggerCallbackQuery({ id: 'b', data: `cook_time:${order.id}:25`, chatId: sent.chatId, messageId: sent.messageId });
+    await fakeBot.triggerCallbackQuery({ id: 'b', data: `cook_time:${order.id}:30`, chatId: sent.chatId, messageId: sent.messageId });
     let rows = await db.query('SELECT status, estimated_ready_minutes FROM orders WHERE id = $1', [order.id]);
     assert.equal(rows[0].status, 'preparing');
-    assert.equal(rows[0].estimated_ready_minutes, 25);
+    assert.equal(rows[0].estimated_ready_minutes, 30);
 
     await fakeBot.triggerCallbackQuery({ id: 'c', data: `advance:courier:${order.id}`, chatId: sent.chatId, messageId: sent.messageId });
     rows = await db.query('SELECT status FROM orders WHERE id = $1', [order.id]);
@@ -468,7 +478,7 @@ test('D4: pickup-цикл — accepted -> cook_time(preparing) -> advance(delive
   try {
     const { order, sent } = await notifyAndGetAcceptDeclineData(fakeBot, handlers, { fulfillmentType: 'pickup' });
     await fakeBot.triggerCallbackQuery({ id: 'a', data: `accept:${order.id}`, chatId: sent.chatId, messageId: sent.messageId });
-    await fakeBot.triggerCallbackQuery({ id: 'b', data: `cook_time:${order.id}:20`, chatId: sent.chatId, messageId: sent.messageId });
+    await fakeBot.triggerCallbackQuery({ id: 'b', data: `cook_time:${order.id}:45`, chatId: sent.chatId, messageId: sent.messageId });
     await fakeBot.triggerCallbackQuery({ id: 'c', data: `advance:delivered:${order.id}`, chatId: sent.chatId, messageId: sent.messageId });
 
     const rows = await db.query('SELECT status FROM orders WHERE id = $1', [order.id]);
@@ -504,12 +514,16 @@ test('D5: недопустимый переход — чистое сообще�
   }
 });
 
+// Двухшаговое принятие (docs/HQ-PRODUCT-SPEC.md): заказ реально принят
+// только ПОСЛЕ выбора времени, поэтому «уже обработан» проверяется на клике
+// «Принять» по заказу, у которого время уже выбрано.
 test('D6: повторный клик "Принять" на уже принятом заказе — "уже обработан", НЕ второй набор cook-time кнопок', async () => {
   const fakeBot = new FakeTelegramBot();
   const handlers = botModule.createBotHandlers(fakeBot);
   try {
     const { order, sent } = await notifyAndGetAcceptDeclineData(fakeBot, handlers);
     await fakeBot.triggerCallbackQuery({ id: 'a', data: `accept:${order.id}`, chatId: sent.chatId, messageId: sent.messageId });
+    await fakeBot.triggerCallbackQuery({ id: 'a2', data: `cook_time:${order.id}:30`, chatId: sent.chatId, messageId: sent.messageId });
     const sentAfterFirst = fakeBot.sentMessages.length;
 
     await fakeBot.triggerCallbackQuery({ id: 'b', data: `accept:${order.id}`, chatId: sent.chatId, messageId: sent.messageId });
@@ -517,7 +531,7 @@ test('D6: повторный клик "Принять" на уже принят�
     assert.equal(fakeBot.sentMessages.length, sentAfterFirst, 'повторный клик не должен был отправить ещё один набор cook-time кнопок');
     const lastEdit = fakeBot.editedMessages[fakeBot.editedMessages.length - 1];
     assert.equal(lastEdit.text, 'Заказ уже обработан.');
-    assert.equal(fakeBot.answeredCallbacks.length, 2, 'оба клика должны были получить answerCallbackQuery');
+    assert.equal(fakeBot.answeredCallbacks.length, 3, 'каждый клик должен был получить answerCallbackQuery');
   } finally {
     handlers.stop();
   }
@@ -528,12 +542,16 @@ test('D7: конкурентные клики "Принять" на одном �
   const handlers = botModule.createBotHandlers(fakeBot);
   try {
     const { order, sent } = await notifyAndGetAcceptDeclineData(fakeBot, handlers);
+    // Реальное принятие происходит на шаге выбора времени (двухшаговое
+    // «Принять», docs/HQ-PRODUCT-SPEC.md) — именно его и проверяем на гонку:
+    // два сотрудника группы жмут кнопку времени одновременно.
     await Promise.all([
-      fakeBot.triggerCallbackQuery({ id: 'a', data: `accept:${order.id}`, chatId: sent.chatId, messageId: sent.messageId }),
-      fakeBot.triggerCallbackQuery({ id: 'b', data: `accept:${order.id}`, chatId: sent.chatId, messageId: sent.messageId }),
+      fakeBot.triggerCallbackQuery({ id: 'a', data: `cook_time:${order.id}:30`, chatId: sent.chatId, messageId: sent.messageId }),
+      fakeBot.triggerCallbackQuery({ id: 'b', data: `cook_time:${order.id}:45`, chatId: sent.chatId, messageId: sent.messageId }),
     ]);
-    const rows = await db.query('SELECT status FROM orders WHERE id = $1', [order.id]);
-    assert.equal(rows[0].status, 'accepted', 'ровно один реальный переход, данные не повреждены гонкой');
+    const rows = await db.query('SELECT status, estimated_ready_minutes FROM orders WHERE id = $1', [order.id]);
+    assert.equal(rows[0].status, 'preparing', 'ровно один реальный переход, данные не повреждены гонкой');
+    assert.ok([30, 45].includes(rows[0].estimated_ready_minutes), 'сохранено время ровно одного из двух кликов');
     assert.equal(fakeBot.answeredCallbacks.length, 2, 'оба конкурентных клика должны были получить answerCallbackQuery, без необработанных исключений');
   } finally {
     handlers.stop();
@@ -579,9 +597,11 @@ test('D10 (документирует унаследованное ограни�
   try {
     const { order } = await notifyAndGetAcceptDeclineData(fakeBot, handlers);
     // "Чужой" чат, никогда не получавший уведомление об этом заказе.
-    await fakeBot.triggerCallbackQuery({ id: 'foreign', data: `accept:${order.id}`, chatId: 'chat-совсем-другого-ресторана', messageId: 1 });
+    // Принятие теперь двухшаговое — проверяем шаг, который реально меняет
+    // статус (cook_time), иначе тест не проверял бы ничего.
+    await fakeBot.triggerCallbackQuery({ id: 'foreign', data: `cook_time:${order.id}:30`, chatId: 'chat-совсем-другого-ресторана', messageId: 1 });
     const rows = await db.query('SELECT status FROM orders WHERE id = $1', [order.id]);
-    assert.equal(rows[0].status, 'accepted', 'принято "чужим" чатом — известный, унаследованный от SQLite-оригинала пробел (нет проверки владения), не Stage 3');
+    assert.equal(rows[0].status, 'preparing', 'принято "чужим" чатом — известный, унаследованный от SQLite-оригинала пробел (нет проверки владения), не Stage 3');
   } finally {
     handlers.stop();
   }

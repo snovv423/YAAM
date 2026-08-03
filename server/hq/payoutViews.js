@@ -50,72 +50,80 @@ function formatDateTime(date) {
   return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
 }
 
-// Статусы ОБЯЗАТЕЛЬСТВА (Stage 9.5, задание раздел 6): prepared/processing/
-// unknown/succeeded/blocked. succeeded — единственный успешный terminal;
-// blocked — деньги всё ещё должны, но нужна попытка/решение оператора.
-function statusBadgeClass(status) {
-  if (status === 'succeeded') return 'open';
-  if (status === 'blocked') return 'closed';
-  if (status === 'unknown') return 'closed';
-  return 'paused'; // prepared/processing — промежуточные
-}
-
 // Статусы ПОПЫТКИ — своя, независимая от статуса обязательства раскраска.
-function attemptStatusBadgeClass(status) {
-  if (status === 'succeeded') return 'open';
-  if (status === 'failed') return 'closed';
-  if (status === 'unknown') return 'closed';
-  return 'paused'; // created/submitting/processing
-}
-
-// Дата завершения обязательства — completed_at (оплачено) ИЛИ failed_at
-// (кэш последнего провала — задание: обязательство хранит "cache" последней
-// релевантной попытки, см. итоговый отчёт Stage 9.5); для prepared/
-// processing/unknown без истории — «—».
-function completionDate(payout) {
-  if (payout.completed_at) return formatDateTime(payout.completed_at);
-  if (payout.failed_at) return formatDateTime(payout.failed_at);
-  return '—';
-}
-
-// Может ли оператор в принципе ожидать новую попытку (только для отображения
-// — задание, раздел 10: "whether retry is allowed"; НЕ кнопка, просто факт).
-function retryAllowedLabel(attempt) {
-  if (!['succeeded', 'failed'].includes(attempt.status)) return '—';
-  if (attempt.status === 'succeeded') return '—';
-  return attempt.retryable ? 'Да' : 'Нет — требуется решение оператора';
+function attemptTone(status) {
+  if (status === 'succeeded') return 'ok';
+  if (status === 'failed') return 'danger';
+  if (status === 'unknown') return 'danger';
+  return 'muted'; // created/submitting/processing
 }
 
 // ---------------------------------------------------------------------------
-// Список (задание: "Таблица: Ресторан / Период / Сумма / Статус / Дата
-// создания / Дата завершения / Открыть. Без кнопки «Выплатить».")
+// Реестр выплат (docs/HQ-PRODUCT-SPEC.md, раздел «Финансы → Реестр выплат»).
+// Дочерний экран «Финансов», не отдельная главная вкладка. Разделы:
+// К отправке / В обработке / Выплаченные / Ошибка. Компактные строки, не
+// техническая таблица.
 // ---------------------------------------------------------------------------
+
+// Фирменный тон статуса обязательства — тот же словарь тонов, что и на
+// экране «Статус выплат» (services/hq/payoutStatusService.js), чтобы один и
+// тот же статус нигде не выглядел по-разному.
+function statusTone(status) {
+  if (status === 'succeeded') return 'ok';
+  if (status === 'blocked') return 'danger';
+  if (status === 'unknown') return 'danger';
+  return 'muted'; // prepared/processing
+}
+
+// Раздел реестра, в который попадает обязательство. Один статус — ровно один
+// раздел (спецификация: четыре раздела, без пересечений).
+function registrySection(status) {
+  if (status === 'succeeded') return 'paid';
+  if (status === 'blocked' || status === 'unknown') return 'failed';
+  if (status === 'processing') return 'processing';
+  return 'outbox'; // prepared
+}
+
+const REGISTRY_SECTIONS = [
+  ['outbox', 'К отправке'],
+  ['processing', 'В обработке'],
+  ['paid', 'Выплаченные'],
+  ['failed', 'Ошибка'],
+];
+
+function payoutRow(p, linkBasePath) {
+  return `
+    <li class="payout-row">
+      <div class="payout-row-main">
+        <div class="payout-row-name">${esc(p.restaurant_name)} · ${money(p.amount)}</div>
+        <div class="payout-row-meta">
+          <span class="status-badge ${statusTone(p.status)}">${esc(STATUS_LABELS[p.status] || p.status)}</span>
+          <span class="payout-row-sub">${esc(formatDateOnly(p.period_from))} — ${esc(formatDateOnly(p.period_to))}</span>
+        </div>
+        <div class="payout-row-sub">Подготовлена: ${esc(formatDateTime(p.prepared_at || p.created_at))} · Выплачена: ${esc(p.completed_at ? formatDateTime(p.completed_at) : '—')}</div>
+      </div>
+      <div class="payout-row-actions">
+        <a class="btn ghost compact" href="${linkBasePath}/payouts/${p.id}">Открыть</a>
+      </div>
+    </li>`;
+}
+
 function renderPayoutsListPage({ payouts, linkBasePath }) {
-  const rows = payouts.length
-    ? payouts.map((p) => `
-      <tr>
-        <td data-label="Ресторан">${esc(p.restaurant_name)}</td>
-        <td data-label="Период">${esc(formatDateOnly(p.period_from))} — ${esc(formatDateOnly(p.period_to))}</td>
-        <td data-label="Сумма" style="text-align:right">${money(p.amount)}</td>
-        <td data-label="Статус"><span class="badge ${statusBadgeClass(p.status)}">${esc(STATUS_LABELS[p.status] || p.status)}</span></td>
-        <td data-label="Создана">${esc(formatDateTime(p.created_at))}</td>
-        <td data-label="Завершена">${esc(completionDate(p))}</td>
-        <td data-label=""><a href="${linkBasePath}/payouts/${p.id}">Открыть</a></td>
-      </tr>`).join('')
-    : `<tr><td colspan="7" class="empty-state">Выплат пока нет.</td></tr>`;
+  const grouped = new Map(REGISTRY_SECTIONS.map(([key]) => [key, []]));
+  for (const p of payouts) grouped.get(registrySection(p.status)).push(p);
+
+  const sections = REGISTRY_SECTIONS
+    .filter(([key]) => grouped.get(key).length > 0)
+    .map(([key, label]) => `
+      <div class="panel">
+        <div class="panel-title">${esc(label)}</div>
+        <ul class="payout-list">${grouped.get(key).map((p) => payoutRow(p, linkBasePath)).join('')}</ul>
+      </div>`).join('');
 
   return `
-    <h1>Выплаты</h1>
-    <div class="empty-state" style="margin-bottom:14px">Только просмотр. Банковская интеграция и реальные переводы денег появятся на отдельном следующем этапе.</div>
-    <div class="panel">
-      <table class="responsive">
-        <thead><tr>
-          <th>Ресторан</th><th>Период</th><th style="text-align:right">Сумма</th><th>Статус</th>
-          <th>Дата создания</th><th>Дата завершения</th><th></th>
-        </tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
-    </div>
+    <h1>Все выплаты</h1>
+    ${sections || '<div class="panel"><div class="empty-state">Выплат пока нет.</div></div>'}
+    <a class="btn ghost compact" href="${linkBasePath}/finance">← К финансам</a>
   `;
 }
 
@@ -163,28 +171,23 @@ function renderAttemptRequisites(requisites) {
 // заметки, внешний id (если появится)")
 // ---------------------------------------------------------------------------
 function renderPayoutDetail({ payout, attempts = [], requisitesByAttemptId = new Map(), readiness = null, linkBasePath }) {
-  const attemptRows = attempts.length
+  const attemptBlocks = attempts.length
     ? attempts.map((a) => `
-      <tr>
-        <td data-label="#">${a.attempt_number}</td>
-        <td data-label="payment_id"><code>${esc(a.payment_id)}</code></td>
-        <td data-label="Статус"><span class="badge ${attemptStatusBadgeClass(a.status)}">${esc(ATTEMPT_STATUS_LABELS[a.status] || a.status)}</span></td>
-        <td data-label="Статус банка">${a.bank_status ? esc(a.bank_status) : '—'}</td>
-        <td data-label="Создана">${esc(formatDateTime(a.created_at))}</td>
-        <td data-label="Отправлена">${a.request_started_at ? esc(formatDateTime(a.request_started_at)) : '—'}</td>
-        <td data-label="Завершена">${a.completed_at ? esc(formatDateTime(a.completed_at)) : (a.failed_at ? esc(formatDateTime(a.failed_at)) : '—')}</td>
-        <td data-label="Причина ошибки">${a.error_message ? esc(a.error_message) : '—'}</td>
-        <td data-label="Повтор допустим">${esc(retryAllowedLabel(a))}</td>
-      </tr>`).join('')
-    : `<tr><td colspan="9" class="empty-state">Попыток обращения к банку ещё не было.</td></tr>`;
-
-  const requisitesBlocks = attempts.length
-    ? attempts.map((a) => `
-      <div style="margin-bottom:14px">
-        <div style="font-weight:600;margin-bottom:6px">Попытка #${a.attempt_number} (${esc(a.payment_id)})</div>
-        ${renderAttemptRequisites(requisitesByAttemptId.get(a.id))}
-      </div>`).join('')
-    : `<div class="empty-state">Снимков реквизитов ещё нет — попыток не было.</div>`;
+      <li class="attempt-row">
+        <div class="attempt-head">
+          <span class="attempt-number">Попытка ${a.attempt_number}</span>
+          <span class="status-badge ${attemptTone(a.status)}">${esc(ATTEMPT_STATUS_LABELS[a.status] || a.status)}</span>
+        </div>
+        <div class="payout-row-sub">Создана: ${esc(formatDateTime(a.created_at))}${a.request_started_at ? ` · Отправлена: ${esc(formatDateTime(a.request_started_at))}` : ''}${a.completed_at ? ` · Завершена: ${esc(formatDateTime(a.completed_at))}` : (a.failed_at ? ` · Ошибка: ${esc(formatDateTime(a.failed_at))}` : '')}</div>
+        <div class="payout-row-sub">ID для сверки с банком: <code>${esc(a.payment_id)}</code></div>
+        ${a.bank_status ? `<div class="payout-row-sub">Статус банка: ${esc(a.bank_status)}</div>` : ''}
+        ${a.error_message ? `<div class="attempt-error">${esc(a.error_message)}${a.status === 'failed' ? ` · Повтор ${a.retryable ? 'допустим' : 'требует решения оператора'}` : ''}</div>` : ''}
+        <details class="attempt-requisites">
+          <summary>Реквизиты этой попытки</summary>
+          ${renderAttemptRequisites(requisitesByAttemptId.get(a.id))}
+        </details>
+      </li>`).join('')
+    : '<li class="empty-state">Попыток обращения к банку ещё не было.</li>';
 
   return `
     <h1>Выплата #${payout.id}</h1>
@@ -193,33 +196,22 @@ function renderPayoutDetail({ payout, attempts = [], requisitesByAttemptId = new
         <tr><td>Ресторан</td><td style="text-align:right"><a href="${linkBasePath}/restaurants/${payout.restaurant_id}">${esc(payout.restaurant_name)}</a></td></tr>
         <tr><td>Период</td><td style="text-align:right"><a href="${linkBasePath}/finance/settlements/${payout.settlement_period_id}">${esc(formatDateOnly(payout.period_from))} — ${esc(formatDateOnly(payout.period_to))}</a></td></tr>
         <tr><td>Сумма</td><td style="text-align:right">${money(payout.amount)}</td></tr>
-        <tr><td>Статус</td><td style="text-align:right"><span class="badge ${statusBadgeClass(payout.status)}">${esc(STATUS_LABELS[payout.status] || payout.status)}</span></td></tr>
-        <tr><td>Создана</td><td style="text-align:right">${esc(formatDateTime(payout.created_at))}${payout.created_by ? ` · ${esc(payout.created_by)}` : ''}</td></tr>
-        <tr><td>Дата подготовки</td><td style="text-align:right">${esc(formatDateTime(payout.prepared_at))}</td></tr>
-        <tr><td>В обработке с</td><td style="text-align:right">${payout.processing_at ? esc(formatDateTime(payout.processing_at)) : '—'}</td></tr>
-        <tr><td>Завершена успешно</td><td style="text-align:right">${payout.completed_at ? esc(formatDateTime(payout.completed_at)) : '—'}</td></tr>
-        ${payout.failure_reason ? `<tr><td>Причина последнего провала</td><td style="text-align:right">${esc(payout.failure_reason)}</td></tr>` : ''}
-        <tr><td>Внешний ID (банк/провайдер)</td><td style="text-align:right">${payout.external_payout_id ? esc(payout.external_payout_id) : '—'}</td></tr>
-        ${payout.notes ? `<tr><td>Заметки</td><td style="text-align:right">${esc(payout.notes)}</td></tr>` : ''}
+        <tr><td>Статус</td><td style="text-align:right"><span class="status-badge ${statusTone(payout.status)}">${esc(STATUS_LABELS[payout.status] || payout.status)}</span></td></tr>
+        <tr><td>Дата подготовки</td><td style="text-align:right">${esc(formatDateTime(payout.prepared_at || payout.created_at))}</td></tr>
+        <tr><td>Дата выплаты</td><td style="text-align:right">${payout.completed_at ? esc(formatDateTime(payout.completed_at)) : '—'}</td></tr>
+        ${payout.failure_reason ? `<tr><td>Причина ошибки</td><td style="text-align:right">${esc(payout.failure_reason)}</td></tr>` : ''}
+        ${payout.external_payout_id ? `<tr><td>Внешний ID</td><td style="text-align:right">${esc(payout.external_payout_id)}</td></tr>` : ''}
       </table>
     </div>
     ${renderReadinessSection({ readiness })}
-    <h2>История попыток</h2>
-    <div class="empty-state" style="margin-bottom:14px">Только просмотр. Банковская интеграция появится на отдельном следующем этапе — здесь нет и не может быть кнопок отправки в банк.</div>
+
     <div class="panel">
-      <table class="responsive">
-        <thead><tr>
-          <th>#</th><th>payment_id</th><th>Статус</th><th>Статус банка</th>
-          <th>Создана</th><th>Отправлена</th><th>Завершена</th><th>Причина ошибки</th><th>Повтор допустим</th>
-        </tr></thead>
-        <tbody>${attemptRows}</tbody>
-      </table>
+      <div class="panel-title">История попыток</div>
+      <ul class="attempt-list">${attemptBlocks}</ul>
+      <div class="empty-state" style="margin-top:10px">Реквизиты каждой попытки — неизменяемый снимок на момент отправки: последующая правка реквизитов ресторана не меняет уже созданную выплату.</div>
     </div>
-    <h2>Снимки реквизитов (маскировано)</h2>
-    <div class="panel">
-      ${requisitesBlocks}
-    </div>
-    <a class="btn ghost" href="${linkBasePath}/payouts">← К выплатам</a>
+
+    <a class="btn ghost compact" href="${linkBasePath}/payouts">← Ко всем выплатам</a>
   `;
 }
 

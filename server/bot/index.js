@@ -72,7 +72,7 @@ function startBot(token) {
     const fulfillmentLine = order.fulfillment_type === 'pickup'
       ? '🏃 Самовывоз (курьер не нужен)'
       : `🛵 Доставка\nАдрес: ${order.address}`;
-    const text = `🆕 Новый заказ ${order.public_code}\n\n${itemsList}\n\nИтого: ${order.items_total} ₽\n${fulfillmentLine}\nТелефон: ${order.customer_phone}\nКомментарий: ${order.comment || '—'}\n\nОтветьте в течение 3 минут, иначе заказ отменится автоматически.`;
+    const text = `🆕 Новый заказ ${order.public_code}\n\n${itemsList}\n\nИтого: ${order.items_total} ₽\n${fulfillmentLine}\nТелефон: ${order.customer_phone}\nКомментарий: ${order.comment || '—'}\n\nОтветьте в течение 5 минут, иначе заказ отменится автоматически.`;
     bot.sendMessage(restaurant.telegram_chat_id, text, {
       reply_markup: {
         inline_keyboard: [[

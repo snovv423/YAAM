@@ -5,12 +5,12 @@
 // собственной реализации именно потому, что fixation/rotation/expiry —
 // зона, где рукописный код особенно легко сделать тонко небезопасным).
 //
-// Store — намеренно дефолтный MemoryStore. Явное ограничение (см. финальный
-// отчёт, разделы "Риски" и "Инструкция для hq.yaam.su"): не переживает
-// перезапуск процесса и не годится для нескольких инстансов за балансировщиком.
-// Для Stage 2 (единственный владелец, один процесс, один admin-аккаунт) это
-// приемлемый компромисс; добавление стора вроде connect-pg-simple — отдельная,
-// заранее обозначенная работа на будущий этап, а не тихая недоделка.
+// Store — Stage 15: PostgreSQL (services/hq/pgSessionStore.js). Дефолтный
+// MemoryStore, использовавшийся до этого, был production-блокером: он не
+// переживал перезапуск процесса (деплой разлогинивал владельца), не удалял
+// истёкшие записи и не годился для нескольких инстансов. Стор передаётся
+// параметром, а не создаётся здесь: тестам и SQLite-контуру он не нужен, и
+// принудительное подключение к PostgreSQL из этого модуля сломало бы их.
 const session = require('express-session');
 
 const SESSION_COOKIE_NAME = 'yaam.hq.sid';
@@ -23,7 +23,7 @@ const SESSION_MAX_AGE_MS = 12 * 60 * 60 * 1000; // 12 часов, продлев
 // Значение ДОЛЖНО совпадать с тем, что рендерят routes/hq/auth.js
 // (logout clearCookie) и services/hq/basePath.js (hqRootPath) — иначе
 // logout не сможет корректно стереть cookie, выставленную при логине.
-function createHqSessionMiddleware({ secret, isProduction, cookiePath }) {
+function createHqSessionMiddleware({ secret, isProduction, cookiePath, store = null }) {
   if (typeof secret !== 'string' || secret.length < 32) {
     throw new Error('HQ_SESSION_SECRET обязателен и должен быть длиной не меньше 32 символов');
   }
@@ -33,6 +33,10 @@ function createHqSessionMiddleware({ secret, isProduction, cookiePath }) {
   return session({
     name: SESSION_COOKIE_NAME,
     secret,
+    // store не задан -> express-session берёт MemoryStore. Это допустимо
+    // только вне production; production-запуск обязан передать стор (см.
+    // services/postgresql/app.js и проверку в services/config/env.js).
+    ...(store ? { store } : {}),
     resave: false,
     // saveUninitialized:false — сессия не создаётся (и cookie не отправляется)
     // для простого GET-визита, пока в неё реально не записали значение

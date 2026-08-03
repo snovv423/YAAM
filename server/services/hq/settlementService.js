@@ -32,9 +32,15 @@
 const db = require('../../db/postgresql');
 const { ValidationError } = require('./restaurantLifecycle');
 const { resolvePeriodRange } = require('./restaurantStatsService');
+const { PROJECT_TIMEZONE_OFFSET_MINUTES } = require('./dashboardMetrics');
 const financeService = require('./restaurantFinanceService');
 const payoutService = require('./restaurantPayoutService');
 const contractService = require('./restaurantContractService');
+const legalService = require('./restaurantLegalDetailsService');
+const yaamBankDetailsService = require('./yaamBankDetailsService');
+const yaamLegalDetailsService = require('./yaamLegalDetailsService');
+const adjustmentService = require('./settlementAdjustmentService');
+const balanceService = require('./restaurantBalanceService');
 const { FALLBACK_COMMISSION_BPS } = require('../postgresql/orderService');
 
 const MAX_NOTES_LENGTH = 500;
@@ -151,6 +157,29 @@ function inferUniformCommissionBps(orderRows, candidateBpsList) {
 // вычитания какого-либо paid_out placeholder (в отличие от Stage 7
 // payableBalance, задание здесь ПРЯМО запрещает "записывать paid_out=0 как
 // будто это реальная финансовая операция" — эта колонка просто не создана).
+// Best-effort чтение юридических данных YAAM. Та же причина, что и у
+// safeReadYaamDetails: это метаданные ДЛЯ ДОКУМЕНТА, а не часть финансового
+// расчёта — их отсутствие (в том числе отсутствие самой таблицы на legacy-БД)
+// не должно блокировать бухгалтерское закрытие периода.
+async function safeReadYaamLegal() {
+  try {
+    return await yaamLegalDetailsService.getYaamLegalDetails();
+  } catch (err) {
+    console.error('[settlementService] юридические данные YAAM недоступны для снимка периода:', err.message);
+    return null;
+  }
+}
+
+// Best-effort чтение реквизитов YAAM — см. вызов в buildRestaurantLines.
+async function safeReadYaamDetails() {
+  try {
+    return await yaamBankDetailsService.getYaamBankDetails();
+  } catch (err) {
+    console.error('[settlementService] реквизиты YAAM недоступны для снимка периода:', err.message);
+    return null;
+  }
+}
+
 async function buildRestaurantLines(orderRows, refundRows) {
   const restaurantIds = new Set([
     ...orderRows.map((o) => o.restaurant_id),
@@ -166,9 +195,18 @@ async function buildRestaurantLines(orderRows, refundRows) {
     const restaurantEarnings = turnover - yaamCommission;
 
     // eslint-disable-next-line no-await-in-loop
-    const [payout, contract] = await Promise.all([
+    const [payout, contract, legal, restaurantRow, yaamDetails, yaamLegal] = await Promise.all([
       payoutService.getRestaurantPayoutDetails(restaurantId),
       contractService.getContract(restaurantId),
+      legalService.getLegalDetails(restaurantId),
+      db.query('SELECT name FROM restaurants WHERE id = $1', [restaurantId]),
+      // Реквизиты YAAM — метаданные ДЛЯ ДОКУМЕНТА, а не часть финансового
+      // расчёта: их отсутствие не должно блокировать бухгалтерское закрытие
+      // периода. Сюда же попадает случай legacy-БД, где таблицы
+      // yaam_bank_details ещё нет вовсе (миграция со Stage 9) — тогда снимок
+      // просто пустой, и документ честно покажет «не указано».
+      safeReadYaamDetails(),
+      safeReadYaamLegal(),
     ]);
 
     const candidateBpsList = [FALLBACK_COMMISSION_BPS];
@@ -186,6 +224,31 @@ async function buildRestaurantLines(orderRows, refundRows) {
       payoutReadinessSnapshot: payout.readiness,
       contractNumberSnapshot: contract ? contract.contract_number : '',
       commissionBpsSummary: inferUniformCommissionBps(orders, candidateBpsList),
+      // Снимки юридических данных на момент ЗАКРЫТИЯ (docs/HQ-PRODUCT-SPEC.md,
+      // раздел «Immutable snapshot периода»): документ строится только из
+      // них, поэтому последующая правка названия/ИНН/договора/реквизитов
+      // YAAM не может изменить уже выпущенный отчёт. null там, где данных
+      // нет — честное отсутствие, не выдуманное значение.
+      restaurantNameSnapshot: restaurantRow[0] ? restaurantRow[0].name : null,
+      legalNameSnapshot: legal ? legal.legal_name : null,
+      legalFormSnapshot: legal ? legal.legal_form : null,
+      innSnapshot: legal ? legal.inn : null,
+      ogrnSnapshot: legal ? legal.ogrn : null,
+      legalAddressSnapshot: legal ? legal.legal_address : null,
+      contractSignedAtSnapshot: contract ? contract.signed_at : null,
+      // Юридические данные YAAM — из yaam_legal_details (Stage 14), это их
+      // настоящий источник. Fallback на yaam_bank_details сохранён для баз,
+      // где юр.данные ещё не заполнены: там раньше лежали legal_name/inn, и
+      // терять их при закрытии периода нельзя.
+      yaamLegalNameSnapshot: (yaamLegal && yaamLegal.legal_name)
+        || (yaamDetails ? yaamDetails.legal_name : null),
+      yaamInnSnapshot: (yaamLegal && yaamLegal.inn) || (yaamDetails ? yaamDetails.inn : null),
+      // КПП у ИП не бывает — остаётся только из банковских реквизитов, если
+      // там что-то заполнено (актуально для формы ООО в будущем).
+      yaamKppSnapshot: yaamDetails ? yaamDetails.kpp : null,
+      yaamOgrnipSnapshot: yaamLegal ? yaamLegal.ogrnip : null,
+      yaamAddressSnapshot: yaamLegal ? yaamLegal.registration_address : null,
+      yaamEntrepreneurNameSnapshot: yaamLegal ? yaamLegal.entrepreneur_name : null,
       orders,
       refunds,
     });
@@ -200,6 +263,52 @@ async function computeSettlementPreview(range, client = null) {
   ]);
   const restaurantLines = await buildRestaurantLines(orderRows, refundRows);
   return { restaurantLines, orderRows, refundRows };
+}
+
+// Недели (по времени проекта), в которых ЕСТЬ хоть одна финансово значимая
+// операция: заработанный заказ либо успешный возврат.
+//
+// ЗАЧЕМ ИМЕННО ЗАПРОСОМ. Автоматическому закрытию нужно знать, с какой недели
+// начинается непокрытый backlog. Перебирать недели назад «на всякий случай»
+// нельзя: без предела это бесконечное сканирование пустой истории, а с
+// пределом (раньше здесь стояло 120 недель) активная неделя старше предела
+// молча выпадала бы из очереди. Правильная нижняя граница берётся из самих
+// данных — эта функция и есть её источник.
+//
+// Оба anchor'а те же, что и во всём расчёте: orders.status_updated_at для
+// заказов (Stage 7) и refunds.completed_at для возвратов (Stage 7.1).
+// date_trunc('week') в PostgreSQL даёт понедельник — ровно ту границу недели,
+// которой пользуется weeklySettlementService.
+//
+// Смещение времени проекта применяется до date_trunc: иначе воскресный вечер
+// по Москве попал бы в предыдущую неделю по UTC.
+async function listWeeksWithFinancialActivity(client = null) {
+  const rows = await db.query(
+    `WITH activity AS (
+       SELECT date_trunc(
+                'week',
+                (o.status_updated_at AT TIME ZONE 'UTC') + make_interval(mins => $1)
+              )::date AS week_start
+         FROM orders o
+        WHERE ${financeService.EARNED_ORDER_FILTER_SQL}
+          AND o.status_updated_at IS NOT NULL
+       UNION
+       SELECT date_trunc(
+                'week',
+                (rf.completed_at AT TIME ZONE 'UTC') + make_interval(mins => $1)
+              )::date
+         FROM refunds rf
+         JOIN payments p ON p.id = rf.payment_id
+         JOIN orders o2 ON o2.id = p.order_id
+        WHERE rf.status = 'succeeded' AND rf.completed_at IS NOT NULL
+     )
+     SELECT week_start FROM activity ORDER BY week_start`,
+    [PROJECT_TIMEZONE_OFFSET_MINUTES],
+    client,
+  );
+  return rows.map((r) => (r.week_start instanceof Date
+    ? r.week_start.toISOString().slice(0, 10)
+    : String(r.week_start).slice(0, 10)));
 }
 
 // ---------------------------------------------------------------------------
@@ -240,23 +349,64 @@ async function closeSettlementPeriod(periodId, { now = new Date() } = {}) {
     // Шаг 4: единый Stage 7 фильтр заработка + Stage 7.1 фильтр возвратов,
     // за диапазон периода (тот же resolvePeriodRange, что и создание черновика).
     const range = resolvePeriodRange({ period: 'custom', from: period.period_from, to: period.period_to }, now);
-    const { restaurantLines } = await computeSettlementPreview(range, client);
+    const { restaurantLines, refundRows } = await computeSettlementPreview(range, client);
+
+    // Шаг 4a: СТОРНО ПОЗДНИХ ВОЗВРАТОВ. Возврат, чей заказ был начислен в уже
+    // закрытом ПРЕДЫДУЩЕМ периоде, уменьшает обязательство этого периода —
+    // иначе ресторан получил бы деньги за заказ, возвращённый покупателю
+    // (services/hq/settlementAdjustmentService.js объясняет модель целиком).
+    // Считается до вставки строк: суммы строки уже должны учитывать сторно.
+    const lateAdjustments = await adjustmentService.findLateRefundAdjustments(periodId, refundRows, client);
+    const adjustmentsByRestaurant = adjustmentService.summarizeByRestaurant(lateAdjustments);
 
     // Шаги 5-6: сформировать строки обязательств + immutable snapshot.
     const insertedLines = [];
+    // Аудит переноса долга пишется ПОСЛЕ коммита: событие о непроизошедшей
+    // (откатившейся) операции хуже отсутствия события.
+    const carryEvents = [];
     // eslint-disable-next-line no-restricted-syntax
     for (const line of restaurantLines) {
       // eslint-disable-next-line no-await-in-loop
+      // Сторно уменьшает именно payable_amount: turnover/yaam_commission
+      // остаются «начислено за период», а не переписываются — иначе нельзя
+      // было бы отличить «продали меньше» от «вернули за прошлый период».
+      const adj = adjustmentsByRestaurant.get(line.restaurantId)
+        || { restaurantAmount: 0, commissionAmount: 0 };
+      const netEarnings = line.payableAmount - adj.restaurantAmount;
+
+      // ПЕРЕНОС ДОЛГА. Блокирует строку баланса ресторана до конца этой
+      // транзакции — именно здесь два одновременных закрытия сериализуются и
+      // не могут удержать один долг дважды.
+      // eslint-disable-next-line no-await-in-loop
+      const carry = await balanceService.applyCarryForward(
+        { restaurantId: line.restaurantId, periodId, netEarnings },
+        client,
+      );
+      carryEvents.push({ restaurantId: line.restaurantId, ...carry });
+
       const insertedLine = await db.execute(
         `INSERT INTO settlement_restaurant_lines
            (settlement_period_id, restaurant_id, delivered_paid_orders, turnover, yaam_commission,
             restaurant_earnings, successful_refunds_count, successful_refunds_amount, payable_amount,
-            payout_readiness_snapshot, contract_number_snapshot, commission_bps_summary)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+            payout_readiness_snapshot, contract_number_snapshot, commission_bps_summary,
+            restaurant_name_snapshot, legal_name_snapshot, legal_form_snapshot, inn_snapshot,
+            ogrn_snapshot, legal_address_snapshot, contract_signed_at_snapshot,
+            yaam_legal_name_snapshot, yaam_inn_snapshot, yaam_kpp_snapshot,
+            refund_adjustment_restaurant_amount, refund_adjustment_commission,
+            carry_forward_applied, carry_forward_remaining,
+            yaam_ogrnip_snapshot, yaam_address_snapshot, yaam_entrepreneur_name_snapshot)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29) RETURNING *`,
         [
           periodId, line.restaurantId, line.deliveredPaidOrders, line.turnover, line.yaamCommission,
-          line.restaurantEarnings, line.successfulRefundsCount, line.successfulRefundsAmount, line.payableAmount,
+          line.restaurantEarnings, line.successfulRefundsCount, line.successfulRefundsAmount,
+          carry.payable,
           line.payoutReadinessSnapshot, line.contractNumberSnapshot, line.commissionBpsSummary,
+          line.restaurantNameSnapshot, line.legalNameSnapshot, line.legalFormSnapshot, line.innSnapshot,
+          line.ogrnSnapshot, line.legalAddressSnapshot, line.contractSignedAtSnapshot,
+          line.yaamLegalNameSnapshot, line.yaamInnSnapshot, line.yaamKppSnapshot,
+          adj.restaurantAmount, adj.commissionAmount,
+          carry.debtSettled, carry.closingDebt,
+          line.yaamOgrnipSnapshot, line.yaamAddressSnapshot, line.yaamEntrepreneurNameSnapshot,
         ],
         client,
       );
@@ -291,6 +441,10 @@ async function closeSettlementPeriod(periodId, { now = new Date() } = {}) {
       }
     }
 
+    // Шаг 6a: записать сами корректировки — в той же транзакции, что и строки,
+    // которые они уменьшают. Порознь появиться не могут.
+    await adjustmentService.insertAdjustments(periodId, lateAdjustments, client);
+
     // Шаги 7-8: перевести период в closed, зафиксировать closed_at.
     await db.execute(
       `UPDATE settlement_periods SET status = 'closed', closed_at = NOW() WHERE id = $1 AND status = 'draft'`,
@@ -300,7 +454,7 @@ async function closeSettlementPeriod(periodId, { now = new Date() } = {}) {
 
     // Шаг 9 (commit) — выполняется вызывающим serializableTransaction() при
     // успешном возврате из этой функции.
-    return { period: closedRows[0], lines: insertedLines, alreadyClosed: false };
+    return { period: closedRows[0], lines: insertedLines, alreadyClosed: false, carryEvents };
   }, { lockTimeoutMs: 5000 });
 }
 
@@ -342,6 +496,29 @@ async function deleteDraftSettlementPeriod(periodId) {
 // settlement_restaurant_lines), НИКОГДА не трогает orders/payments/refunds
 // заново (задание, раздел 10: "не пересчитывать closed-период"). Для draft —
 // live preview той же формулой, что и getSettlementPeriodDetail ниже.
+// Пользовательский статус ЗАКРЫТОГО периода (docs/HQ-PRODUCT-SPEC.md,
+// раздел «Статусы расчётного периода»). Одно слово «Закрыт» намеренно НЕ
+// используется как единственный статус: период может быть бухгалтерски
+// закрыт, а выплаты по нему ещё не завершены.
+//
+//   awaiting_payouts — ни одна выплата периода не завершена успешно;
+//   partially_paid   — часть ресторанов с положительной суммой выплачена;
+//   paid             — выплачены все, кому причиталось.
+// Период без единой строки с payable_amount > 0 (например, только возвраты)
+// считается закрытым и полностью рассчитанным — платить некому.
+function resolvePeriodPayoutStatus({ payableLines, payoutsSucceeded }) {
+  if (payableLines === 0) return 'paid';
+  if (payoutsSucceeded === 0) return 'awaiting_payouts';
+  if (payoutsSucceeded >= payableLines) return 'paid';
+  return 'partially_paid';
+}
+
+const PERIOD_PAYOUT_STATUS_LABELS = {
+  awaiting_payouts: 'Ожидает выплат',
+  partially_paid: 'Выплачен частично',
+  paid: 'Выплачен',
+};
+
 async function listSettlementPeriods(now = new Date()) {
   const periods = await db.query('SELECT * FROM settlement_periods ORDER BY period_from DESC, id DESC');
   const results = [];
@@ -354,8 +531,23 @@ async function listSettlementPeriods(now = new Date()) {
            COUNT(DISTINCT restaurant_id)::int AS restaurant_count,
            COALESCE(SUM(turnover), 0)::int AS turnover,
            COALESCE(SUM(yaam_commission), 0)::int AS commission,
-           COALESCE(SUM(restaurant_earnings), 0)::int AS restaurant_earnings
+           -- «Ресторанам» на карточке — это то, что РЕАЛЬНО причитается за
+           -- период, то есть payable_amount со сторно, а не начисленное до
+           -- удержаний. Иначе сводка обещала бы больше, чем будет выплачено.
+           COALESCE(SUM(payable_amount), 0)::int AS restaurant_earnings,
+           COALESCE(SUM(refund_adjustment_restaurant_amount), 0)::int AS adjustment_amount,
+           COALESCE(SUM(successful_refunds_amount), 0)::int AS refunds_amount,
+           COALESCE(SUM(successful_refunds_count), 0)::int AS refunds_count,
+           COUNT(*) FILTER (WHERE payable_amount > 0)::int AS payable_lines
          FROM settlement_restaurant_lines WHERE settlement_period_id = $1`,
+        [period.id],
+      );
+      // eslint-disable-next-line no-await-in-loop
+      const [payoutSummary] = await db.query(
+        `SELECT
+           COUNT(*)::int AS payouts_total,
+           COUNT(*) FILTER (WHERE status = 'succeeded')::int AS payouts_succeeded
+         FROM restaurant_payouts WHERE settlement_period_id = $1`,
         [period.id],
       );
       results.push({
@@ -363,6 +555,12 @@ async function listSettlementPeriods(now = new Date()) {
         status: period.status, createdAt: period.created_at, closedAt: period.closed_at,
         restaurantCount: summary.restaurant_count, turnover: summary.turnover,
         commission: summary.commission, restaurantEarnings: summary.restaurant_earnings,
+        refundsAmount: summary.refunds_amount, refundsCount: summary.refunds_count,
+        adjustmentAmount: summary.adjustment_amount,
+        payoutStatus: resolvePeriodPayoutStatus({
+          payableLines: summary.payable_lines,
+          payoutsSucceeded: payoutSummary.payouts_succeeded,
+        }),
       });
     } else {
       // eslint-disable-next-line no-await-in-loop
@@ -389,12 +587,22 @@ async function getSettlementPeriodDetail(periodId, now = new Date()) {
   if (!period) return null;
 
   if (period.status === 'closed') {
+    // Состояние выплаты подтягивается СРАЗУ (LEFT JOIN), чтобы детальная
+    // страница не делала N+1 запросов и не собирала статус в шаблоне.
+    // restaurant_name — из snapshot закрытого периода, а не из текущей
+    // таблицы: переименование ресторана не должно менять закрытый период.
     const lines = await db.query(
-      `SELECT srl.*, r.name AS restaurant_name
+      `SELECT srl.*,
+              COALESCE(srl.restaurant_name_snapshot, r.name) AS restaurant_name,
+              rp.id AS payout_id, rp.status AS payout_status,
+              rp.completed_at AS payout_completed_at, rp.failure_reason AS payout_failure_reason
        FROM settlement_restaurant_lines srl
        JOIN restaurants r ON r.id = srl.restaurant_id
+       LEFT JOIN restaurant_payouts rp
+              ON rp.settlement_period_id = srl.settlement_period_id
+             AND rp.restaurant_id = srl.restaurant_id
        WHERE srl.settlement_period_id = $1
-       ORDER BY r.name`,
+       ORDER BY COALESCE(srl.restaurant_name_snapshot, r.name)`,
       [periodId],
     );
     return { period, lines, preview: false };
@@ -488,10 +696,36 @@ async function checkSettlementInvariants() {
     violations.push({ kind: 'restaurant_line_sum_mismatch', count: mismatchRows.length });
   }
 
-  // 6. payable_amount < 0.
-  const negativeRows = await db.query('SELECT id FROM settlement_restaurant_lines WHERE payable_amount < 0');
+  // 6. payable_amount < 0 БЕЗ объяснения корректировкой.
+  //
+  // Отрицательный остаток сам по себе — законное состояние: поздний возврат
+  // может превысить продажи периода, и тогда ресторан должен YAAM. Обнулять
+  // такой остаток нельзя (это подарило бы ресторану деньги, уже возвращённые
+  // покупателю), выплатить его тоже нельзя — он помечен payout_blocked_reason
+  // и переносится в следующий период. Нарушение — только отрицательная сумма,
+  // не покрытая сторно: она означала бы ошибку расчёта, а не долг.
+  const negativeRows = await db.query(
+    `SELECT id FROM settlement_restaurant_lines
+      WHERE payable_amount < 0 AND refund_adjustment_restaurant_amount = 0`,
+  );
   if (negativeRows.length > 0) {
     violations.push({ kind: 'negative_payable_amount', count: negativeRows.length });
+  }
+
+  // 6a. Сумма сторно в строке обязана совпадать с суммой её корректировок.
+  const adjustmentMismatch = await db.query(`
+    SELECT srl.id FROM settlement_restaurant_lines srl
+    WHERE srl.refund_adjustment_restaurant_amount <> COALESCE((
+      SELECT SUM(sa.restaurant_amount)::int FROM settlement_adjustments sa
+      WHERE sa.settlement_period_id = srl.settlement_period_id AND sa.restaurant_id = srl.restaurant_id
+    ), 0)
+    OR srl.refund_adjustment_commission <> COALESCE((
+      SELECT SUM(sa.commission_amount)::int FROM settlement_adjustments sa
+      WHERE sa.settlement_period_id = srl.settlement_period_id AND sa.restaurant_id = srl.restaurant_id
+    ), 0)
+  `);
+  if (adjustmentMismatch.length > 0) {
+    violations.push({ kind: 'adjustment_sum_mismatch', count: adjustmentMismatch.length });
   }
 
   // 7. turnover != commission + restaurant_earnings.
@@ -516,9 +750,23 @@ async function checkSettlementInvariants() {
   return { ok: violations.length === 0, violations };
 }
 
+// Диапазон недели по её DATE-границам — ЕДИНСТВЕННОЕ место, где даты
+// периода превращаются в UTC-интервал расчёта. Экспортировано, чтобы
+// weeklySettlementService не заводил второе, потенциально расходящееся
+// определение границ (задание, раздел 2: заказ не может попасть в два
+// периода).
+function resolvePeriodRangeForPeriod(periodFrom, periodTo, now = new Date()) {
+  return resolvePeriodRange({ period: 'custom', from: periodFrom, to: periodTo }, now);
+}
+
 module.exports = {
   ValidationError,
   MAX_NOTES_LENGTH,
+  computeSettlementPreview,
+  listWeeksWithFinancialActivity,
+  resolvePeriodRangeForPeriod,
+  resolvePeriodPayoutStatus,
+  PERIOD_PAYOUT_STATUS_LABELS,
   createDraftSettlementPeriod,
   getSettlementPeriodById,
   closeSettlementPeriod,

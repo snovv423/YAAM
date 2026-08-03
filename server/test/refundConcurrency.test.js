@@ -207,7 +207,7 @@ test('restaurantDecline() резервирует и выполняет возв�
 
 test('sweepTimeouts() переводит просроченный awaiting_restaurant в timed_out и резервирует возврат атомарно с переходом статуса', async () => {
   const { orderId, paymentId } = await createPaidOrder();
-  db.prepare("UPDATE orders SET status_updated_at = datetime('now', '-4 minutes') WHERE id = ?").run(orderId);
+  db.prepare("UPDATE orders SET status_updated_at = datetime('now', '-10 minutes') WHERE id = ?").run(orderId);
   paymentService.refundPayment = async () => ({ refundId: `refund_${paymentId}_timeout`, status: 'succeeded' });
 
   await orderService.sweepTimeouts();
@@ -320,7 +320,8 @@ test('provider_idempotency_key возврата никогда не попада
   assert.equal(JSON.stringify(dto).includes('provider_idempotency_key'), false);
   assert.deepEqual(Object.keys(dto).sort(), [
     'estimated_ready_minutes', 'fulfillment_type', 'items_total', 'payment_expires_at',
-    'public_code', 'rating', 'refund_status', 'restaurant_phone', 'status', 'status_updated_at',
+    'preparation_deadline', 'public_code', 'rating', 'refund_status', 'restaurant_phone',
+    'status', 'status_updated_at',
   ]);
 });
 

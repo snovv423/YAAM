@@ -35,6 +35,51 @@
 
 const dbBootstrap = require('../../db/postgresql/bootstrap');
 const db = require('../../db/postgresql');
+const migrator = require('./migrator');
+
+// Сколько ждать завершения уже принятых HTTP-запросов при выключении.
+// httpServer.close() сам по себе НЕ имеет предела: он ждёт закрытия всех
+// соединений, а keep-alive-соединение браузера может висеть минутами. В
+// systemd это выглядело бы как «сервис не останавливается» с последующим
+// SIGKILL — то есть выключение переставало быть graceful ровно тогда, когда
+// это важнее всего (деплой).
+const DEFAULT_SHUTDOWN_TIMEOUT_MS = 15000;
+
+// Закрывает сервер, не дожидаясь вечно. Порядок важен:
+//   1. close() — перестать принимать НОВЫЕ соединения;
+//   2. closeIdleConnections() — сразу отпустить keep-alive без запросов;
+//   3. по истечении таймаута — closeAllConnections(), обрывая то, что
+//      действительно зависло.
+// Активный запрос при этом получает шанс доработать в пределах таймаута.
+async function closeHttpServer(httpServer, timeoutMs, logger) {
+  await new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (err) reject(err); else resolve();
+    };
+
+    httpServer.close((err) => finish(err));
+
+    // Node 18+. Проверяем наличие, чтобы не зависеть от версии рантайма.
+    if (typeof httpServer.closeIdleConnections === 'function') {
+      httpServer.closeIdleConnections();
+    }
+
+    const timer = setTimeout(() => {
+      if (typeof httpServer.closeAllConnections === 'function') {
+        logger.warn(
+          `[lifecycle] активные соединения не закрылись за ${timeoutMs} мс — принудительное закрытие`,
+        );
+        httpServer.closeAllConnections();
+      }
+      finish(null);
+    }, timeoutMs);
+    if (typeof timer.unref === 'function') timer.unref();
+  });
+}
 
 function createLifecycle({
   schedulers = [],
@@ -42,6 +87,14 @@ function createLifecycle({
   onShutdown,
   onSignal,
   signals = ['SIGTERM', 'SIGINT'],
+  shutdownTimeoutMs = DEFAULT_SHUTDOWN_TIMEOUT_MS,
+  runMigrations = true,
+  // Закрывать ли пул PostgreSQL при остановке. В реальном процессе — да,
+  // это часть корректного выключения. Тесту, который проверяет ИМЕННО
+  // lifecycle, закрытие общего пула мешает: он нужен следующим тестам, а
+  // асинхронные события разрыва соединений всплывают уже вне теста.
+  closeDatabase = true,
+  logger = console,
 } = {}) {
   let started = false;
   let stopping = false;
@@ -50,6 +103,11 @@ function createLifecycle({
   async function start(options = {}) {
     if (started) return; // идемпотентно — повторный start() на уже запущенном lifecycle безопасен
     await dbBootstrap.bootstrap(options.bootstrap);
+
+    // Миграции — ДО запуска планировщиков и до приёма запросов. Ошибка здесь
+    // обязана остановить старт: работать на неполной схеме нельзя.
+    if (runMigrations) await migrator.migrate({ logger });
+
     for (const scheduler of schedulers) scheduler.start();
 
     for (const signal of signals) {
@@ -82,14 +140,12 @@ function createLifecycle({
       await Promise.all(schedulers.map((scheduler) => scheduler.stop()));
 
       if (httpServer) {
-        await new Promise((resolve, reject) => {
-          httpServer.close((err) => (err ? reject(err) : resolve()));
-        });
+        await closeHttpServer(httpServer, shutdownTimeoutMs, logger);
       }
 
       if (onShutdown) await onShutdown();
 
-      await db.close();
+      if (closeDatabase) await db.close();
       started = false;
     } finally {
       stopping = false;

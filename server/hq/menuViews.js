@@ -1,206 +1,226 @@
 'use strict';
 
-// YAAM HQ Stage 5A — server-rendered HTML для вкладки «Меню» внутри
-// конкретного ресторана. Тот же принцип, что и hq/restaurantsViews.js:
-// шаблонные функции без движка/фреймворка, esc() на каждое значение из БД.
+// YAAM HQ — вкладка «Меню» внутри ресторана (docs/HQ-PRODUCT-SPEC.md,
+// раздел «Меню»). Тот же принцип, что и hq/restaurantsViews.js: шаблонные
+// функции без движка/фреймворка, esc() на каждое значение из БД.
+//
+// Экран полностью переработан: вместо технической таблицы с постоянными
+// кнопками «Выше»/«Ниже»/«Переименовать»/«Архивировать» у каждой строки —
+// категории-аккордеоны с компактными строками блюд. Управление категорией
+// спрятано в её собственное маленькое меню, порядок меняется перетаскиванием
+// (hq/static/hq.js), архив вынесен на отдельный экран.
 const { esc } = require('./layout');
 const { money } = require('./restaurantsViews');
 const { renderPhotoManager } = require('./photosViews');
 
-const ITEM_FILTERS = ['active', 'unavailable', 'archived', 'all'];
-
-function categoryBadge(c) {
-  return c.archived_at
-    ? '<span class="badge closed">Архивирована</span>'
-    : '<span class="badge open">Активна</span>';
+// «На витрине» / «Снято с витрины» — продуктовые формулировки спецификации.
+// «Сделать недоступным»/«Временно недоступно» больше не используются нигде.
+function itemStatusLabel(item) {
+  if (item.archived_at) return 'В архиве';
+  return item.is_available ? 'На витрине' : 'Снято с витрины';
 }
 
-function itemBadge(item) {
-  if (item.archived_at) return '<span class="badge closed">Архивировано</span>';
-  return item.is_available
-    ? '<span class="badge open">Доступно</span>'
-    : '<span class="badge paused">Временно недоступно</span>';
+function pluralDishes(n) {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return 'блюдо';
+  if ([2, 3, 4].includes(mod10) && ![12, 13, 14].includes(mod100)) return 'блюда';
+  return 'блюд';
 }
 
-function nutritionSummary(item) {
-  const parts = [];
-  if (item.weight_g != null) parts.push(`${item.weight_g} г`);
-  if (item.kcal != null) parts.push(`${item.kcal} ккал`);
-  return parts.length ? parts.join(' · ') : '';
+function formatArchivedAt(value) {
+  if (!value) return '';
+  const d = value instanceof Date ? value : new Date(value);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${d.getFullYear()}`;
 }
 
-function filterItems(items, filter) {
-  switch (filter) {
-    case 'active': return items.filter((i) => !i.archived_at && i.is_available);
-    case 'unavailable': return items.filter((i) => !i.archived_at && !i.is_available);
-    case 'archived': return items.filter((i) => i.archived_at);
-    case 'all': return items;
-    default: return items.filter((i) => !i.archived_at); // по умолчанию — всё не архивное
-  }
-}
-
-function itemActionButtons({ restaurant, category, item, csrfToken, linkBasePath }) {
-  const base = `${linkBasePath}/restaurants/${restaurant.id}/menu/items/${item.id}`;
-  const buttons = [`<a class="btn ghost" href="${base}">Открыть</a>`];
-  if (!item.archived_at) {
-    const toggleLabel = item.is_available ? 'Сделать недоступным' : 'Сделать доступным';
-    buttons.push(`
-      <form method="post" action="${base}/available" style="display:inline">
-        <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
-        <input type="hidden" name="available" value="${item.is_available ? '0' : '1'}">
-        <button type="submit" class="ghost">${esc(toggleLabel)}</button>
-      </form>`);
-    buttons.push(`
-      <form method="post" action="${base}/move" style="display:inline">
-        <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
-        <input type="hidden" name="direction" value="up">
-        <button type="submit" class="ghost">Выше</button>
-      </form>`);
-    buttons.push(`
-      <form method="post" action="${base}/move" style="display:inline">
-        <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
-        <input type="hidden" name="direction" value="down">
-        <button type="submit" class="ghost">Ниже</button>
-      </form>`);
-    buttons.push(`
-      <form method="post" action="${base}/archive" onsubmit="return confirm('Архивировать «${esc(item.name)}»? Блюдо исчезнет из публичного меню, история заказов сохранится.')" style="display:inline">
-        <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
-        <button type="submit" class="danger">Архивировать</button>
-      </form>`);
-  } else {
-    buttons.push(`
-      <form method="post" action="${base}/restore" style="display:inline">
-        <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
-        <button type="submit">Восстановить</button>
-      </form>`);
-  }
-  return buttons.join(' ');
-}
-
-function renderItemRow({ restaurant, category, item, csrfToken, linkBasePath }) {
-  const nutrition = nutritionSummary(item);
+// Компактная строка блюда (спецификация, раздел «Компактные карточки блюд»):
+// маленькое квадратное фото, название, цена, спокойный статус. Вся строка —
+// одна ссылка на редактирование; отдельных действий в строке нет.
+// dragHandle — маленький отдельный handle, а НЕ вся строка: на мобильном
+// перетаскивание всей строки конфликтовало бы с обычной прокруткой.
+function renderDishRow({ item, linkBasePath, restaurantId }) {
+  const href = `${linkBasePath}/restaurants/${restaurantId}/menu/items/${item.id}`;
+  const thumb = item.thumb_url
+    ? `<img class="dish-thumb" src="${esc(item.thumb_url)}" alt="" loading="lazy" width="48" height="48">`
+    : '<div class="dish-thumb placeholder" aria-hidden="true"></div>';
   return `
-    <div style="padding:12px 0;border-top:1px solid var(--bord)">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px">
-        <div>
-          <div style="font-weight:700">${esc(item.name)}</div>
-          <div style="color:var(--txt2);font-size:13px;margin-top:2px">${money(item.price)}${nutrition ? ` · ${esc(nutrition)}` : ''}</div>
-        </div>
-        <div>${itemBadge(item)}</div>
-      </div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">${itemActionButtons({ restaurant, category, item, csrfToken, linkBasePath })}</div>
-    </div>`;
+    <li class="dish-row" data-item-id="${item.id}">
+      <span class="drag-handle" aria-hidden="true" title="Перетащить"></span>
+      <a class="dish-link" href="${href}">
+        ${thumb}
+        <span class="dish-main">
+          <span class="dish-name">${esc(item.name)}</span>
+          <span class="dish-meta">${money(item.price)} · ${esc(itemStatusLabel(item))}</span>
+        </span>
+        <span class="dish-chevron" aria-hidden="true"></span>
+      </a>
+    </li>`;
 }
 
-function categoryActionButtons({ restaurant, category, csrfToken, linkBasePath, activeCount }) {
-  const base = `${linkBasePath}/restaurants/${restaurant.id}/menu/categories/${category.id}`;
-  const buttons = [`<a class="btn ghost" href="${base}/edit">Переименовать</a>`];
-  if (!category.archived_at) {
-    buttons.push(`
-      <form method="post" action="${base}/move" style="display:inline">
-        <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
-        <input type="hidden" name="direction" value="up">
-        <button type="submit" class="ghost">Выше</button>
-      </form>`);
-    buttons.push(`
-      <form method="post" action="${base}/move" style="display:inline">
-        <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
-        <input type="hidden" name="direction" value="down">
-        <button type="submit" class="ghost">Ниже</button>
-      </form>`);
-    if (activeCount === 0) {
-      buttons.push(`
-        <form method="post" action="${base}/archive" onsubmit="return confirm('Архивировать пустую категорию «${esc(category.name)}»?')" style="display:inline">
-          <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
-          <button type="submit" class="danger">Архивировать</button>
-        </form>`);
-    }
-  } else {
-    buttons.push(`
-      <form method="post" action="${base}/restore" style="display:inline">
-        <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
-        <button type="submit">Восстановить</button>
-      </form>`);
-  }
-  return buttons.join(' ');
-}
+// Категория-аккордеон: <details>/<summary> — раскрытие на той же странице
+// без единой строки JS (спецификация: «раскрывается на той же странице как
+// шторка»), работает и при отключённом JS.
+function renderCategoryBlock({ restaurant, category, csrfToken, linkBasePath, allCategories }) {
+  const base = `${linkBasePath}/restaurants/${restaurant.id}/menu`;
+  const items = category.items.filter((i) => !i.archived_at);
+  const otherCategories = allCategories.filter((c) => !c.archived_at && c.id !== category.id);
 
-function renderCategoryBlock({ restaurant, category, filter, csrfToken, linkBasePath }) {
-  const allItems = category.items;
-  const activeCount = allItems.filter((i) => !i.archived_at && i.is_available).length;
-  const unavailableCount = allItems.filter((i) => !i.archived_at && !i.is_available).length;
-  const shown = filterItems(allItems, filter);
+  const archiveForm = items.length === 0
+    ? `<form method="post" action="${base}/categories/${category.id}/archive" onsubmit="return confirm('Архивировать пустую категорию «${esc(category.name)}»?')">
+         <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
+         <button type="submit" class="ghost compact">Архивировать</button>
+       </form>`
+    : `<a class="btn ghost compact" href="${base}/categories/${category.id}/archive-options">Архивировать</a>`;
 
   return `
-    <div class="panel">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px">
-        <div>
-          <div style="font-weight:700;font-size:16px">${esc(category.name)} ${categoryBadge(category)}</div>
-          <div style="color:var(--txt2);font-size:13px;margin-top:4px">${activeCount} доступно · ${unavailableCount} недоступно</div>
+    <details class="cat-block" data-category-id="${category.id}">
+      <summary class="cat-summary">
+        <span class="drag-handle cat-handle" aria-hidden="true" title="Перетащить"></span>
+        <span class="cat-titles">
+          <span class="cat-name">${esc(category.name)}</span>
+          <span class="cat-count">${items.length} ${esc(pluralDishes(items.length))}</span>
+        </span>
+      </summary>
+      <div class="cat-body">
+        <div class="cat-actions">
+          <a class="btn compact" href="${base}/items/new?category=${category.id}">+ Добавить блюдо</a>
+          <a class="btn ghost compact" href="${base}/categories/${category.id}/edit">Переименовать</a>
+          ${archiveForm}
         </div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap">${categoryActionButtons({ restaurant, category, csrfToken, linkBasePath, activeCount })}</div>
+        ${items.length
+          ? `<ul class="dish-list" data-reorder="items" data-category-id="${category.id}" data-endpoint="${base}/categories/${category.id}/reorder-items">${items.map((item) => renderDishRow({ item, linkBasePath, restaurantId: restaurant.id })).join('')}</ul>`
+          : '<div class="empty-state">В категории пока нет блюд.</div>'}
       </div>
-      ${shown.length ? shown.map((item) => renderItemRow({ restaurant, category, item, csrfToken, linkBasePath })).join('') : '<div class="empty-state" style="margin-top:10px">Нет блюд по текущему фильтру.</div>'}
-    </div>`;
+    </details>`;
 }
 
-function renderMenuTab({ restaurant, menu, filter, csrfToken, linkBasePath, error, notice }) {
-  const resolvedFilter = ITEM_FILTERS.includes(filter) ? filter : '';
+function renderMenuTab({ restaurant, menu, csrfToken, linkBasePath, error, notice }) {
+  const base = `${linkBasePath}/restaurants/${restaurant.id}/menu`;
   const activeCategories = menu.filter((c) => !c.archived_at);
-  const totalItems = menu.reduce((sum, c) => sum + c.items.length, 0);
-
-  const filterForm = `
-    <form class="filters panel" method="get" action="${linkBasePath}/restaurants/${restaurant.id}/menu">
-      <div class="field">
-        <label for="mf-filter">Показывать блюда</label>
-        <select id="mf-filter" name="filter">
-          <option value="">Активные и недоступные</option>
-          <option value="active" ${filter === 'active' ? 'selected' : ''}>Только доступные</option>
-          <option value="unavailable" ${filter === 'unavailable' ? 'selected' : ''}>Только недоступные</option>
-          <option value="archived" ${filter === 'archived' ? 'selected' : ''}>Только архивированные</option>
-          <option value="all" ${filter === 'all' ? 'selected' : ''}>Все, включая архив</option>
-        </select>
-      </div>
-      <button type="submit">Показать</button>
-    </form>`;
-
-  const newCategoryForm = `
-    <div class="panel">
-      <div style="font-weight:700;margin-bottom:10px">Новая категория</div>
-      <form method="post" action="${linkBasePath}/restaurants/${restaurant.id}/menu/categories" class="row">
-        <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
-        <div style="flex:2">
-          <input name="name" type="text" placeholder="Например: Горячее" maxlength="100" required autocomplete="off">
-        </div>
-        <div style="flex:0 0 auto"><button type="submit">+ Добавить категорию</button></div>
-      </form>
-    </div>`;
-
-  const visibleCategories = resolvedFilter === 'archived' || resolvedFilter === 'all'
-    ? menu
-    : activeCategories;
-
-  const isEmpty = totalItems === 0 && activeCategories.length === 0;
-  const body = isEmpty
-    ? `<div class="panel"><div class="empty-state">В меню пока нет блюд.</div><a class="btn" style="margin-top:10px;display:inline-block" href="${linkBasePath}/restaurants/${restaurant.id}/menu/items/new">Добавить первое блюдо</a></div>`
-    : visibleCategories.map((category) => renderCategoryBlock({ restaurant, category, filter: resolvedFilter, csrfToken, linkBasePath })).join('');
 
   return `
     ${error ? `<div class="error" style="margin-bottom:14px">${esc(error)}</div>` : ''}
     ${notice ? `<div class="notice" style="margin-bottom:14px">${esc(notice)}</div>` : ''}
-    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:16px">
-      <h2 style="margin:0">Меню</h2>
-      <a class="btn" href="${linkBasePath}/restaurants/${restaurant.id}/menu/items/new">+ Добавить блюдо</a>
+
+    <div class="menu-toolbar">
+      <details class="add-cat">
+        <summary class="btn compact">+ Добавить категорию</summary>
+        <form class="add-cat-form" method="post" action="${base}/categories">
+          <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
+          <input name="name" type="text" placeholder="Например: Горячее" maxlength="100" required autocomplete="off" aria-label="Название категории">
+          <button type="submit" class="compact">Сохранить</button>
+        </form>
+      </details>
+      <a class="btn ghost compact" href="${base}/archive">Архив</a>
     </div>
-    ${newCategoryForm}
-    ${activeCategories.length ? filterForm : ''}
-    ${body}
+
+    ${activeCategories.length
+      ? `<div class="cat-list" data-reorder="categories" data-endpoint="${base}/reorder-categories">${activeCategories.map((category) => renderCategoryBlock({ restaurant, category, csrfToken, linkBasePath, allCategories: menu })).join('')}</div>`
+      : '<div class="panel"><div class="empty-state">Категорий пока нет. Начните с добавления категории — блюда создаются внутри неё.</div></div>'}
   `;
 }
 
 // ===========================================================================
-// Форма категории (создание использует инлайн-форму на самой вкладке —
-// см. renderMenuTab; эта — только для редактирования названия).
+// Архивирование непустой категории — два варианта (спецификация, раздел
+// «Категории»): перенести блюда либо архивировать вместе с блюдами.
+// ===========================================================================
+
+function renderCategoryArchiveOptions({ restaurant, category, otherCategories, itemsCount, csrfToken, linkBasePath, error }) {
+  const base = `${linkBasePath}/restaurants/${restaurant.id}/menu`;
+  return `
+    <h2>Архивировать «${esc(category.name)}»</h2>
+    <div class="panel">
+      <div class="empty-state" style="margin-bottom:14px">В категории ${itemsCount} ${esc(pluralDishes(itemsCount))}. Выберите, что с ними сделать — блюда не удаляются ни в одном из вариантов, история заказов сохраняется.</div>
+      ${error ? `<div class="error" style="margin-bottom:14px">${esc(error)}</div>` : ''}
+
+      ${otherCategories.length ? `
+      <form method="post" action="${base}/categories/${category.id}/move-items-archive" style="margin-bottom:22px">
+        <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
+        <label for="ca-target">Перенести блюда в категорию</label>
+        <select id="ca-target" name="target_category_id" required>
+          ${otherCategories.map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}
+        </select>
+        <button type="submit" class="compact" style="margin-top:12px">Перенести и архивировать</button>
+      </form>` : '<div class="empty-state" style="margin-bottom:22px">Других активных категорий нет — перенести блюда некуда.</div>'}
+
+      <form method="post" action="${base}/categories/${category.id}/archive-with-items" onsubmit="return confirm('Архивировать категорию вместе с ${itemsCount} ${esc(pluralDishes(itemsCount))}?')">
+        <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
+        <button type="submit" class="ghost compact">Архивировать вместе с блюдами</button>
+      </form>
+    </div>
+    <a class="btn ghost compact" href="${base}">← К меню</a>
+  `;
+}
+
+// ===========================================================================
+// Архив меню (спецификация, раздел «Архив меню»)
+// ===========================================================================
+
+function renderMenuArchive({ restaurant, archive, activeCategories, csrfToken, linkBasePath }) {
+  const base = `${linkBasePath}/restaurants/${restaurant.id}/menu`;
+
+  const itemRows = archive.items.map((item) => {
+    const thumb = item.thumb_url
+      ? `<img class="dish-thumb" src="${esc(item.thumb_url)}" alt="" loading="lazy" width="48" height="48">`
+      : '<div class="dish-thumb placeholder" aria-hidden="true"></div>';
+    const archivedAt = formatArchivedAt(item.archived_at);
+    // Прежней категории нет в рабочем меню — восстановить «как было» нельзя,
+    // владелец обязан выбрать категорию (спецификация).
+    const needsCategory = item.category_archived || !item.category_name;
+    const categorySelect = needsCategory && activeCategories.length
+      ? `<select name="target_category_id" required aria-label="Категория для восстановления">
+           ${activeCategories.map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}
+         </select>`
+      : '';
+    const canRestore = !needsCategory || activeCategories.length > 0;
+    return `
+      <li class="dish-row archive-row">
+        <div class="dish-link static">
+          ${thumb}
+          <span class="dish-main">
+            <span class="dish-name">${esc(item.name)}</span>
+            <span class="dish-meta">${esc(item.category_name || 'Категория удалена')}${archivedAt ? ` · ${esc(archivedAt)}` : ''}</span>
+          </span>
+        </div>
+        ${canRestore ? `
+        <form class="restore-form" method="post" action="${base}/items/${item.id}/restore">
+          <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
+          ${categorySelect}
+          <button type="submit" class="ghost compact">Восстановить</button>
+        </form>` : '<span class="dish-meta">Нет активных категорий</span>'}
+      </li>`;
+  }).join('');
+
+  const categoryRows = archive.categories.map((c) => `
+    <li class="dish-row archive-row">
+      <div class="dish-link static">
+        <span class="dish-main">
+          <span class="dish-name">${esc(c.name)}</span>
+          <span class="dish-meta">Категория${c.archived_at ? ` · ${esc(formatArchivedAt(c.archived_at))}` : ''}</span>
+        </span>
+      </div>
+      <form class="restore-form" method="post" action="${base}/categories/${c.id}/restore">
+        <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
+        <button type="submit" class="ghost compact">Восстановить</button>
+      </form>
+    </li>`).join('');
+
+  return `
+    <h2>Архив меню</h2>
+    ${archive.items.length === 0 && archive.categories.length === 0
+      ? '<div class="panel"><div class="empty-state">Архив пуст.</div></div>'
+      : `
+      ${archive.items.length ? `<div class="panel"><div class="panel-title">Блюда</div><ul class="dish-list">${itemRows}</ul></div>` : ''}
+      ${archive.categories.length ? `<div class="panel"><div class="panel-title">Категории</div><ul class="dish-list">${categoryRows}</ul></div>` : ''}
+      `}
+    <a class="btn ghost compact" href="${base}">← К меню</a>
+  `;
+}
+
+// ===========================================================================
+// Форма категории (переименование)
 // ===========================================================================
 
 function renderCategoryEditForm({ restaurant, category, error, csrfToken, linkBasePath }) {
@@ -211,40 +231,58 @@ function renderCategoryEditForm({ restaurant, category, error, csrfToken, linkBa
         <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
         <label for="cf-name">Название</label>
         <input id="cf-name" name="name" type="text" value="${esc(category.name)}" maxlength="100" required autocomplete="off">
-        <button type="submit">Сохранить</button>
+        <button type="submit" class="compact">Сохранить</button>
         ${error ? `<div class="error">${esc(error)}</div>` : ''}
       </form>
     </div>
-    <a class="btn ghost" href="${linkBasePath}/restaurants/${restaurant.id}/menu">← К меню</a>
+    <a class="btn ghost compact" href="${linkBasePath}/restaurants/${restaurant.id}/menu">← К меню</a>
   `;
 }
 
 // ===========================================================================
 // Форма блюда (создание и редактирование — общая разметка)
 // ===========================================================================
-
+//
+// Внизу — Сохранить / Снять с витрины (или Вернуть на витрину) /
+// Архивировать (спецификация, раздел «Редактирование блюда»). Формулировка
+// «Сделать недоступным» не используется. Физического удаления нет: блюдо,
+// участвовавшее в заказах, только архивируется.
 function renderMenuItemForm({
   restaurant, item, categories, error, csrfToken, linkBasePath, isNew,
-  photos = [], mediaConfigured = false, maxPhotos = 0,
+  photos = [], mediaConfigured = false, maxPhotos = 0, presetCategoryId = null,
 }) {
   const v = item || {};
-  const action = isNew
-    ? `${linkBasePath}/restaurants/${restaurant.id}/menu/items`
-    : `${linkBasePath}/restaurants/${restaurant.id}/menu/items/${v.id}`;
+  const base = `${linkBasePath}/restaurants/${restaurant.id}/menu`;
+  const action = isNew ? `${base}/items` : `${base}/items/${v.id}`;
   const activeCategories = categories.filter((c) => !c.archived_at || c.id === v.category_id);
-  const title = isNew ? 'Добавить блюдо' : `Редактировать: ${v.name || ''}`;
+  const selectedCategoryId = v.category_id || (presetCategoryId ? Number(presetCategoryId) : null);
+  const title = isNew ? 'Добавить блюдо' : (v.name || 'Блюдо');
+
+  const bottomActions = isNew ? '' : `
+    <div class="item-actions">
+      ${v.archived_at ? '' : `
+      <form method="post" action="${base}/items/${v.id}/available">
+        <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
+        <input type="hidden" name="available" value="${v.is_available ? '0' : '1'}">
+        <button type="submit" class="ghost compact">${v.is_available ? 'Снять с витрины' : 'Вернуть на витрину'}</button>
+      </form>
+      <form method="post" action="${base}/items/${v.id}/archive" onsubmit="return confirm('Архивировать «${esc(v.name || '')}»? Блюдо исчезнет из меню и с витрины, история заказов сохранится.')">
+        <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
+        <button type="submit" class="ghost compact">Архивировать</button>
+      </form>`}
+    </div>`;
 
   return `
     <h2>${esc(title)}</h2>
-    ${!isNew ? `<div style="color:var(--txt2);font-size:13px;margin-bottom:14px">${itemBadge(v)}</div>` : ''}
+    ${!isNew ? `<div class="item-status">${esc(itemStatusLabel(v))}</div>` : ''}
     <div class="panel">
       <form method="post" action="${action}">
         <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
         <label for="if-name">Название</label>
-        <input id="if-name" name="name" type="text" value="${esc(v.name || '')}" placeholder="Например: Шашлык из баранины, Компот, Хлеб" maxlength="200" required autocomplete="off">
+        <input id="if-name" name="name" type="text" value="${esc(v.name || '')}" maxlength="200" required autocomplete="off">
         <label for="if-category">Категория</label>
         <select id="if-category" name="category_id" required>
-          ${activeCategories.map((c) => `<option value="${c.id}" ${c.id === v.category_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}
+          ${activeCategories.map((c) => `<option value="${c.id}" ${c.id === selectedCategoryId ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}
         </select>
         <label for="if-price">Цена, ₽</label>
         <input id="if-price" name="price" type="number" min="0" max="1000000" value="${v.price ?? ''}" required autocomplete="off">
@@ -279,26 +317,28 @@ function renderMenuItemForm({
         <label for="if-photo">Ссылка на фото (необязательно)</label>
         <input id="if-photo" name="photo_url" type="text" value="${esc(v.photo_url || '')}" placeholder="https://..." autocomplete="off">
         ${photos.length ? '<div class="photo-meta">Используется, только если ниже нет ни одной загруженной фотографии.</div>' : ''}
-        <button type="submit">${isNew ? 'Добавить блюдо' : 'Сохранить'}</button>
+        <button type="submit" class="compact">${isNew ? 'Добавить блюдо' : 'Сохранить'}</button>
         ${error ? `<div class="error">${esc(error)}</div>` : ''}
       </form>
+      ${bottomActions}
     </div>
     ${!isNew ? renderPhotoManager({
       title: 'Фотографии блюда',
       photos, mediaConfigured, maxPhotos,
-      uploadAction: `${linkBasePath}/restaurants/${restaurant.id}/menu/items/${v.id}/photos`,
-      actionBase: `${linkBasePath}/restaurants/${restaurant.id}/menu/items/${v.id}/photos`,
+      uploadAction: `${base}/items/${v.id}/photos`,
+      actionBase: `${base}/items/${v.id}/photos`,
       csrfToken,
     }) : ''}
-    <a class="btn ghost" href="${linkBasePath}/restaurants/${restaurant.id}/menu">← К меню</a>
+    <a class="btn ghost compact" href="${base}">← К меню</a>
   `;
 }
 
 module.exports = {
-  ITEM_FILTERS,
-  categoryBadge,
-  itemBadge,
+  itemStatusLabel,
+  pluralDishes,
   renderMenuTab,
   renderCategoryEditForm,
+  renderCategoryArchiveOptions,
+  renderMenuArchive,
   renderMenuItemForm,
 };

@@ -76,7 +76,13 @@ CREATE TABLE IF NOT EXISTS orders (
   status_updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   rating INTEGER,                             -- 1..5, ставится один раз после delivered
-  estimated_ready_minutes INTEGER             -- ресторан выбирает в боте на шаге "Готовится" (см. bot/index.js)
+  estimated_ready_minutes INTEGER,            -- ресторан выбирает в боте на шаге "Готовится" (см. bot/index.js)
+  -- Серверный срок готовности (docs/HQ-PRODUCT-SPEC.md, «Таймер
+  -- приготовления»). Паритет с PostgreSQL-схемой: заполняется один раз при
+  -- переходе в 'preparing', обнуляется при courier/delivered. Хранится как
+  -- UTC-текст datetime('now', ...) — тот же формат, что и остальные даты
+  -- этой схемы.
+  preparation_deadline TEXT
 );
 
 -- Секрет доступа к заказу хранится отдельно от отображаемого public_code.

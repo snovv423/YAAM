@@ -1,0 +1,75 @@
+# systemd unit для YAAM STAGING backend (Stage 16).
+#
+# ЭТО ШАБЛОН. Не применялся ни к одному серверу; SSH-подключений не было.
+#
+# ОТДЕЛЬНЫЙ ЮНИТ, А НЕ ПРАВКА СУЩЕСТВУЮЩЕГО. На VPS уже работает
+# yaam-backend-postgresql (api-pg.yaam.su). Менять его файл значило бы
+# переключить действующий сервис вместо того, чтобы поднять рядом новый.
+# Отдельное имя, отдельный EnvironmentFile, отдельный порт и отдельная база —
+# единственный способ развернуть staging, ничего не сломав.
+#
+# Установка (вручную, на самом VPS):
+#   sudo cp server/deploy/yaam-backend-staging.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now yaam-backend-staging
+#
+# Проверка:
+#   curl -s http://127.0.0.1:3002/health/ready | jq .
+
+[Unit]
+Description=YAAM STAGING backend (server.postgresql.js)
+After=network.target postgresql.service
+# Если PostgreSQL — отдельный systemd-юнит на этом же хосте (типичная
+# установка через apt/apt-get postgresql), даёт гарантию порядка старта.
+# Если PostgreSQL управляется иначе (Docker, managed-сервис) — уберите эту
+# зависимость и полагайтесь на retry внутри db/postgresql/bootstrap.js
+# (waitForDatabase — уже переживает "PostgreSQL ещё не поднялся").
+
+[Service]
+Type=simple
+User=yaam
+WorkingDirectory=/opt/yaam-staging/server
+EnvironmentFile=/opt/yaam-staging/server/.env.staging
+ExecStart=/usr/bin/node server.postgresql.js
+Restart=on-failure
+RestartSec=5
+
+# Graceful shutdown: services/postgresql/lifecycle.js обрабатывает
+# SIGTERM/SIGINT — снимает signal listeners, останавливает schedulers/бота,
+# закрывает HTTP-сервер и пул PostgreSQL.
+#
+# Stage 15: у приложения СВОЙ предел ожидания активных запросов (15 секунд,
+# SHUTDOWN_TIMEOUT_MS). TimeoutStopSec обязан быть БОЛЬШЕ — иначе systemd
+# пришлёт SIGKILL раньше, чем приложение успеет закрыться само, и
+# «graceful» окажется не graceful ровно при деплое. 30 > 15 с запасом.
+TimeoutStopSec=30
+KillSignal=SIGTERM
+
+# Stage 15 — минимальное ужесточение прав. Приложению не нужен ни root, ни
+# запись куда-либо, кроме своего каталога данных.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+# Каталоги, куда приложению писать РАЗРЕШЕНО (медиа-хранилище, если оно
+# локальное). Всё остальное файловое дерево только для чтения.
+ReadWritePaths=/opt/yaam-staging/data
+
+# Логи уходят в journald структурированным JSON (services/observability/logger.js).
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=yaam-backend-staging
+
+# Множественные инстансы этого юнита (в отличие от SQLite-версии) физически
+# БЕЗОПАСНЫ на уровне БД (PostgreSQL — клиент-серверная СУБД) — но этот
+# конкретный юнит-файл всё равно НЕ templated и не подразумевает несколько
+# копий: единственный backend-процесс на порту PG_HEALTH_PORT достаточен для
+# Stage 9/10 масштаба; горизонтальное масштабирование — отдельное будущее
+# решение, требующее пересмотра schedulers (не должны дублировать sweep) и
+# bot lifecycle (не должно быть двух long-polling инстансов одного токена).
+
+[Install]
+WantedBy=multi-user.target

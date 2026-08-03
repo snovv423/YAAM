@@ -19,61 +19,226 @@
   });
 })();
 
+// Живое обновление «Обзора» ресторана (Stage 4, GET .../overview.json)
+// удалено вместе с самим блоком «Активные заказы»: docs/HQ-PRODUCT-SPEC.md
+// прямо исключает оперативную сводку активных заказов из HQ (HQ — кабинет
+// владельца, а не диспетчерская). Опрашивать стало нечего — оставлять
+// мёртвый poll-цикл ради удалённой разметки не нужно.
+
 (function () {
-  // Живое обновление «Обзора» ресторана — раз в 20 секунд, останавливается,
-  // когда вкладка скрыта (задание Stage 4, раздел 12). Один защищённый
-  // JSON-эндпоинт (GET .../overview.json, auth уже проверен на уровне
-  // роутера, no-store уже выставлен глобально hqSecurityHeaders) — без
-  // WebSocket-инфраструктуры и без перезагрузки всей страницы.
-  var root = document.getElementById('hq-live-overview');
-  if (!root) return;
-  var endpoint = root.getAttribute('data-endpoint');
-  if (!endpoint) return;
+  // HQ «Обзор» — Центр событий (docs/HQ-PRODUCT-SPEC.md).
+  //   1. Раскрытие/сворачивание — чистый CSS-класс, без анимационных
+  //      библиотек (задание, раздел 4).
+  //   2. Живое дополнение ленты — тот же JSON-poll паттерн, что и live
+  //      overview выше, но сервер уже возвращает готовый HTML КАЖДОГО
+  //      нового события (routes/hq/pages.js: GET .../events/feed) — этот
+  //      файл только вставляет его, никакого клиентского шаблонизатора.
+  //   3. "Новое событие не должно резко перебрасывать читающего вниз"
+  //      (задание, раздел 7) — автоскролл к низу происходит, ТОЛЬКО если
+  //      пользователь уже был прокручен к низу перед добавлением; иначе
+  //      позиция чтения сохраняется как есть.
+  var center = document.getElementById('hq-event-center');
+  if (!center) return;
+  var scrollBox = center.querySelector('.event-center-scroll');
+  var expandBtn = center.querySelector('.event-expand-btn');
+
+  if (expandBtn) {
+    expandBtn.addEventListener('click', function () {
+      var isExpanded = center.classList.toggle('expanded');
+      expandBtn.setAttribute('aria-expanded', String(isExpanded));
+      expandBtn.textContent = isExpanded ? 'Свернуть' : 'Раскрыть';
+    });
+  }
+
+  var endpoint = center.getAttribute('data-endpoint');
+  if (!endpoint || !scrollBox) return;
+  var lastId = Number(center.getAttribute('data-last-id')) || 0;
   var timer = null;
 
-  function setValue(key, value) {
-    var el = root.querySelector('[data-metric="' + key + '"]');
-    if (el) el.textContent = value;
+  function isScrolledToBottom() {
+    return scrollBox.scrollHeight - scrollBox.scrollTop - scrollBox.clientHeight < 24;
   }
 
-  function money(n) {
-    return n + ' ₽';
-  }
-
-  function refresh() {
-    fetch(endpoint, { headers: { Accept: 'application/json' } })
+  function poll() {
+    fetch(endpoint + '?afterId=' + lastId, { headers: { Accept: 'application/json' } })
       .then(function (res) { return res.ok ? res.json() : null; })
       .then(function (data) {
-        if (!data) return;
-        setValue('ordersToday', data.ordersToday);
-        setValue('deliveredToday', data.deliveredToday);
-        setValue('turnoverToday', money(data.turnoverToday));
-        setValue('avgCheckToday', data.avgCheckToday === null ? '—' : money(data.avgCheckToday));
-        setValue('totalDelivered', data.totalDelivered);
-        setValue('active.awaitingPayment', data.active.awaitingPayment);
-        setValue('active.awaitingRestaurant', data.active.awaitingRestaurant);
-        setValue('active.accepted', data.active.accepted);
-        setValue('active.preparing', data.active.preparing);
-        setValue('active.courier', data.active.courier);
+        if (!data || !data.items || !data.items.length) return;
+        var wasAtBottom = isScrolledToBottom();
+        var emptyState = scrollBox.querySelector('.event-empty');
+        if (emptyState) emptyState.remove();
+        data.items.forEach(function (item) {
+          scrollBox.insertAdjacentHTML('beforeend', item.html);
+          lastId = item.id;
+        });
+        if (wasAtBottom) scrollBox.scrollTop = scrollBox.scrollHeight;
       })
       .catch(function () { /* тихо игнорируем сетевой сбой — следующий тик попробует снова */ });
   }
 
   function start() {
     if (timer) return;
-    refresh();
-    timer = setInterval(refresh, 20000);
+    timer = setInterval(poll, 20000);
   }
-
   function stop() {
     if (!timer) return;
     clearInterval(timer);
     timer = null;
   }
-
   document.addEventListener('visibilitychange', function () {
     if (document.hidden) stop();
     else start();
   });
   if (!document.hidden) start();
+})();
+
+(function () {
+  // Перестановка категорий и блюд перетаскиванием (docs/HQ-PRODUCT-SPEC.md,
+  // раздел «Категории»): кнопки «Выше»/«Ниже» удалены, порядок меняется
+  // только здесь. Pointer Events — один код для мыши и тача, без библиотек.
+  //
+  // Тянуть можно ТОЛЬКО за маленький handle (.drag-handle), а не за всю
+  // строку: спецификация прямо требует, чтобы обычная прокрутка страницы
+  // пальцем не переставляла элементы случайно. touch-action:none стоит
+  // только на самом handle (см. layout.js) — остальная строка продолжает
+  // нормально скроллиться.
+  var lists = document.querySelectorAll('[data-reorder]');
+  if (!lists.length) return;
+
+  function itemsOf(list) {
+    return Array.prototype.slice.call(
+      list.getAttribute('data-reorder') === 'categories'
+        ? list.querySelectorAll(':scope > .cat-block')
+        : list.querySelectorAll(':scope > .dish-row')
+    );
+  }
+
+  function idOf(el) {
+    return el.getAttribute('data-category-id') || el.getAttribute('data-item-id');
+  }
+
+  function persist(list) {
+    var endpoint = list.getAttribute('data-endpoint');
+    if (!endpoint) return;
+    var tokenInput = document.querySelector('input[name="_csrf"]');
+    if (!tokenInput) return;
+    var order = itemsOf(list).map(idOf).filter(Boolean);
+    fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ _csrf: tokenInput.value, order: order })
+    }).catch(function () { /* порядок применится при следующей попытке; страница не ломается */ });
+  }
+
+  lists.forEach(function (list) {
+    list.addEventListener('pointerdown', function (event) {
+      var handle = event.target.closest('.drag-handle');
+      if (!handle || !list.contains(handle)) return;
+      var row = handle.closest('.cat-block') || handle.closest('.dish-row');
+      if (!row) return;
+      event.preventDefault();
+      handle.setPointerCapture(event.pointerId);
+      row.classList.add('dragging');
+
+      function onMove(moveEvent) {
+        var target = document.elementFromPoint(moveEvent.clientX, moveEvent.clientY);
+        if (!target) return;
+        var overRow = target.closest('.cat-block') || target.closest('.dish-row');
+        if (!overRow || overRow === row || overRow.parentNode !== list) return;
+        var rect = overRow.getBoundingClientRect();
+        var after = moveEvent.clientY > rect.top + rect.height / 2;
+        list.insertBefore(row, after ? overRow.nextSibling : overRow);
+      }
+
+      function onUp() {
+        row.classList.remove('dragging');
+        handle.removeEventListener('pointermove', onMove);
+        handle.removeEventListener('pointerup', onUp);
+        handle.removeEventListener('pointercancel', onUp);
+        persist(list);
+      }
+
+      handle.addEventListener('pointermove', onMove);
+      handle.addEventListener('pointerup', onUp);
+      handle.addEventListener('pointercancel', onUp);
+    });
+  });
+})();
+
+// Stage 14 — экран «Настройки»: sheet смены пароля, показ/скрытие пароля,
+// защита от повторной отправки.
+//
+// Формы работают и без этого скрипта: он только показывает/прячет sheet и
+// блокирует вторую отправку. Если JS отключён, sheet остаётся открытым при
+// ошибке (класс open проставляет сервер), а форма отправляется как обычно.
+(function () {
+  'use strict';
+
+  function openSheet(name) {
+    var el = document.querySelector('[data-sheet="' + name + '"]');
+    if (!el) return;
+    el.classList.add('open');
+    var first = el.querySelector('input:not([type=hidden])');
+    if (first) first.focus();
+  }
+
+  function closeSheet(el) {
+    if (el) el.classList.remove('open');
+  }
+
+  document.addEventListener('click', function (e) {
+    var opener = e.target.closest('[data-open-sheet]');
+    if (opener) {
+      e.preventDefault();
+      openSheet(opener.getAttribute('data-open-sheet'));
+      return;
+    }
+
+    if (e.target.closest('[data-close-sheet]')) {
+      e.preventDefault();
+      closeSheet(e.target.closest('.sheet-backdrop'));
+      return;
+    }
+
+    // Клик по затемнению (но не внутри самого sheet) — закрыть.
+    if (e.target.classList && e.target.classList.contains('sheet-backdrop')) {
+      closeSheet(e.target);
+      return;
+    }
+
+    var toggle = e.target.closest('[data-toggle-password]');
+    if (toggle) {
+      e.preventDefault();
+      var input = document.getElementById(toggle.getAttribute('data-toggle-password'));
+      if (!input) return;
+      var hidden = input.type === 'password';
+      input.type = hidden ? 'text' : 'password';
+      toggle.textContent = hidden ? 'Скрыть' : 'Показать';
+      toggle.setAttribute('aria-label', hidden ? 'Скрыть пароль' : 'Показать пароль');
+    }
+  });
+
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Escape') return;
+    var open = document.querySelector('.sheet-backdrop.open');
+    if (open) closeSheet(open);
+  });
+
+  // Двойной клик по «Сохранить» не должен отправить форму дважды: смена
+  // пароля и сохранение реквизитов — не те операции, которые стоит повторять
+  // случайно.
+  document.addEventListener('submit', function (e) {
+    var form = e.target;
+    if (!form.hasAttribute || !form.hasAttribute('data-single-submit')) return;
+    if (form.dataset.submitted === '1') {
+      e.preventDefault();
+      return;
+    }
+    form.dataset.submitted = '1';
+    var btn = form.querySelector('button[type=submit]');
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Сохраняем…';
+    }
+  });
 })();

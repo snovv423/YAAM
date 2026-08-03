@@ -150,6 +150,26 @@ async function listRestaurants({ search, city, status, sort, page } = {}) {
   };
 }
 
+// docs/HQ-PRODUCT-SPEC.md, раздел «Список ресторанов» — простой список без
+// поиска/фильтров/сортировки/пагинации (на текущем этапе 10-20 ресторанов).
+// Архивированные исключены: архивирование убирает ресторан из рабочего
+// списка HQ, сохраняя всю историю (спецификация, «Управление рестораном»);
+// вернуть его можно со страницы самого ресторана, ссылка на которую
+// сохраняется в аудите и в закрытых расчётных периодах.
+//
+// listRestaurants() (с фильтрами/пагинацией) НЕ удалён — им продолжает
+// пользоваться существующий public/admin-путь и тесты Stage 4; здесь просто
+// не используется.
+async function listRestaurantsForHq() {
+  return db.query(`
+    SELECT id, name, cities, cuisine, rating, rating_count,
+           is_open, paused_until, published_at, archived_at
+      FROM restaurants
+     WHERE archived_at IS NULL
+     ORDER BY name, id
+  `);
+}
+
 // ---------------------------------------------------------------------------
 // Одна запись
 // ---------------------------------------------------------------------------
@@ -170,13 +190,37 @@ async function getRestaurantById(id) {
 // запрет задания добавлять поля доставки в ЭТУ форму, хотя сама колонка в
 // схеме остаётся нетронутой для уже существующего server/routes/postgresql/
 // admin.js, который её продолжает использовать как раньше).
+// Поддерживаемые города YAAM — тот же закрытый список, что и на публичном
+// сайте (client/index.html, чипы выбора города). docs/HQ-PRODUCT-SPEC.md
+// запрещает ввод городов одной строкой через запятую: ресторан связывается
+// только с городами, для которых у YAAM реально есть витрина. Названия из
+// нескольких слов поддерживаются автоматически — это обычные строки списка,
+// а не результат разбора по пробелу.
+const SUPPORTED_CITIES = ['Грозный', 'Аргун', 'Гудермес', 'Шали'];
+
+// Принимает и массив (несколько чекбоксов с одним name), и одну строку
+// (ровно один выбранный чекбокс — Express отдаёт скаляр, не массив).
+// Значения вне SUPPORTED_CITIES отбрасываются: город из подделанной формы
+// не должен попасть в публичную модель.
+function parseCitiesInput(value) {
+  const raw = Array.isArray(value) ? value : (value === undefined || value === null ? [] : [value]);
+  const seen = new Set();
+  const cities = [];
+  for (const item of raw) {
+    const city = typeof item === 'string' ? item.trim() : '';
+    if (!city || seen.has(city) || !SUPPORTED_CITIES.includes(city)) continue;
+    seen.add(city);
+    cities.push(city);
+  }
+  return cities;
+}
+
 function parseRestaurantInput(body) {
   const name = typeof body.name === 'string' ? body.name.trim() : '';
   if (!name) throw new ValidationError('Название обязательно.');
 
-  const citiesRaw = typeof body.cities === 'string' ? body.cities : '';
-  const cities = citiesRaw.split(',').map((c) => c.trim()).filter(Boolean);
-  if (!cities.length) throw new ValidationError('Укажите хотя бы один город.');
+  const cities = parseCitiesInput(body.cities);
+  if (!cities.length) throw new ValidationError('Выберите хотя бы один город.');
 
   const minOrder = body.min_order === '' || body.min_order === undefined ? 0 : Number(body.min_order);
   if (!Number.isFinite(minOrder) || minOrder < 0) throw new ValidationError('Минимальная сумма заказа должна быть неотрицательным числом.');
@@ -360,7 +404,10 @@ module.exports = {
   ValidationError,
   PAGE_SIZE,
   ACTIVE_STATUSES,
+  SUPPORTED_CITIES,
+  parseCitiesInput,
   listRestaurants,
+  listRestaurantsForHq,
   getRestaurantById,
   countMenuItems,
   publishRestaurant,

@@ -400,7 +400,7 @@ function secondsAgo(sec) {
 
 test('sweepTimeouts: просроченный оплаченный заказ -> timed_out + refund зарезервирован', async () => {
   const restaurantId = await pgCreateRestaurant();
-  const order = await pgCreateOrder(restaurantId, { statusUpdatedAt: secondsAgo(200) }); // > 180s
+  const order = await pgCreateOrder(restaurantId, { statusUpdatedAt: secondsAgo(600) }); // > 300s (окно ответа ресторана)
   const payment = await pgCreatePayment(order.id, { status: 'succeeded' });
 
   await pgOrderService.sweepTimeouts();
@@ -414,7 +414,7 @@ test('sweepTimeouts: просроченный оплаченный заказ ->
 
 test('sweepTimeouts: свежий (не просроченный) заказ не трогается', async () => {
   const restaurantId = await pgCreateRestaurant();
-  const order = await pgCreateOrder(restaurantId, { statusUpdatedAt: secondsAgo(5) }); // < 180s
+  const order = await pgCreateOrder(restaurantId, { statusUpdatedAt: secondsAgo(5) }); // < 300s
   await pgCreatePayment(order.id, { status: 'succeeded' });
 
   await pgOrderService.sweepTimeouts();
@@ -425,7 +425,7 @@ test('sweepTimeouts: свежий (не просроченный) заказ н�
 
 test('sweepTimeouts: просроченный заказ БЕЗ succeeded-платежа — timed_out, refund не создаётся', async () => {
   const restaurantId = await pgCreateRestaurant();
-  const order = await pgCreateOrder(restaurantId, { statusUpdatedAt: secondsAgo(200) }); // без payment-фикстуры
+  const order = await pgCreateOrder(restaurantId, { statusUpdatedAt: secondsAgo(600) }); // без payment-фикстуры
 
   await pgOrderService.sweepTimeouts();
 
@@ -440,7 +440,7 @@ test('sweepTimeouts: просроченный заказ БЕЗ succeeded-пла
 
 test('sweepTimeouts: заказ в неверном статусе не подхватывается свипом', async () => {
   const restaurantId = await pgCreateRestaurant();
-  const order = await pgCreateOrder(restaurantId, { status: 'accepted', statusUpdatedAt: secondsAgo(500) });
+  const order = await pgCreateOrder(restaurantId, { status: 'accepted', statusUpdatedAt: secondsAgo(900) });
 
   await pgOrderService.sweepTimeouts();
 
@@ -450,9 +450,9 @@ test('sweepTimeouts: заказ в неверном статусе не подх
 
 test('sweepTimeouts: несколько просроченных заказов обрабатываются за один прогон', async () => {
   const restaurantId = await pgCreateRestaurant();
-  const orderA = await pgCreateOrder(restaurantId, { statusUpdatedAt: secondsAgo(300) });
+  const orderA = await pgCreateOrder(restaurantId, { statusUpdatedAt: secondsAgo(600) });
   await pgCreatePayment(orderA.id, { status: 'succeeded' });
-  const orderB = await pgCreateOrder(restaurantId, { statusUpdatedAt: secondsAgo(250) });
+  const orderB = await pgCreateOrder(restaurantId, { statusUpdatedAt: secondsAgo(550) });
   await pgCreatePayment(orderB.id, { status: 'succeeded' });
 
   await pgOrderService.sweepTimeouts();
@@ -465,9 +465,9 @@ test('sweepTimeouts: несколько просроченных заказов 
 
 test('sweepTimeouts: ошибка на одном заказе не останавливает обработку остальных', async () => {
   const restaurantId = await pgCreateRestaurant();
-  const orderFail = await pgCreateOrder(restaurantId, { statusUpdatedAt: secondsAgo(300) });
+  const orderFail = await pgCreateOrder(restaurantId, { statusUpdatedAt: secondsAgo(600) });
   await pgCreatePayment(orderFail.id, { status: 'succeeded' });
-  const orderOk = await pgCreateOrder(restaurantId, { statusUpdatedAt: secondsAgo(300) });
+  const orderOk = await pgCreateOrder(restaurantId, { statusUpdatedAt: secondsAgo(600) });
   await pgCreatePayment(orderOk.id, { status: 'succeeded' });
 
   // Точечно перехватываем ОДИН db.execute-вызов — конкретно UPDATE orders для
@@ -498,7 +498,7 @@ test('sweepTimeouts: ошибка на одном заказе не остана
 
 test('sweepTimeouts: два конкурентных вызова на один и тот же просроченный заказ — успешен ровно один, максимум один refund', async () => {
   const restaurantId = await pgCreateRestaurant();
-  const order = await pgCreateOrder(restaurantId, { statusUpdatedAt: secondsAgo(300) });
+  const order = await pgCreateOrder(restaurantId, { statusUpdatedAt: secondsAgo(600) });
   const payment = await pgCreatePayment(order.id, { status: 'succeeded' });
 
   const clientA = cluster.getClient(DATABASE_NAME);
@@ -529,7 +529,7 @@ test('sweepTimeouts: два конкурентных вызова на один 
 
   // Реальный API поверх той же SQL-семантики: конкурентные sweepTimeouts() дают тот же итог.
   const restaurantId2 = await pgCreateRestaurant();
-  const order2 = await pgCreateOrder(restaurantId2, { statusUpdatedAt: secondsAgo(300) });
+  const order2 = await pgCreateOrder(restaurantId2, { statusUpdatedAt: secondsAgo(600) });
   const payment2 = await pgCreatePayment(order2.id, { status: 'succeeded' });
   await Promise.all([pgOrderService.sweepTimeouts(), pgOrderService.sweepTimeouts()]);
 
@@ -541,7 +541,7 @@ test('sweepTimeouts: два конкурентных вызова на один 
 
 test('sweepTimeouts: пул возвращён, waitingCount=0', async () => {
   const restaurantId = await pgCreateRestaurant();
-  const order = await pgCreateOrder(restaurantId, { statusUpdatedAt: secondsAgo(300) });
+  const order = await pgCreateOrder(restaurantId, { statusUpdatedAt: secondsAgo(600) });
   await pgCreatePayment(order.id, { status: 'succeeded' });
   await pgOrderService.sweepTimeouts();
 
@@ -582,14 +582,14 @@ test(
 test('Parity: sweepTimeouts — просроченный оплаченный заказ даёт эквивалентный результат', async () => {
   const sqliteRestaurantId = sqliteCreateRestaurant();
   const sqliteOrder = sqliteCreateOrder(sqliteRestaurantId);
-  sqliteDb.prepare(`UPDATE orders SET status_updated_at = datetime('now', '-300 seconds') WHERE id = ?`).run(sqliteOrder.id);
+  sqliteDb.prepare(`UPDATE orders SET status_updated_at = datetime('now', '-600 seconds') WHERE id = ?`).run(sqliteOrder.id);
   const sqlitePayment = sqliteCreatePayment(sqliteOrder.id, { status: 'succeeded' });
   sqliteOrderService.sweepTimeouts();
   const sqliteFinal = sqliteDb.prepare('SELECT status FROM orders WHERE id = ?').get(sqliteOrder.id);
   const sqliteRefunds = sqliteDb.prepare('SELECT * FROM refunds WHERE payment_id = ?').all(sqlitePayment.id);
 
   const pgRestaurantId = await pgCreateRestaurant();
-  const pgOrder = await pgCreateOrder(pgRestaurantId, { statusUpdatedAt: secondsAgo(300) });
+  const pgOrder = await pgCreateOrder(pgRestaurantId, { statusUpdatedAt: secondsAgo(600) });
   const pgPayment = await pgCreatePayment(pgOrder.id, { status: 'succeeded' });
   await pgOrderService.sweepTimeouts();
   const pgFinalRows = await db.query('SELECT status FROM orders WHERE id = $1', [pgOrder.id]);

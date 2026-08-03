@@ -10,7 +10,7 @@ const orderAccess = require('./orderAccessService');
 // без правок в самом сервисе заказов.
 const orderEvents = new EventEmitter();
 
-const RESTAURANT_RESPONSE_WINDOW_SEC = 180;
+const RESTAURANT_RESPONSE_WINDOW_SEC = 300;
 const RATING_ELIGIBLE_STATUS = 'delivered';
 
 // Stage 11A follow-up (payment deadline HIGH blocker) — тот же принцип, что
@@ -443,7 +443,7 @@ function toPublicOrderDTO(order) {
   const {
     public_code, status, status_updated_at, items_total,
     estimated_ready_minutes, restaurant_phone, fulfillment_type, rating,
-    latest_refund_status, payment_expires_at,
+    latest_refund_status, payment_expires_at, preparation_deadline,
   } = order;
   return {
     public_code, status, status_updated_at, items_total,
@@ -452,6 +452,13 @@ function toPublicOrderDTO(order) {
     // Stage 11A follow-up — тот же принцип, что PostgreSQL-версия.
     payment_expires_at: payment_expires_at
       ? new Date(`${payment_expires_at.replace(' ', 'T')}Z`).toISOString()
+      : null,
+    // Серверный срок готовности — паритет с PostgreSQL-версией
+    // (docs/HQ-PRODUCT-SPEC.md, «Таймер приготовления»). SQLite хранит
+    // datetime('now', ...) как UTC-текст без суффикса — приводим к тому же
+    // ISO-виду, что и payment_expires_at выше.
+    preparation_deadline: preparation_deadline
+      ? new Date(`${String(preparation_deadline).replace(' ', 'T')}Z`).toISOString()
       : null,
   };
 }
@@ -1249,8 +1256,16 @@ function restaurantAdvance(orderId, nextStatus, { estimatedMinutes } = {}) {
     if (allowed[current.status] !== nextStatus) {
       throw new Error(`нельзя перейти из ${current.status} в ${nextStatus}`);
     }
+    // Серверный дедлайн готовности — паритет с PostgreSQL-версией
+    // (docs/HQ-PRODUCT-SPEC.md, «Таймер приготовления»): вычисляется
+    // средствами самой БД один раз, клиент только читает его.
     if (nextStatus === 'preparing' && estimatedMinutes) {
-      db.prepare('UPDATE orders SET estimated_ready_minutes = ? WHERE id = ?').run(estimatedMinutes, orderId);
+      db.prepare(`UPDATE orders SET estimated_ready_minutes = ?,
+                    preparation_deadline = datetime('now', '+' || ? || ' minutes')
+                  WHERE id = ?`).run(estimatedMinutes, estimatedMinutes, orderId);
+    }
+    if (nextStatus === 'courier' || nextStatus === 'delivered') {
+      db.prepare('UPDATE orders SET preparation_deadline = NULL WHERE id = ?').run(orderId);
     }
     const applied = db.prepare(`
       UPDATE orders SET status = ?, status_updated_at = datetime('now')

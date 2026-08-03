@@ -61,7 +61,12 @@ function buildNavItems(linkBasePath) {
     { key: 'overview', href: hqRootPath(linkBasePath), label: 'Обзор' },
     { key: 'restaurants', href: `${linkBasePath}/restaurants`, label: 'Рестораны' },
     { key: 'finance', href: `${linkBasePath}/finance`, label: 'Финансы' },
-    { key: 'payouts', href: `${linkBasePath}/payouts`, label: 'Выплаты' },
+    // «Выплаты» — НЕ пункт основной навигации (docs/HQ-PRODUCT-SPEC.md,
+    // раздел «Финансы → Реестр выплат»): реестр это дочерний экран финансов,
+    // открываемый кнопкой «Все выплаты». Маршрут /payouts, прямые ссылки и
+    // карточки выплат продолжают работать без изменений — убран только пункт
+    // меню. active:'payouts' на этих страницах остаётся валидным ключом,
+    // просто ни один пункт им больше не подсвечивается.
     { key: 'settings', href: `${linkBasePath}/settings`, label: 'Настройки' },
   ];
 }
@@ -102,7 +107,7 @@ function layout({ title, active, body, csrfToken, linkBasePath = '/hq' }) {
 <link rel="icon" href="data:,">
 <title>${esc(title)} — YAAM HQ</title>
 <style>
-  :root{--bg:#0A2417;--panel:#123322;--txt:#F1F7F2;--txt2:rgba(241,247,242,.62);--amber:#FF9A2E;--bord:rgba(255,255,255,.14);--danger:#FF7059;--ok:#34D38C}
+  :root{--bg:#0A2417;--panel:#123322;--txt:#F1F7F2;--txt2:rgba(241,247,242,.62);--amber:#FF9A2E;--bord:rgba(255,255,255,.14);--danger:#FF7059;--ok:#34D38C;--terminal-bg:#1A1B1E;--terminal-time:rgba(255,154,46,.72)}
   *{box-sizing:border-box}
   ${testBannerHtml ? testBannerStyle() : ''}
   body{font-family:-apple-system,Manrope,sans-serif;background:var(--bg);color:var(--txt);margin:0;padding:${bannerOffset}px 0 0;min-height:100vh}
@@ -137,6 +142,198 @@ function layout({ title, active, body, csrfToken, linkBasePath = '/hq' }) {
   .mobile-nav{display:none}
   .mobile-top{display:none}
 
+  /* HQ «Обзор» — переключатель периода (docs/HQ-PRODUCT-SPEC.md). Обычные
+     ссылки (?period=...), не JS — работает без скриптов, полная перезагрузка
+     страницы приемлема для внутреннего инструмента (тот же принцип, что и
+     остальная HQ-навигация). */
+  .period-switch{display:flex;gap:6px;margin-bottom:16px}
+  .period-switch a{padding:8px 16px;border-radius:999px;font-size:13px;font-weight:700;color:var(--txt2);text-decoration:none;border:1px solid var(--bord)}
+  .period-switch a.on{background:var(--amber);color:#3a1c00;border-color:var(--amber)}
+  .metric-grid.compact{grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:18px}
+  .metric-grid.compact .metric{padding:14px}
+  .metric-grid.compact .metric .value{font-size:22px}
+
+  /* «Центр событий» (задание, раздел 3-4) — тёмно-серый терминал, ОТДЕЛЬНЫЙ
+     от зелёной палитры --panel всего остального HQ (задание: "тёмно-серый
+     фон", не тот же тон, что у обычных панелей). Моноширинный шрифт,
+     минимум визуального шума: без рамок/разделителей/иконок/бейджей внутри. */
+  .event-center{background:var(--terminal-bg);border-radius:16px;padding:14px 16px;margin-bottom:20px}
+  .event-center-head{display:flex;justify-content:space-between;align-items:center;font-weight:700;font-size:13px;color:var(--txt2);text-transform:uppercase;letter-spacing:.03em;margin-bottom:8px}
+  .event-expand-btn{background:rgba(255,255,255,.06);color:var(--txt2);border:1px solid var(--bord);border-radius:8px;height:26px;line-height:1;cursor:pointer;font-size:11px;font-weight:700;padding:0 10px}
+  .event-expand-btn:hover{color:var(--txt)}
+  .event-center-scroll{max-height:220px;overflow-y:auto;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;-webkit-overflow-scrolling:touch}
+  .event-row{padding:9px 0}
+  .event-row+.event-row{border-top:none}
+  .event-time{color:var(--terminal-time);font-size:12px}
+  .event-restaurant{color:#fff;font-weight:700;font-size:13px;margin-top:2px}
+  .event-message{color:var(--txt2);font-size:13px;margin-top:2px;white-space:pre-line;line-height:1.4}
+  .event-empty{color:var(--txt2);font-size:13px;text-align:center;padding:18px 0}
+  .event-center-footer{display:flex;justify-content:space-between;align-items:center;margin-top:10px}
+  .event-center-footer a{color:var(--txt2);font-size:12px;text-decoration:none;padding:6px 4px}
+  .event-center-footer a:hover{color:var(--txt)}
+  .event-clear-btn{background:transparent;color:var(--txt2);border:none;padding:6px 4px;font-size:12px;font-weight:600;cursor:pointer}
+  .event-clear-btn:hover{color:var(--txt)}
+
+  /* Полноэкранное раскрытие (задание, раздел 4 — "почти полноэкранный режим,
+     продолжает поддерживать прокрутку") — переключается hq.js добавлением
+     этого класса, чистый CSS без JS-анимации/библиотек. */
+  .event-center.expanded{position:fixed;inset:16px;z-index:30;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+  .event-center.expanded .event-center-scroll{flex:1;max-height:none}
+
+  /* «История» — та же терминальная лента, без ограничения высоты (задание,
+     раздел 6: "поддерживает нормальную прокрутку страницы"). */
+  .event-center-full .event-center-scroll{max-height:none}
+
+  /* ------------------------------------------------------------------
+     Раздел «Рестораны» (docs/HQ-PRODUCT-SPEC.md). Компактные карточки
+     вместо технической таблицы; кнопки маленькие (.compact) — крупные
+     кнопки и перегруженные панели спецификацией запрещены.
+     ------------------------------------------------------------------ */
+  .btn.compact,button.compact{padding:8px 14px;font-size:13px}
+  a.btn.compact{padding:8px 14px;font-size:13px}
+  .add-restaurant-row{display:flex;justify-content:center;margin-bottom:18px}
+  .rest-list{display:flex;flex-direction:column;gap:10px}
+  .rest-card{background:var(--panel);border:1px solid var(--bord);border-radius:14px;padding:14px 16px;display:flex;align-items:center;justify-content:space-between;gap:12px}
+  .rest-card-main{min-width:0;flex:1}
+  .rest-card-title{font-weight:700;font-size:15px}
+  .rest-card-cities{display:flex;flex-wrap:wrap;gap:5px;margin-top:6px}
+  .city-chip{display:inline-block;background:rgba(255,255,255,.07);border-radius:999px;padding:2px 9px;font-size:11px;color:var(--txt2)}
+  .city-chip.muted{opacity:.7}
+  .rest-card-meta{color:var(--txt2);font-size:12px;margin-top:6px;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+  .rest-header{margin-bottom:14px}
+  .rest-header h1{margin:0 0 6px}
+  .rest-header-meta{color:var(--txt2);font-size:13px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .panel-title{font-weight:700;margin-bottom:14px}
+
+  /* Обзор ресторана — блок «Заказы»: две равные части, цифры ПОД подписями,
+     без внутренних рамок и разделителей (спецификация). */
+  .orders-split{display:flex}
+  .orders-part{flex:1}
+  .orders-label{color:var(--txt2);font-size:12px;text-transform:uppercase;letter-spacing:.02em}
+  .orders-value{font-size:28px;font-weight:800;line-height:1.15;margin-top:4px}
+  .payout-block .payout-line{font-weight:700;font-size:15px}
+  .payout-block .payout-amount{font-size:24px;font-weight:800;margin-top:4px}
+  .payout-block .payout-sub{color:var(--txt2);font-size:13px;margin-top:4px}
+
+  @media (max-width: 420px){
+    .rest-card{flex-direction:column;align-items:stretch}
+    .rest-card .btn.compact{text-align:center}
+  }
+
+  /* ------------------------------------------------------------------
+     Меню ресторана (docs/HQ-PRODUCT-SPEC.md, разделы «Меню»/«Категории»/
+     «Компактные карточки блюд»). Категории — аккордеоны на <details>,
+     блюда — компактные строки, вся строка кликабельна.
+     ------------------------------------------------------------------ */
+  .menu-toolbar{display:flex;gap:8px;align-items:flex-start;margin-bottom:16px;flex-wrap:wrap}
+  .add-cat summary{list-style:none;display:inline-block;cursor:pointer}
+  .add-cat summary::-webkit-details-marker{display:none}
+  .add-cat[open] summary{margin-bottom:10px}
+  .add-cat-form{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .add-cat-form input{width:auto;min-width:180px;flex:1;padding:8px 12px;font-size:13px}
+
+  .cat-list{display:flex;flex-direction:column;gap:10px}
+  .cat-block{background:var(--panel);border:1px solid var(--bord);border-radius:14px;overflow:hidden}
+  .cat-summary{list-style:none;cursor:pointer;padding:14px 16px;display:flex;align-items:center;gap:10px}
+  .cat-summary::-webkit-details-marker{display:none}
+  .cat-titles{display:flex;flex-direction:column;min-width:0}
+  .cat-name{font-weight:700;font-size:15px}
+  .cat-count{color:var(--txt2);font-size:12px;margin-top:2px}
+  .cat-body{padding:0 16px 14px}
+  .cat-actions{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+
+  /* Handle перетаскивания — рисуется CSS (две колонки точек), без символов
+     и иконочных шрифтов. Отдельный маленький handle, а не вся строка:
+     иначе на мобильном обычная прокрутка переставляла бы элементы. */
+  .drag-handle{flex:0 0 auto;width:16px;height:20px;cursor:grab;touch-action:none;
+    background-image:radial-gradient(circle,var(--txt2) 1px,transparent 1px);
+    background-size:5px 5px;background-position:2px 3px;background-repeat:repeat;opacity:.5}
+  .drag-handle:active{cursor:grabbing}
+  .dragging{opacity:.5}
+
+  .dish-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}
+  .dish-row{display:flex;align-items:center;gap:8px;padding:6px 0}
+  .dish-link{flex:1;min-width:0;display:flex;align-items:center;gap:10px;text-decoration:none;color:inherit;padding:4px 0}
+  .dish-link.static{cursor:default}
+  .dish-thumb{flex:0 0 auto;width:48px;height:48px;border-radius:8px;object-fit:cover;background:rgba(255,255,255,.05)}
+  .dish-thumb.placeholder{background:rgba(255,255,255,.05)}
+  .dish-main{flex:1;min-width:0;display:flex;flex-direction:column}
+  .dish-name{font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .dish-meta{color:var(--txt2);font-size:12px;margin-top:2px}
+  /* Шеврон — CSS-треугольник из границ, не типографский символ. */
+  .dish-chevron{flex:0 0 auto;width:7px;height:7px;border-right:2px solid var(--txt2);border-top:2px solid var(--txt2);transform:rotate(45deg);opacity:.6}
+  .archive-row{gap:10px;flex-wrap:wrap}
+  .restore-form{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+  .restore-form select{width:auto;min-width:130px;padding:7px 9px;font-size:12px}
+  .item-status{color:var(--txt2);font-size:13px;margin-bottom:14px}
+  .item-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px;padding-top:14px;border-top:1px solid var(--bord)}
+  .item-actions form{margin:0}
+
+  /* Фильтр по датам (заказы, свой период статистики). На узком экране
+     кнопка уходит на свою строку и не накладывается на поля дат
+     (docs/HQ-PRODUCT-SPEC.md, раздел «Заказы ресторана»). */
+  .date-filter{display:grid;grid-template-columns:1fr 1fr auto;gap:10px;align-items:end}
+  .date-filter .field{display:flex;flex-direction:column;gap:4px;min-width:0}
+  .date-filter label{margin:0;font-size:11px}
+  .date-filter input{padding:9px 10px;font-size:13px}
+  @media (max-width: 520px){
+    .date-filter{grid-template-columns:1fr 1fr}
+    .date-filter button{grid-column:1 / -1;justify-self:start}
+  }
+
+  /* Настройки ресторана: выбор городов из поддерживаемого списка YAAM
+     (docs/HQ-PRODUCT-SPEC.md — ввод одной строкой через запятую запрещён),
+     блок управления и «Сохранить», не прижатая к границам контейнера. */
+  .city-checks{display:flex;flex-wrap:wrap;gap:8px}
+  .city-check{display:inline-flex;align-items:center;gap:6px;margin:0;padding:7px 12px;border:1px solid var(--bord);border-radius:999px;cursor:pointer;text-transform:none;font-size:13px;font-weight:600;color:var(--txt2)}
+  .city-check input{width:auto;margin:0;accent-color:var(--amber)}
+  .city-check:has(input:checked){border-color:var(--amber);color:var(--txt)}
+  .save-row{margin-top:20px}
+  .manage-actions{display:flex;gap:8px;flex-wrap:wrap}
+  .manage-actions form{margin:0}
+  .connect-code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:18px;font-weight:700;letter-spacing:.08em;background:rgba(255,255,255,.06);border-radius:10px;padding:12px 14px;margin-bottom:14px;text-align:center;user-select:all}
+
+  /* ------------------------------------------------------------------
+     Финансы: «Статус выплат» и реестр выплат (docs/HQ-PRODUCT-SPEC.md).
+     Компактные строки вместо технических таблиц; фирменные цветные
+     статусы YAAM без эмодзи.
+     ------------------------------------------------------------------ */
+  .status-badge{display:inline-block;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:700;white-space:nowrap}
+  .status-badge.ok{background:rgba(52,211,140,.18);color:var(--ok)}
+  .status-badge.warn{background:rgba(255,154,46,.18);color:var(--amber)}
+  .status-badge.danger{background:rgba(255,112,89,.18);color:var(--danger)}
+  .status-badge.muted{background:rgba(255,255,255,.08);color:var(--txt2)}
+
+  .panel-head{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+  .panel-head-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .panel-head-actions form{margin:0}
+
+  .payout-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}
+  .payout-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 0}
+  .payout-row+.payout-row{border-top:1px solid var(--bord)}
+  .payout-row-main{min-width:0;flex:1}
+  .payout-row-name{font-weight:600;font-size:14px}
+  .payout-row-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:5px}
+  .payout-row-amount{font-size:13px;font-weight:700}
+  .payout-row-sub{color:var(--txt2);font-size:12px;margin-top:4px}
+  .payout-row-actions{display:flex;gap:8px;align-items:center;flex-shrink:0}
+  .payout-row-actions form{margin:0}
+
+  .attempt-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}
+  .attempt-row{padding:11px 0}
+  .attempt-row+.attempt-row{border-top:1px solid var(--bord)}
+  .attempt-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .attempt-number{font-weight:600;font-size:13px}
+  .attempt-error{color:var(--danger);font-size:12px;margin-top:5px}
+  .attempt-requisites{margin-top:8px}
+  .attempt-requisites summary{cursor:pointer;color:var(--txt2);font-size:12px}
+  .attempt-requisites td{font-size:12px;padding:6px 0}
+
+  @media (max-width: 520px){
+    .payout-row{flex-direction:column;align-items:stretch}
+    .payout-row-actions{justify-content:flex-start}
+  }
+
   /* Формы — общие для всего HQ (создание/правка ресторана, фильтры,
      настройки безопасности из Stage 3) — раньше жили только инлайново на
      странице логина; вынесено сюда один раз, чтобы не дублировать в каждом
@@ -156,6 +353,21 @@ function layout({ title, active, body, csrfToken, linkBasePath = '/hq' }) {
   .row>*{flex:1;min-width:160px}
   .error{margin-top:12px;color:var(--danger);font-size:13px}
   .notice{margin-top:12px;color:var(--ok);font-size:13px}
+  /* Stage 14 — компактный sheet настроек и поля пароля. */
+  .panel-title{font-weight:700;margin-bottom:14px}
+  .panel-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px}
+  .panel-head .panel-title{margin-bottom:0}
+  .badge.muted{background:rgba(255,255,255,.08);color:var(--txt2)}
+  .hint{color:var(--txt2);font-size:12px;line-height:1.5;margin-top:10px}
+  .sheet-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:flex-end;justify-content:center;z-index:60}
+  .sheet-backdrop.open{display:flex}
+  .sheet{background:var(--panel);border:1px solid var(--bord);border-radius:16px 16px 0 0;padding:20px;width:100%;max-width:520px;max-height:88vh;overflow-y:auto;padding-bottom:calc(20px + env(safe-area-inset-bottom))}
+  .sheet-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
+  .sheet-close{background:none;border:none;color:var(--txt2);font-size:26px;line-height:1;padding:0 4px;width:auto;cursor:pointer}
+  .pw-field{position:relative;display:flex;align-items:center;gap:8px}
+  .pw-field input{flex:1;min-width:0}
+  .pw-toggle{background:none;border:1px solid var(--bord);color:var(--txt2);font-size:12px;padding:8px 10px;border-radius:8px;width:auto;white-space:nowrap;cursor:pointer;margin:0}
+  @media(min-width:560px){ .sheet-backdrop{align-items:center} .sheet{border-radius:16px} }
 
   /* Вкладки страницы ресторана (Обзор/Заказы/Оценки/Статистика/Настройки). */
   .tabs{display:flex;gap:4px;border-bottom:1px solid var(--bord);margin-bottom:20px;overflow-x:auto}

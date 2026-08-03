@@ -47,13 +47,33 @@ async function main() {
     },
   });
 
+  // HQ «Центр событий» — "серьёзный сбой backend" (docs/HQ-PRODUCT-SPEC.md).
+  // Процесс всё равно завершается (process.exit(1)) — logCrashEvent()
+  // намеренно best-effort с коротким таймаутом (не блокирует выключение
+  // надолго и не бросает, если сама причина сбоя — недоступность БД).
+  async function logCrashEvent(message) {
+    const eventLogService = require('./services/hq/eventLogService');
+    const timeout = new Promise((resolve) => setTimeout(resolve, 2000));
+    try {
+      await Promise.race([
+        eventLogService.createEvent({ category: 'backend_issue', message }),
+        timeout,
+      ]);
+    } catch (err) {
+      console.error('[server.postgresql] hq_events log failed (crash):', err.message);
+    }
+  }
+
   process.on('unhandledRejection', (reason) => {
-    console.error('[server.postgresql] unhandledRejection:', reason instanceof Error ? reason.message : reason);
-    instance.stop().finally(() => process.exit(1));
+    const message = reason instanceof Error ? reason.message : String(reason);
+    console.error('[server.postgresql] unhandledRejection:', message);
+    logCrashEvent(`Необработанное отклонение промиса: ${message}`)
+      .finally(() => instance.stop().finally(() => process.exit(1)));
   });
   process.on('uncaughtException', (err) => {
     console.error('[server.postgresql] uncaughtException:', err.message);
-    instance.stop().finally(() => process.exit(1));
+    logCrashEvent(`Необработанное исключение: ${err.message}`)
+      .finally(() => instance.stop().finally(() => process.exit(1)));
   });
 
   try {

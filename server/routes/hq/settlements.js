@@ -12,25 +12,14 @@ const { logAuditEvent } = require('../../services/hq/auditLog');
 const { ensureCsrfToken, requireCsrf } = require('../../services/hq/csrf');
 const { layout } = require('../../hq/layout');
 const views = require('../../hq/settlementViews');
+const documentService = require('../../services/hq/settlementDocumentService');
+const documentViews = require('../../hq/settlementDocumentViews');
+const { esc: escapeHtml } = require('../../hq/layout');
 
 function notFoundBody(linkBasePath) {
   return `<h1>Расчётный период не найден</h1><div class="panel"><div class="empty-state">Проверьте адрес или вернитесь к списку.</div></div><a class="btn ghost" href="${linkBasePath}/finance">← К финансам</a>`;
 }
 
-// Короткий, человекочитаемый summary для hq_audit_log.details (задание,
-// раздел 13: "period id; диапазон; количество ресторанов; общие суммы") —
-// без банковских реквизитов (задание: "не логировать банковские реквизиты"),
-// без per-restaurant детализации — тот же allowlist-принцип, что и
-// services/hq/auditLog.js SAFE_DIFF_FIELDS, применённый к другой форме данных.
-function summarizeSettlementPeriod(period, lines) {
-  const totals = lines.reduce((acc, l) => ({
-    turnover: acc.turnover + Number(l.turnover),
-    commission: acc.commission + Number(l.yaam_commission),
-    earnings: acc.earnings + Number(l.restaurant_earnings),
-  }), { turnover: 0, commission: 0, earnings: 0 });
-  return `period_id=${period.id}; диапазон ${period.period_from}..${period.period_to}; `
-    + `ресторанов=${lines.length}; оборот=${totals.turnover}; комиссия=${totals.commission}; сумма_ресторанов=${totals.earnings}`;
-}
 
 function createSettlementsRouter({ linkBasePath }) {
   const router = express.Router();
@@ -51,54 +40,31 @@ function createSettlementsRouter({ linkBasePath }) {
     }
   });
 
-  router.get('/new', (req, res) => {
-    const csrfToken = ensureCsrfToken(req);
-    const body = views.renderSettlementPeriodCreateForm({ linkBasePath, csrfToken });
-    res.send(layout({ title: 'Новый расчётный период', active: 'finance', csrfToken, linkBasePath, body }));
-  });
+  // Ручное создание расчётного периода УДАЛЕНО из интерфейса владельца
+  // (docs/HQ-PRODUCT-SPEC.md): периоды закрываются автоматически каждое
+  // воскресенье в 07:00 МСК — services/hq/weeklySettlementService.js.
+  // Аварийный запуск job остаётся только как серверная функция
+  // (runWeeklySettlementJob), не как повседневная кнопка HQ.
 
-  router.post('/', requireCsrf, async (req, res, next) => {
-    try {
-      const createdBy = (req.session && req.session.hqUser) || '';
-      const period = await settlementService.createDraftSettlementPeriod({
-        periodFrom: req.body.period_from,
-        periodTo: req.body.period_to,
-        notes: req.body.notes,
-        createdBy,
-      });
-      await logAuditEvent({
-        action: 'settlement_period_created', restaurantId: null,
-        details: `period_id=${period.id}; диапазон ${period.period_from}..${period.period_to}`,
-        ip: req.ip,
-      });
-      res.redirect(`${linkBasePath}/finance/settlements/${period.id}`);
-    } catch (err) {
-      if (err instanceof ValidationError) {
-        const csrfToken = ensureCsrfToken(req);
-        const body = views.renderSettlementPeriodCreateForm({ linkBasePath, csrfToken, error: err.message, values: req.body });
-        return res.status(400).send(layout({ title: 'Новый расчётный период', active: 'finance', csrfToken, linkBasePath, body }));
-      }
-      next(err);
-    }
-  });
-
-  // draft-периоды физически не могут иметь выплат (FOREIGN KEY
-  // restaurant_payouts(settlement_period_id, restaurant_id) ->
-  // settlement_restaurant_lines требует существующую строку, а она
-  // появляется только при закрытии, Stage 8) — для draft просто пустая
-  // Map, без лишнего запроса.
-  async function fetchPayoutsMap(period) {
-    if (period.status !== 'closed') return new Map();
-    return payoutService.listPayoutsForPeriod(period.id);
-  }
 
   router.get('/:id', async (req, res, next) => {
     try {
       const detail = await settlementService.getSettlementPeriodDetail(req.settlementPeriod.id);
-      const payoutsByRestaurantId = await fetchPayoutsMap(detail.period);
+      const documents = detail.period.status === 'closed'
+        ? await documentService.listDocumentsForPeriod(detail.period.id)
+        : [];
+      const totals = detail.lines.reduce((acc, l) => ({
+        orders: acc.orders + Number(l.delivered_paid_orders),
+        turnover: acc.turnover + Number(l.turnover),
+        commission: acc.commission + Number(l.yaam_commission),
+        payable: acc.payable + Number(l.payable_amount),
+        refundsCount: acc.refundsCount + Number(l.successful_refunds_count),
+        refundsAmount: acc.refundsAmount + Number(l.successful_refunds_amount),
+      }), { orders: 0, turnover: 0, commission: 0, payable: 0, refundsCount: 0, refundsAmount: 0 });
       const csrfToken = ensureCsrfToken(req);
       const body = views.renderSettlementPeriodDetail({
-        period: detail.period, lines: detail.lines, preview: detail.preview, payoutsByRestaurantId, linkBasePath, csrfToken,
+        period: detail.period, lines: detail.lines, preview: detail.preview,
+        totals, documents, linkBasePath, csrfToken, error: req.query.error,
       });
       res.send(layout({ title: 'Расчётный период', active: 'finance', csrfToken, linkBasePath, body }));
     } catch (err) {
@@ -129,62 +95,66 @@ function createSettlementsRouter({ linkBasePath }) {
       // ссылка на restaurantLifecycle.ValidationError (см. payoutService.js) —
       // одна проверка instanceof покрывает оба случая.
       if (err instanceof ValidationError) {
-        const csrfToken = ensureCsrfToken(req);
-        const detail = await settlementService.getSettlementPeriodDetail(req.settlementPeriod.id);
-        const payoutsByRestaurantId = await fetchPayoutsMap(detail.period);
-        const body = views.renderSettlementPeriodDetail({
-          period: detail.period, lines: detail.lines, preview: detail.preview, payoutsByRestaurantId, linkBasePath, csrfToken, error: err.message,
-        });
-        return res.status(400).send(layout({ title: 'Расчётный период', active: 'finance', csrfToken, linkBasePath, body }));
+        // PRG вместо повторного рендера: детальная страница теперь собирает
+        // статусы выплат и документы сама, дублировать эту сборку в
+        // error-ветке значило бы держать два места, которые разойдутся.
+        return res.redirect(
+          `${linkBasePath}/finance/settlements/${req.settlementPeriod.id}?error=${encodeURIComponent(err.message)}`,
+        );
       }
       next(err);
     }
   });
 
-  router.post('/:id/close', requireCsrf, async (req, res, next) => {
-    try {
-      const result = await settlementService.closeSettlementPeriod(req.settlementPeriod.id);
-      if (!result.alreadyClosed) {
-        await logAuditEvent({
-          action: 'settlement_period_closed', restaurantId: null,
-          details: summarizeSettlementPeriod(result.period, result.lines),
-          ip: req.ip,
-        });
-      }
-      res.redirect(`${linkBasePath}/finance/settlements/${req.settlementPeriod.id}`);
-    } catch (err) {
-      if (err instanceof ValidationError) {
-        const csrfToken = ensureCsrfToken(req);
-        const detail = await settlementService.getSettlementPeriodDetail(req.settlementPeriod.id);
-        const payoutsByRestaurantId = await fetchPayoutsMap(detail.period);
-        const body = views.renderSettlementPeriodDetail({
-          period: detail.period, lines: detail.lines, preview: detail.preview, payoutsByRestaurantId, linkBasePath, csrfToken,
-        });
-        return res.status(400).send(layout({ title: 'Расчётный период', active: 'finance', csrfToken, linkBasePath, body }));
-      }
-      next(err);
-    }
-  });
+  // Ручное закрытие периода и удаление черновика УДАЛЕНЫ из интерфейса:
+  // закрытие выполняет сервер (weeklySettlementService), а закрытый период
+  // immutable по определению. Сами сервисные функции closeSettlementPeriod()/
+  // deleteDraftSettlementPeriod() сохранены и покрыты тестами — они нужны
+  // job'у и аварийным операторским сценариям.
 
-  router.post('/:id/delete', requireCsrf, async (req, res, next) => {
+  // --- Документы периода (docs/HQ-PRODUCT-SPEC.md, раздел «Документы») ---
+  //
+  // БЕЗОПАСНОСТЬ: документ выдаётся только внутри HQ-сессии (requireHqAuth на
+  // точке монтирования роутера) И только если он действительно принадлежит
+  // ЭТОМУ периоду. Подмена id в URL не может отдать документ другого
+  // периода/ресторана — проверка ниже явная, а не «доверие к id».
+  router.get('/:id/documents/:documentId', async (req, res, next) => {
     try {
-      const deleted = await settlementService.deleteDraftSettlementPeriod(req.settlementPeriod.id);
-      await logAuditEvent({
-        action: 'settlement_period_draft_deleted', restaurantId: null,
-        details: `period_id=${deleted.id}; диапазон ${deleted.period_from}..${deleted.period_to}`,
-        ip: req.ip,
-      });
-      res.redirect(`${linkBasePath}/finance`);
-    } catch (err) {
-      if (err instanceof ValidationError) {
-        const csrfToken = ensureCsrfToken(req);
-        const detail = await settlementService.getSettlementPeriodDetail(req.settlementPeriod.id);
-        const payoutsByRestaurantId = await fetchPayoutsMap(detail.period);
-        const body = views.renderSettlementPeriodDetail({
-          period: detail.period, lines: detail.lines, preview: detail.preview, payoutsByRestaurantId, linkBasePath, csrfToken,
-        });
-        return res.status(400).send(layout({ title: 'Расчётный период', active: 'finance', csrfToken, linkBasePath, body }));
+      const document = await documentService.getDocumentById(req.params.documentId);
+      const csrfToken = ensureCsrfToken(req);
+      if (!document || document.settlement_period_id !== req.settlementPeriod.id) {
+        return res.status(404).send(layout({
+          title: 'Документ не найден', active: 'finance', csrfToken, linkBasePath,
+          body: `<h1>Документ не найден</h1><div class="panel"><div class="empty-state">Проверьте адрес или вернитесь к периоду.</div></div><a class="btn ghost compact" href="${linkBasePath}/finance/settlements/${req.settlementPeriod.id}">← К периоду</a>`,
+        }));
       }
+      if (document.status !== 'generated') {
+        return res.status(409).send(layout({
+          title: 'Документ не сформирован', active: 'finance', csrfToken, linkBasePath,
+          body: `<h1>Документ не сформирован</h1><div class="panel"><div class="empty-state">${escapeHtml(document.error_message || 'Формирование документа завершилось ошибкой.')}</div></div><a class="btn ghost compact" href="${linkBasePath}/finance/settlements/${req.settlementPeriod.id}">← К периоду</a>`,
+        }));
+      }
+
+      const html = documentViews.renderDocument(document);
+      // ?download=1 — тот же самый HTML, но браузер сохраняет его файлом.
+      // Отдельного «скачиваемого» представления нет намеренно: документ
+      // детерминированно воспроизводится из payload, дублировать его во
+      // втором формате значило бы завести второй источник истины.
+      if (req.query.download) {
+        // Номер документа содержит кириллицу (YAAM-АО-...), а HTTP-заголовок
+        // допускает только ASCII: без кодирования Node бросает
+        // ERR_INVALID_CHAR. Даём ASCII-fallback + RFC 5987 filename* с
+        // читаемым именем — так корректно и в старых, и в современных
+        // браузерах.
+        const asciiName = `${document.kind}-${document.id}.html`;
+        const utf8Name = encodeURIComponent(`${document.document_number}.html`);
+        res.setHeader(
+          'Content-Disposition',
+          `attachment; filename="${asciiName}"; filename*=UTF-8''${utf8Name}`,
+        );
+      }
+      res.type('html').send(html);
+    } catch (err) {
       next(err);
     }
   });

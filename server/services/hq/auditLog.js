@@ -87,6 +87,39 @@ const ACTIONS = [
   // YAAM, не ресторана).
   'yaam_bank_details_created',
   'yaam_bank_details_updated',
+  // Индивидуальная выплата с обзора ресторана (Finance Stage 12).
+  'restaurant_payout_prepared',
+  // Еженедельное автозакрытие расчётных периодов (docs/HQ-PRODUCT-SPEC.md):
+  // запуск job, успешное закрытие, безопасный повтор, catch-up, ошибка.
+  'settlement_job_started',
+  'settlement_job_finished',
+  'settlement_job_failed',
+  'settlement_period_catch_up',
+  'settlement_period_close_skipped',
+  // Документы периода и их корректирующие версии.
+  'settlement_document_created',
+  'settlement_document_failed',
+  'settlement_document_corrected',
+  // Уведомление ресторана о завершённом расчёте (Telegram).
+  'yaam_legal_details_updated',
+  'yaam_bank_details_updated',
+  'owner_password_changed',
+  'owner_password_change_rejected',
+  'fiscal_receipt_created',
+  'fiscal_receipt_succeeded',
+  'fiscal_receipt_failed',
+  'fiscal_receipt_retried',
+  'settlement_backlog_queued',
+  'settlement_backlog_deferred',
+  'settlement_carry_forward_applied',
+  'settlement_carry_forward_accrued',
+  'settlement_document_token_issued',
+  'settlement_document_token_used',
+  'settlement_document_token_revoked',
+  'settlement_document_token_rejected',
+  'settlement_adjustment_created',
+  'settlement_notification_sent',
+  'settlement_notification_failed',
 ];
 
 // Единственные поля ресторана, которые вообще могут попасть в текст лога —

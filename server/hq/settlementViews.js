@@ -9,6 +9,7 @@ const { READINESS_LABELS } = require('../services/hq/restaurantPayoutService');
 const { STATUS_LABELS: PAYOUT_STATUS_LABELS } = require('../services/hq/payoutService');
 
 const STATUS_LABELS = { draft: 'Черновик', closed: 'Закрыт' };
+const { PERIOD_PAYOUT_STATUS_LABELS } = require('../services/hq/settlementService');
 
 function money(n) {
   return `${Number(n) || 0} ₽`;
@@ -32,36 +33,50 @@ function formatDateTime(date) {
 // ---------------------------------------------------------------------------
 // Секция «Расчётные периоды» на /hq/finance (задание, раздел 9).
 // ---------------------------------------------------------------------------
+// docs/HQ-PRODUCT-SPEC.md, раздел «Статусы расчётного периода»: компактные
+// карточки вместо технической таблицы, пользовательский статус выплат вместо
+// одного слова «Закрыт». Кнопки ручного создания периода нет — периоды
+// закрываются автоматически (services/hq/weeklySettlementService.js).
+function periodStatusBadge(p) {
+  if (p.status !== 'closed') {
+    return '<span class="status-badge muted">Идёт неделя</span>';
+  }
+  const tone = p.payoutStatus === 'paid' ? 'ok' : (p.payoutStatus === 'partially_paid' ? 'warn' : 'muted');
+  const label = PERIOD_PAYOUT_STATUS_LABELS[p.payoutStatus] || 'Ожидает выплат';
+  return `<span class="status-badge ${tone}">${esc(label)}</span>`;
+}
+
+function pluralRestaurants(n) {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return 'ресторан';
+  if ([2, 3, 4].includes(mod10) && ![12, 13, 14].includes(mod100)) return 'ресторана';
+  return 'ресторанов';
+}
+
 function renderSettlementPeriodsSection({ periods, linkBasePath }) {
   const rows = periods.length
     ? periods.map((p) => `
-      <tr>
-        <td data-label="Период">${esc(formatDateOnly(p.periodFrom))} — ${esc(formatDateOnly(p.periodTo))}</td>
-        <td data-label="Статус"><span class="badge ${p.status === 'closed' ? 'open' : 'closed'}">${esc(STATUS_LABELS[p.status] || p.status)}</span></td>
-        <td data-label="Создан">${esc(formatDateTime(p.createdAt))}</td>
-        <td data-label="Закрыт">${p.closedAt ? esc(formatDateTime(p.closedAt)) : '—'}</td>
-        <td data-label="Ресторанов" style="text-align:right">${p.restaurantCount}</td>
-        <td data-label="Оборот" style="text-align:right">${money(p.turnover)}</td>
-        <td data-label="Комиссия" style="text-align:right">${money(p.commission)}</td>
-        <td data-label="Сумма ресторанов" style="text-align:right">${money(p.restaurantEarnings)}</td>
-        <td data-label=""><a href="${linkBasePath}/finance/settlements/${p.id}">Открыть</a></td>
-      </tr>`).join('')
-    : `<tr><td colspan="9" class="empty-state">Расчётных периодов пока нет.</td></tr>`;
+      <li class="payout-row">
+        <div class="payout-row-main">
+          <div class="payout-row-name">${esc(formatDateOnly(p.periodFrom))} — ${esc(formatDateOnly(p.periodTo))}</div>
+          <div class="payout-row-meta">
+            ${periodStatusBadge(p)}
+            <span class="payout-row-sub">${p.restaurantCount} ${esc(pluralRestaurants(p.restaurantCount))}</span>
+          </div>
+          <div class="payout-row-sub">Оборот ${money(p.turnover)} · Доход YAAM ${money(p.commission)} · Ресторанам ${money(p.restaurantEarnings)}${p.refundsAmount ? ` · Возвраты ${money(p.refundsAmount)}` : ''}${p.adjustmentAmount ? ` · Удержано ${money(p.adjustmentAmount)}` : ''}</div>
+        </div>
+        <div class="payout-row-actions">
+          <a class="btn ghost compact" href="${linkBasePath}/finance/settlements/${p.id}">Открыть</a>
+        </div>
+      </li>`).join('')
+    : '<li class="empty-state">Расчётных периодов пока нет. Первый период закроется автоматически в понедельник в 07:00.</li>';
 
   return `
     <div class="panel">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
-        <div style="font-weight:700">Расчётные периоды</div>
-        <a class="btn ghost" href="${linkBasePath}/finance/settlements/new">+ Новый период</a>
-      </div>
-      <table class="responsive">
-        <thead><tr>
-          <th>Период</th><th>Статус</th><th>Создан</th><th>Закрыт</th><th>Ресторанов</th>
-          <th style="text-align:right">Оборот</th><th style="text-align:right">Комиссия</th>
-          <th style="text-align:right">Сумма ресторанов</th><th></th>
-        </tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
+      <div class="panel-title">Расчётные периоды</div>
+      <ul class="payout-list">${rows}</ul>
+      <div class="empty-state" style="margin-top:10px">Периоды закрываются автоматически каждый понедельник в 07:00 по московскому времени — сразу после завершения недели.</div>
     </div>`;
 }
 
@@ -92,114 +107,133 @@ function renderSettlementPeriodCreateForm({ linkBasePath, csrfToken, error, valu
 // ---------------------------------------------------------------------------
 // Страница периода (задание, раздел 10).
 // ---------------------------------------------------------------------------
-function renderSettlementPeriodDetail({ period, lines, preview, payoutsByRestaurantId = new Map(), linkBasePath, csrfToken, error }) {
-  const totals = lines.reduce((acc, l) => ({
-    orders: acc.orders + Number(l.delivered_paid_orders),
-    turnover: acc.turnover + Number(l.turnover),
-    commission: acc.commission + Number(l.yaam_commission),
-    earnings: acc.earnings + Number(l.restaurant_earnings),
-    refundsCount: acc.refundsCount + Number(l.successful_refunds_count),
-    refundsAmount: acc.refundsAmount + Number(l.successful_refunds_amount),
-    payable: acc.payable + Number(l.payable_amount),
-  }), { orders: 0, turnover: 0, commission: 0, earnings: 0, refundsCount: 0, refundsAmount: 0, payable: 0 });
+// docs/HQ-PRODUCT-SPEC.md, раздел «Детальная страница периода»: по каждому
+// ресторану — человекочитаемые данные без внутренних кодов и технических
+// статусов, плюс компактный блок документов. Кнопки ручного закрытия и
+// удаления периода удалены: закрытие автоматическое.
+function payoutCellLabel(l) {
+  if (!l.payout_id) return { label: 'Не подготовлена', tone: 'muted', date: null, reason: null };
+  if (l.payout_status === 'succeeded') {
+    return { label: 'Выплачено', tone: 'ok', date: l.payout_completed_at, reason: null };
+  }
+  if (l.payout_status === 'blocked') {
+    return { label: 'Ошибка выплаты', tone: 'danger', date: null, reason: l.payout_failure_reason };
+  }
+  if (l.payout_status === 'prepared') return { label: 'Подготовлено', tone: 'muted', date: null, reason: null };
+  return { label: 'В обработке', tone: 'muted', date: null, reason: null };
+}
 
-  // Индикатор выплаты (задание, раздел Settlement: "если payout уже
-  // существует — «Выплата создана» со ссылкой; если нет — «Не создана». Но
-  // никаких кнопок оплаты."). "Подготовить выплату" — НЕ кнопка оплаты: она
-  // ничего не переводит и не отправляет, только создаёт внутреннюю запись
-  // со статусом 'prepared' (см. services/hq/payoutService.js) — разрешённое
-  // действие, отдельное от запрещённых "Выплатить"/"Отправить".
-  function renderPayoutCell(l) {
-    const payout = payoutsByRestaurantId.get(l.restaurant_id);
-    if (payout) {
-      return `Выплата создана — <a href="${linkBasePath}/payouts/${payout.id}">${esc(PAYOUT_STATUS_LABELS[payout.status] || payout.status)}</a>`;
-    }
-    if (preview || Number(l.payable_amount) <= 0) {
-      return 'Не создана';
-    }
-    return `Не создана<br>
-      <form method="post" action="${linkBasePath}/finance/settlements/${period.id}/payouts/${l.restaurant_id}/prepare" style="display:inline">
-        <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
-        <button type="submit" class="ghost">Подготовить выплату</button>
-      </form>`;
+function renderDocumentsBlock({ documents, period, linkBasePath }) {
+  if (period.status !== 'closed') return '';
+  const byRestaurant = new Map();
+  for (const d of documents) {
+    if (!byRestaurant.has(d.restaurant_id)) byRestaurant.set(d.restaurant_id, {});
+    byRestaurant.get(d.restaurant_id)[d.kind] = d;
   }
 
-  const rows = lines.length
-    ? lines.map((l) => {
-        const readinessLabel = READINESS_LABELS[l.payout_readiness_snapshot] || l.payout_readiness_snapshot;
-        const readinessBadgeClass = l.payout_readiness_snapshot === 'ready' ? 'open' : 'closed';
-        const bpsLabel = l.commission_bps_summary === null || l.commission_bps_summary === undefined
-          ? '—'
-          : `${(Number(l.commission_bps_summary) / 100).toFixed(2).replace(/\.?0+$/, '') || '0'}%`;
-        return `<tr>
-          <td data-label="Ресторан"><a href="${linkBasePath}/restaurants/${l.restaurant_id}">${esc(l.restaurant_name)}</a></td>
-          <td data-label="Договор">${l.contract_number_snapshot ? esc(l.contract_number_snapshot) : '—'}</td>
-          <td data-label="Комиссия, %">${esc(bpsLabel)}</td>
-          <td data-label="Готовность"><span class="badge ${readinessBadgeClass}">${esc(readinessLabel)}</span></td>
-          <td data-label="Заказов" style="text-align:right">${l.delivered_paid_orders}</td>
-          <td data-label="Оборот" style="text-align:right">${money(l.turnover)}</td>
-          <td data-label="Комиссия YAAM" style="text-align:right">${money(l.yaam_commission)}</td>
-          <td data-label="Сумма ресторана" style="text-align:right">${money(l.restaurant_earnings)}</td>
-          <td data-label="Возвращено клиентам" style="text-align:right">${l.successful_refunds_count} шт · ${money(l.successful_refunds_amount)}</td>
-          <td data-label="К выплате" style="text-align:right">${money(l.payable_amount)}</td>
-          <td data-label="Выплата">${renderPayoutCell(l)}</td>
-        </tr>`;
-      }).join('')
-    : `<tr><td colspan="11" class="empty-state">Активности в этом периоде нет.</td></tr>`;
-
-  const statusNotice = preview
-    ? `<div class="panel"><div class="empty-state" style="margin-top:0">Предварительный расчёт, суммы ещё могут измениться.</div></div>`
-    : `<div class="panel"><div class="notice" style="margin-top:0">Период закрыт, суммы зафиксированы.</div></div>`;
-
-  const closeAction = preview
-    ? `<form method="post" action="${linkBasePath}/finance/settlements/${period.id}/close" style="display:inline" onsubmit="return confirm('Закрыть период ${esc(formatDateOnly(period.period_from))} — ${esc(formatDateOnly(period.period_to))}? Суммы будут зафиксированы навсегда.')">
-        <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
-        <button type="submit">Закрыть период</button>
-      </form>
-      <form method="post" action="${linkBasePath}/finance/settlements/${period.id}/delete" style="display:inline;margin-left:8px" onsubmit="return confirm('Удалить черновик периода? Действие необратимо.')">
-        <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
-        <button type="submit" class="ghost">Удалить черновик</button>
-      </form>`
-    : '';
+  const rows = [...byRestaurant.entries()].map(([restaurantId, docs]) => {
+    const name = (docs.agent_report || docs.order_registry || {}).payload
+      ? null : null;
+    const cell = (kind, label) => {
+      const doc = docs[kind];
+      if (!doc || doc.status !== 'generated') {
+        return `<span class="status-badge danger">${esc(label)}: ошибка</span>`;
+      }
+      const base = `${linkBasePath}/finance/settlements/${period.id}/documents/${doc.id}`;
+      return `<span class="doc-cell"><span class="status-badge ok">${esc(label)}</span>
+        <a class="btn ghost compact" href="${base}">Открыть</a>
+        <a class="btn ghost compact" href="${base}?download=1">Скачать</a></span>`;
+    };
+    void name;
+    return `
+      <li class="payout-row">
+        <div class="payout-row-main">
+          <div class="payout-row-name">${esc(restaurantNameFromDocs(docs) || `Ресторан #${restaurantId}`)}</div>
+          <div class="doc-actions">${cell('agent_report', 'Отчёт агента')}${cell('order_registry', 'Реестр заказов')}</div>
+        </div>
+      </li>`;
+  }).join('');
 
   return `
-    <h1>Расчётный период: ${esc(formatDateOnly(period.period_from))} — ${esc(formatDateOnly(period.period_to))}</h1>
-    ${error ? `<div class="panel"><div class="error" style="margin-top:0">${esc(error)}</div></div>` : ''}
     <div class="panel">
-      <table>
-        <tr><td>Статус</td><td style="text-align:right"><span class="badge ${period.status === 'closed' ? 'open' : 'closed'}">${esc(STATUS_LABELS[period.status] || period.status)}</span></td></tr>
-        <tr><td>Создан</td><td style="text-align:right">${esc(formatDateTime(period.created_at))}${period.created_by ? ` · ${esc(period.created_by)}` : ''}</td></tr>
-        <tr><td>Закрыт</td><td style="text-align:right">${period.closed_at ? esc(formatDateTime(period.closed_at)) : '—'}</td></tr>
-        ${period.notes ? `<tr><td>Примечание</td><td style="text-align:right">${esc(period.notes)}</td></tr>` : ''}
-        <tr><td>Доставленных оплаченных заказов</td><td style="text-align:right">${totals.orders}</td></tr>
-        <tr><td>Оборот</td><td style="text-align:right">${money(totals.turnover)}</td></tr>
-        <tr><td>Комиссия YAAM</td><td style="text-align:right">${money(totals.commission)}</td></tr>
-        <tr><td>Сумма ресторанов</td><td style="text-align:right">${money(totals.earnings)}</td></tr>
-        <tr><td>Возвращено клиентам</td><td style="text-align:right">${totals.refundsCount} шт · ${money(totals.refundsAmount)}</td></tr>
-        <tr><td>К выплате (всего по периоду)</td><td style="text-align:right">${money(totals.payable)}</td></tr>
-      </table>
+      <div class="panel-title">Документы</div>
+      <ul class="payout-list">${rows || '<li class="empty-state">Документы ещё не сформированы.</li>'}</ul>
+    </div>`;
+}
+
+// Имя ресторана берётся из snapshot внутри payload документа — не из текущей
+// таблицы restaurants: документ обязан показывать состояние на момент
+// закрытия периода.
+function restaurantNameFromDocs(docs) {
+  const doc = docs.agent_report || docs.order_registry;
+  if (!doc) return null;
+  const payload = typeof doc.payload === 'string' ? JSON.parse(doc.payload) : doc.payload;
+  return payload && payload.principal
+    ? (payload.principal.legalName || payload.principal.displayName)
+    : null;
+}
+
+function renderSettlementPeriodDetail({ period, lines, preview, totals, csrfToken, linkBasePath, error, documents = [] }) {
+  const rows = lines.length
+    ? lines.map((l) => {
+        const payout = payoutCellLabel(l);
+        return `
+        <li class="payout-row">
+          <div class="payout-row-main">
+            <div class="payout-row-name"><a href="${linkBasePath}/restaurants/${l.restaurant_id}">${esc(l.restaurant_name)}</a></div>
+            <div class="payout-row-meta">
+              <span class="status-badge ${payout.tone}">${esc(payout.label)}</span>
+              ${payout.date ? `<span class="payout-row-sub">${esc(formatDateTime(payout.date))}</span>` : ''}
+            </div>
+            <div class="payout-row-sub">${l.delivered_paid_orders} зак. · Продажи ${money(l.turnover)}${l.successful_refunds_amount ? ` · Возвраты ${money(l.successful_refunds_amount)}` : ''}</div>
+            <!-- База комиссии = turnover, БЕЗ вычитания возвратов: полностью
+                 возвращённый заказ вообще не попадает в turnover (см.
+                 EARNED_ORDER_FILTER_SQL), поэтому вычитание было бы двойным
+                 учётом и расходилось бы с yaam_commission и с отчётом агента.
+                 Подробное обоснование — settlementDocumentService.js. -->
+            <div class="payout-row-sub">База ${money(l.turnover)} · Комиссия YAAM ${money(l.yaam_commission)} · Ресторану ${money(l.payable_amount)}</div>
+            ${l.refund_adjustment_restaurant_amount
+              ? `<div class="payout-row-sub">Удержано за возвраты прошлых периодов ${money(l.refund_adjustment_restaurant_amount)}</div>`
+              : ''}
+            ${l.carry_forward_applied
+              ? `<div class="payout-row-sub">Удержано в счёт долга прошлых периодов ${money(l.carry_forward_applied)}</div>`
+              : ''}
+            ${l.carry_forward_remaining
+              ? `<div class="payout-row-sub">Остаток долга ${money(l.carry_forward_remaining)} — переносится на следующий период</div>`
+              : ''}
+            ${payout.reason ? `<div class="payout-row-sub">${esc(payout.reason)}</div>` : ''}
+          </div>
+        </li>`;
+      }).join('')
+    : '<li class="empty-state">Активности в этом периоде нет.</li>';
+
+  return `
+    <h1>Период ${esc(formatDateOnly(period.period_from))} — ${esc(formatDateOnly(period.period_to))}</h1>
+    ${error ? `<div class="error" style="margin-bottom:14px">${esc(error)}</div>` : ''}
+    ${preview
+      ? '<div class="empty-state" style="margin-bottom:14px">Неделя ещё идёт — предварительный расчёт, суммы могут измениться.</div>'
+      : `<div class="empty-state" style="margin-bottom:14px">Период закрыт ${esc(formatDateTime(period.closed_at))}, суммы зафиксированы.</div>`}
+
+    <div class="metric-grid compact">
+      <div class="metric"><div class="value">${totals.orders}</div><div class="label">Заказы</div></div>
+      <div class="metric"><div class="value">${money(totals.turnover)}</div><div class="label">Оборот</div></div>
+      <div class="metric"><div class="value">${money(totals.commission)}</div><div class="label">Доход YAAM</div></div>
+      <div class="metric"><div class="value">${money(totals.payable)}</div><div class="label">К выплате</div></div>
+      ${totals.refundsCount ? `<div class="metric"><div class="value">${money(totals.refundsAmount)}</div><div class="label">Возвраты · ${totals.refundsCount} шт</div></div>` : ''}
     </div>
-    ${statusNotice}
-    ${closeAction ? `<div class="panel">${closeAction}</div>` : ''}
+
     <div class="panel">
-      <div style="font-weight:700;margin-bottom:14px">Рестораны</div>
-      <table class="responsive">
-        <thead><tr>
-          <th>Ресторан</th><th>Договор</th><th>Комиссия, %</th><th>Готовность</th><th>Заказов</th>
-          <th style="text-align:right">Оборот</th><th style="text-align:right">Комиссия YAAM</th>
-          <th style="text-align:right">Сумма ресторана</th><th style="text-align:right">Возвращено клиентам</th>
-          <th style="text-align:right">К выплате</th><th>Выплата</th>
-        </tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
+      <div class="panel-title">Рестораны</div>
+      <ul class="payout-list">${rows}</ul>
     </div>
-    <a class="btn ghost" href="${linkBasePath}/finance">← К финансам</a>
+
+    ${renderDocumentsBlock({ documents, period, linkBasePath })}
+    <a class="btn ghost compact" href="${linkBasePath}/finance">← К финансам</a>
   `;
 }
 
 module.exports = {
   STATUS_LABELS,
   renderSettlementPeriodsSection,
-  renderSettlementPeriodCreateForm,
   renderSettlementPeriodDetail,
 };

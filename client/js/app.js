@@ -390,6 +390,13 @@ function showRestaurantPhone(phone){
 // Реальное время готовки приходит с бэкенда (ресторан выбирает в боте);
 // в демо-режиме — фиксированная заглушка.
 let curEstimatedMinutes=null;
+// Серверный срок готовности (orders.preparation_deadline, ISO-строка). Клиент
+// ТОЛЬКО читает его и считает остаток — собственный дедлайн не создаётся
+// никогда, поэтому обновление страницы, закрытие браузера и открытие заказа
+// на другом устройстве дают один и тот же отсчёт (docs/HQ-PRODUCT-SPEC.md,
+// раздел «Таймер приготовления»).
+let prepDeadlineMs=null;
+let prepTimerId=null;
 // ratingSubmitted — источник истины "у этого заказа уже есть оценка" (синхронизируется
 // с order.rating с бэкенда при каждом пуле, см. pollOrderOnce). ratingJustNow — только
 // для текста: отличаем "только что поставили" от "оценка была раньше" после восстановления сессии.
@@ -414,6 +421,42 @@ async function submitRating(n){
   }
 }
 
+// Обратный отсчёт до готовности. Считается ОТ СЕРВЕРНОГО prepDeadlineMs, а
+// не от локально запомненной длительности — именно поэтому refresh его не
+// сбрасывает (ранее исправленный дефект pre-status таймера; не повторяем).
+// Когда срок вышел — статус НЕ меняется и заказ НЕ отменяется, показывается
+// только спокойное «Дольше ожидаемого» (спецификация).
+function renderPrepTimer(){
+  const sub=document.getElementById('st-substate');
+  if(!sub)return;
+  if(!prepDeadlineMs){
+    sub.textContent=curEstimatedMinutes?`Готовится примерно ${curEstimatedMinutes} мин`:'Готовится';
+    return;
+  }
+  const leftSec=Math.floor((prepDeadlineMs-Date.now())/1000);
+  if(leftSec<=0){
+    sub.textContent='Дольше ожидаемого';
+    stopPrepTimer();
+    return;
+  }
+  const m=Math.floor(leftSec/60),sec=leftSec%60;
+  sub.textContent=`До готовности: ${m}:${sec<10?'0':''}${sec}`;
+  if(!prepTimerId)prepTimerId=setInterval(renderPrepTimer,1000);
+}
+
+function stopPrepTimer(){
+  if(prepTimerId){clearInterval(prepTimerId);prepTimerId=null;}
+}
+
+// Применяет серверное значение к клиентскому состоянию. NULL с сервера
+// (заказ ещё не готовится либо уже передан курьеру) гасит таймер.
+function applyPreparationDeadline(order){
+  const iso=order&&order.preparation_deadline;
+  if(!iso){prepDeadlineMs=null;stopPrepTimer();return;}
+  const parsed=Date.parse(iso);
+  prepDeadlineMs=Number.isFinite(parsed)?parsed:null;
+}
+
 function renderStatus(){
   const{steps,icons,anims}=stepSet();
   document.getElementById('st-progress').innerHTML=steps.map((s,i)=>`<div class="pstep ${i<statusStep?'done':''} ${i===statusStep?'cur':''}"><div class="pline"></div><div class="pdot">${i<statusStep?'✓':i+1}</div><div class="plbl">${s}</div></div>`).join('');
@@ -421,8 +464,8 @@ function renderStatus(){
   // время готовки от ресторана — на шаге «Готовится»
   const sub=document.getElementById('st-substate');
   if(sub){
-    if(statusStep===1){sub.textContent=`будет готово примерно через ${curEstimatedMinutes||30} мин`;sub.style.display='block';}
-    else{sub.style.display='none';}
+    if(statusStep===1){renderPrepTimer();sub.style.display='block';}
+    else{stopPrepTimer();sub.style.display='none';}
   }
   const ic=document.getElementById('st-icon');
   if(ic){
@@ -1329,7 +1372,7 @@ let statusStep=0;
 
 // После оплаты — короткий спиннер (банк/PSP подтверждает платёж, доли секунды-пара секунд
 // на проде), затем единственный реальный шаг ожидания: ответ ресторана (окно 3 мин).
-const RESTAURANT_RESPONSE_WINDOW_SEC=180;
+const RESTAURANT_RESPONSE_WINDOW_SEC=300;
 const BANK_CONFIRM_DELAY_MS=1400;
 let inPreStatus=true,preTimer=null,preAutoTimer=null,preDeadline=null;
 // Общий расчёт остатка секунд от абсолютного дедлайна, а не декрементом счётчика —
@@ -1382,7 +1425,7 @@ function startResponseTimer(){
 // (может оказаться ещё awaiting_payment) неизвестен до ответа сервера — см.
 // pollOrderOnce(), которая включает/выключает точку по факту оплаты.
 function initStatusScreen(){
-  statusStep=0;inPreStatus=true;curEstimatedMinutes=null;ratingSubmitted=false;ratingJustNow=false;setOrderTime(orderCreatedAtMs);
+  statusStep=0;inPreStatus=true;curEstimatedMinutes=null;prepDeadlineMs=null;stopPrepTimer();ratingSubmitted=false;ratingJustNow=false;setOrderTime(orderCreatedAtMs);
   document.getElementById('st-num').textContent=currentOrderCode; // и demo (openStatus), и API (startOrderPolling/pollOrderOnce) — один и тот же реальный код, не HTML-заглушка
   document.getElementById('st-items').innerHTML=orderItemsHTML();
   document.getElementById('statusbg').style.display='block';
@@ -1778,6 +1821,7 @@ async function pollOrderOnce(){
   currentFulfillment=order.fulfillment_type==='pickup'?'pickup':'delivery';
   document.getElementById('st-num').textContent=order.public_code;
   if(order.estimated_ready_minutes)curEstimatedMinutes=order.estimated_ready_minutes;
+  applyPreparationDeadline(order);
   showRestaurantPhone(order.restaurant_phone);
   document.getElementById('st-pending-pay-wrap').style.display='none';
   if(validCapability(currentRetryIdempotencyKey,RETRY_KEY_PREFIX)

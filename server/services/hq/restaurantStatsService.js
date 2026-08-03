@@ -61,51 +61,39 @@ function resolvePeriodRange({ period, from, to }, now = new Date()) {
 }
 
 // ---------------------------------------------------------------------------
-// Обзор
+// Обзор ресторана (docs/HQ-PRODUCT-SPEC.md, раздел «Обзор ресторана»)
 // ---------------------------------------------------------------------------
 //
-// Формулы (закреплены тестами server/test/hqRestaurantStats.test.js):
-//   заказов сегодня      = COUNT(orders), created_at в today-диапазоне, любой статус
-//   доставлено сегодня   = то же, только status='delivered'
-//   оборот сегодня        = SUM(items_total) по тем же delivered-заказам
-//   средний чек сегодня   = оборот сегодня / доставлено сегодня; при 0 — null ("—", не деление на ноль)
-//   активные заказы        = текущее состояние очереди (НЕ ограничено "сегодня")
-//   всего доставлено       = COUNT(status='delivered') без ограничения по дате
+// Ровно четыре числа — «Заказы: сегодня / за всё время» + «Оборот сегодня» +
+// «Доход YAAM сегодня». Слово «доставлено» в управленческих показателях НЕ
+// используется (YAAM не курьерская служба, спецификация) — то же множество
+// заказов теперь называется «заказы» и считается ЕДИНЫМ существующим
+// источником финансовой истины (restaurantFinanceService.
+// computeEarningsAggregate: EARNED_ORDER_FILTER_SQL — учтённый заказ =
+// выполнен + успешно оплачен + без успешного возврата), а НЕ отдельным
+// приблизительным запросом по status='delivered', как было раньше. Оборот и
+// доход YAAM берутся из ТОГО ЖЕ агрегата — три числа гарантированно
+// согласованы между собой и с вкладкой «Финансы».
+//
+// Активные заказы и средний чек убраны намеренно (спецификация: HQ — не
+// диспетчерская; дублирование между вкладками запрещено).
 async function getOverview(restaurantId, now = new Date()) {
-  const { startUtc, endUtc } = todayRangeUtc(now);
-  const [todayRow] = await db.query(`
-    SELECT
-      COUNT(*)::int AS orders_today,
-      COUNT(*) FILTER (WHERE status = 'delivered')::int AS delivered_today,
-      COALESCE(SUM(items_total) FILTER (WHERE status = 'delivered'), 0)::int AS turnover_today
-    FROM orders WHERE restaurant_id = $1 AND created_at >= $2 AND created_at < $3
-  `, [restaurantId, startUtc, endUtc]);
+  const financeService = require('./restaurantFinanceService'); // ленивый require — тот же приём, что в dashboardMetrics.js (исключает цикл)
+  const todayRange = todayRangeUtc(now);
 
-  const activeRows = await db.query(
-    `SELECT status, COUNT(*)::int AS c FROM orders WHERE restaurant_id = $1 AND status = ANY($2) GROUP BY status`,
-    [restaurantId, ACTIVE_STATUSES],
-  );
-  const activeCounts = Object.fromEntries(ACTIVE_STATUSES.map((s) => [s, 0]));
-  for (const row of activeRows) activeCounts[row.status] = row.c;
+  const [todayRows, allTimeRows] = await Promise.all([
+    financeService.computeEarningsAggregate({ restaurantId, range: todayRange }),
+    financeService.computeEarningsAggregate({ restaurantId, range: null }),
+  ]);
 
-  const [totalRow] = await db.query(
-    `SELECT COUNT(*)::int AS total_delivered FROM orders WHERE restaurant_id = $1 AND status = 'delivered'`,
-    [restaurantId],
-  );
+  const today = todayRows[0] || { delivered_paid_orders: 0, turnover: 0, commission: 0 };
+  const allTime = allTimeRows[0] || { delivered_paid_orders: 0 };
 
   return {
-    ordersToday: todayRow.orders_today,
-    deliveredToday: todayRow.delivered_today,
-    turnoverToday: todayRow.turnover_today,
-    avgCheckToday: todayRow.delivered_today > 0 ? Math.round(todayRow.turnover_today / todayRow.delivered_today) : null,
-    active: {
-      awaitingPayment: activeCounts.awaiting_payment,
-      awaitingRestaurant: activeCounts.awaiting_restaurant,
-      accepted: activeCounts.accepted,
-      preparing: activeCounts.preparing,
-      courier: activeCounts.courier,
-    },
-    totalDelivered: totalRow.total_delivered,
+    ordersToday: today.delivered_paid_orders,
+    ordersAllTime: allTime.delivered_paid_orders,
+    turnoverToday: today.turnover,
+    commissionToday: today.commission,
   };
 }
 
@@ -113,6 +101,11 @@ async function getOverview(restaurantId, now = new Date()) {
 // Заказы — список с фильтрами и пагинацией
 // ---------------------------------------------------------------------------
 
+// docs/HQ-PRODUCT-SPEC.md, раздел «Заказы ресторана»: на вкладке остался
+// ТОЛЬКО фильтр по датам — быстрый фильтр, фильтр по статусу и поиск по
+// номеру удалены. Ветки status/filter/code ниже сохранены в самой функции
+// (её продолжают вызывать существующие тесты Stage 4 напрямую), но HTTP-
+// поверхности у них больше нет: роут передаёт только from/to.
 function buildOrderFilter(restaurantId, { filter, status, code, from, to }, now = new Date()) {
   const conditions = ['o.restaurant_id = $1'];
   const params = [restaurantId];
@@ -292,6 +285,21 @@ function buildDailySeries(rows, startUtc, endUtc) {
   return series;
 }
 
+// docs/HQ-PRODUCT-SPEC.md, раздел «Статистика»: «сегодня — по часам».
+// Тот же приём защиты от локального TZ процесса, что и buildDailySeries
+// выше: час считается прямо в SQL уже со сдвигом на часовой пояс проекта и
+// возвращается ЧИСЛОМ 0..23, а не датой, которую драйвер мог бы разобрать в
+// произвольной таймзоне. Возвращаются все 24 часа (в том числе нулевые) —
+// иначе график «сегодня» менял бы форму в течение дня.
+function buildHourlySeries(rows) {
+  const byHour = new Map(rows.map((r) => [Number(r.hour), r.c]));
+  const series = [];
+  for (let hour = 0; hour < 24; hour += 1) {
+    series.push({ hour, count: byHour.get(hour) || 0 });
+  }
+  return series;
+}
+
 const POPULAR_DISHES_LIMIT = 5;
 
 async function getStatistics(restaurantId, periodOptions, now = new Date()) {
@@ -336,7 +344,20 @@ async function getStatistics(restaurantId, periodOptions, now = new Date()) {
     GROUP BY day ORDER BY day
   `, [restaurantId, startUtc, endUtc]);
 
+  // Почасовой срез нужен только периоду «сегодня» — на 7/30 днях он
+  // смешал бы разные сутки в один столбец и вводил бы в заблуждение.
+  const hourlyRows = range.period === 'today'
+    ? await db.query(`
+        SELECT EXTRACT(HOUR FROM ((o.created_at AT TIME ZONE 'UTC') + interval '${PROJECT_TIMEZONE_OFFSET_MINUTES} minutes'))::int AS hour,
+               COUNT(*)::int AS c
+        FROM orders o
+        WHERE o.restaurant_id = $1 AND o.created_at >= $2 AND o.created_at < $3
+        GROUP BY hour ORDER BY hour
+      `, [restaurantId, startUtc, endUtc])
+    : [];
+
   return {
+    hourlySeries: range.period === 'today' ? buildHourlySeries(hourlyRows) : null,
     period: range.period,
     startUtc,
     endUtc,
@@ -374,6 +395,7 @@ module.exports = {
   listRestaurantRatings,
   getStatistics,
   buildDailySeries,
+  buildHourlySeries,
   VALID_ORDER_STATUSES,
   MAX_CUSTOM_RANGE_DAYS,
 };

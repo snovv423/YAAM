@@ -257,7 +257,13 @@ test('B8: cookie сессии — HttpOnly, SameSite=Lax, Path=/hq, без Secur
   assert.ok(!/Secure/i.test(raw), 'вне production Secure не должен выставляться (иначе логин сломается по обычному http)');
 }));
 
-test('B8b: production (isProduction через APP_ENV) — cookie получает флаг Secure', withHqApp({ env: { ...process.env, APP_ENV: 'production', TRUST_PROXY: 'loopback', PG_HEALTH_HOST: '127.0.0.1' } }, async ({ port }) => {
+test('B8b: production (isProduction через APP_ENV) — cookie получает флаг Secure', withHqApp({ env: { ...process.env, APP_ENV: 'production', TRUST_PROXY: 'loopback', PG_HEALTH_HOST: '127.0.0.1',
+      // Stage 16: production-режим требует полной конфигурации. Объект env
+      // вычисляется при ОБЪЯВЛЕНИИ теста, когда эфемерная база ещё не
+      // создана, поэтому DATABASE_URL здесь задан явно — он участвует
+      // только в проверке конфигурации; настоящий пул берёт адрес из
+      // process.env уже во время выполнения.
+      DATABASE_URL: 'postgres://validation-placeholder@127.0.0.1:5432/validation', PAYMENT_PROVIDER: 'yookassa', YOOKASSA_ENV: 'sandbox', YOOKASSA_SHOP_ID: '123456', YOOKASSA_SECRET_KEY: 'test_STAGE16FIXTUREKEY0123456', YOOKASSA_RETURN_URL: 'https://api.example.test/return', YOOKASSA_WEBHOOK_URL: 'https://api.example.test/api/webhooks/payment', PUBLIC_BACKEND_URL: 'https://api.example.test', HQ_SESSION_SECRET: 'b2da3f9c2b7d1e648a5906c4f2b8d7e13a94c6f0' } }, async ({ port }) => {
   // express-session с cookie.secure=true намеренно НЕ отправляет Set-Cookie
   // по-настоящему незащищённому HTTP-соединению (иначе флаг Secure был бы
   // фикцией) — в тесте нет реального TLS, поэтому здесь честно
@@ -312,10 +318,17 @@ test('B9b: logout без CSRF-токена — 403, сессия остаётс�
 }));
 
 // ===========================================================================
-// B10: отсутствие приватных полей на «Обзоре»
+// B10: отсутствие приватных полей в HQ
 // ===========================================================================
-
-test('B10: «Обзор» не содержит connect_code/telegram_chat_id ресторана', withHqApp({}, async ({ port }) => {
+//
+// Переработка «Обзора» (docs/HQ-PRODUCT-SPEC.md) убрала таблицу ресторанов с
+// «Обзора» целиком (задание прямо запрещает "таблицу ресторанов" на этом
+// экране) — она никогда не показывала имя ресторана, поэтому проверять
+// утечку приватных полей здесь больше не на чем. Список ресторанов теперь
+// живёт ТОЛЬКО на /hq/restaurants (Stage 4, server/routes/hq/restaurants.js)
+// — сценарий этого теста (имя видно, connect_code/telegram_chat_id не видны)
+// перенесён туда, на актуальную страницу с реальным списком.
+test('B10: /restaurants не содержит connect_code/telegram_chat_id ресторана', withHqApp({}, async ({ port }) => {
   const secretChatId = '999888777';
   const secretConnectCode = 'SECRET-CONNECT-CODE-123';
   await db.query(
@@ -325,12 +338,12 @@ test('B10: «Обзор» не содержит connect_code/telegram_chat_id р
   );
 
   const cookie = await loginAsOwner(port);
-  const res = await fetch(`http://127.0.0.1:${port}/hq`, { headers: { Cookie: cookie } });
+  const res = await fetch(`http://127.0.0.1:${port}/hq/restaurants`, { headers: { Cookie: cookie } });
   const html = await res.text();
   assert.equal(res.status, 200);
   assert.match(html, /HQ Stage2 Privacy Test/, 'ресторан должен быть виден в списке');
-  assert.ok(!html.includes(secretChatId), 'telegram_chat_id не должен утекать в HTML «Обзора»');
-  assert.ok(!html.includes(secretConnectCode), 'connect_code не должен утекать в HTML «Обзора»');
+  assert.ok(!html.includes(secretChatId), 'telegram_chat_id не должен утекать в HTML списка ресторанов');
+  assert.ok(!html.includes(secretConnectCode), 'connect_code не должен утекать в HTML списка ресторанов');
 }));
 
 // ===========================================================================

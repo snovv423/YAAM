@@ -93,7 +93,13 @@ async function deleteAllVariants(provider, storageKeyBase) {
 // menu_item_photos (menu_item_id). Вся остальная логика ниже — общая.
 // ---------------------------------------------------------------------------
 
-const RESTAURANT_CONFIG = { table: 'restaurant_photos', ownerColumn: 'restaurant_id', keyPrefix: 'restaurants' };
+// maxPhotos — предел НА ВЛАДЕЛЬЦА конкретного типа. Галерея ресторана
+// ограничена тремя фотографиями (docs/HQ-PRODUCT-SPEC.md, раздел
+// «Настройки — фотографии»: «поддержать до 3 фотографий»; все три листаются
+// в шапке страницы ресторана на публичном сайте). У блюда предел остаётся
+// прежним общим (MAX_PHOTOS_PER_OWNER) — спецификация его не меняет.
+const RESTAURANT_MAX_PHOTOS = 3;
+const RESTAURANT_CONFIG = { table: 'restaurant_photos', ownerColumn: 'restaurant_id', keyPrefix: 'restaurants', maxPhotos: RESTAURANT_MAX_PHOTOS };
 const MENU_ITEM_CONFIG = { table: 'menu_item_photos', ownerColumn: 'menu_item_id', keyPrefix: 'menu-items' };
 
 async function listPhotos(config, ownerId) {
@@ -129,8 +135,9 @@ async function uploadPhoto(config, provider, ownerId, buffer, altTextRaw) {
     `SELECT COUNT(*)::int AS n FROM ${config.table} WHERE ${config.ownerColumn} = $1`,
     [ownerId],
   );
-  if (countRows[0].n >= MAX_PHOTOS_PER_OWNER) {
-    throw new ValidationError(`Достигнут предел ${MAX_PHOTOS_PER_OWNER} фотографий — сначала удалите лишние.`);
+  const maxForOwner = config.maxPhotos || MAX_PHOTOS_PER_OWNER;
+  if (countRows[0].n >= maxForOwner) {
+    throw new ValidationError(`Достигнут предел ${maxForOwner} фотографий — сначала удалите лишние.`);
   }
 
   // Операционная проверка места на диске (задание, раздел 11) — duck-typed:
@@ -312,6 +319,23 @@ async function listMenuItemPhotos(restaurantId, menuItemId) {
   return listPhotos(MENU_ITEM_CONFIG, menuItemId);
 }
 
+// Все фотографии блюд ОДНОГО ресторана одним запросом — для компактных
+// строк меню (docs/HQ-PRODUCT-SPEC.md, раздел «Компактные карточки блюд»),
+// где превью нужно сразу для десятков блюд: N+1 по listMenuItemPhotos() был
+// бы десятками запросов на открытие вкладки. Ownership обеспечен самим
+// JOIN'ом по menu_items.restaurant_id, а не отдельной проверкой на каждое
+// блюдо. Порядок (sort_order, id) тот же, что и в listPhotos — первая строка
+// на блюдо и есть его основная фотография.
+async function listMenuItemPhotosForRestaurant(restaurantId) {
+  return db.query(
+    `SELECT p.* FROM ${MENU_ITEM_CONFIG.table} p
+       JOIN menu_items mi ON mi.id = p.menu_item_id
+      WHERE mi.restaurant_id = $1
+      ORDER BY p.menu_item_id, p.sort_order, p.id`,
+    [restaurantId],
+  );
+}
+
 async function getMenuItemPhotoById(restaurantId, menuItemId, photoId) {
   await assertMenuItemOwnership(restaurantId, menuItemId);
   return getPhotoById(MENU_ITEM_CONFIG, menuItemId, photoId);
@@ -340,6 +364,7 @@ async function deleteMenuItemPhoto(restaurantId, menuItemId, photoId, provider) 
 module.exports = {
   ALT_TEXT_MAX,
   MAX_PHOTOS_PER_OWNER,
+  RESTAURANT_MAX_PHOTOS,
   photoVariantUrls,
   resolvePrimaryPhoto,
   variantObjectKey,
@@ -353,6 +378,7 @@ module.exports = {
   deleteRestaurantPhoto,
   // блюда
   listMenuItemPhotos,
+  listMenuItemPhotosForRestaurant,
   getMenuItemPhotoById,
   uploadMenuItemPhoto,
   setMenuItemPhotoPrimary,

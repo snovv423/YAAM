@@ -277,7 +277,7 @@ test('GET /api/restaurants?city=X — фильтр по городу тоже н
   const restaurantId = await pgCreateRestaurant({
     cities: ['Шали'],
     connectCode: `sec-test-${uniqueSuffix()}`,
-    telegramChatId: '987654321',
+    telegramChatId: '987654322',
   });
   const res = await fetch(`${mainBaseUrl}/api/restaurants?city=${encodeURIComponent('Шали')}`);
   assert.equal(res.status, 200);
@@ -292,7 +292,7 @@ test('GET /api/restaurants?city=X — фильтр по городу тоже н
 test('GET /api/restaurants/:id — не содержит внутренние поля', async () => {
   const restaurantId = await pgCreateRestaurant({
     connectCode: `sec-test-${uniqueSuffix()}`,
-    telegramChatId: '987654321',
+    telegramChatId: '987654323',
   });
   await pgCreateMenuItem(restaurantId);
   const res = await fetch(`${mainBaseUrl}/api/restaurants/${restaurantId}`);

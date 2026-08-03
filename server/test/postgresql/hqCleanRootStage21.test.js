@@ -317,7 +317,13 @@ test('B7: прямой заход на публичный "/hq/login" через
 }));
 
 test('B8: без CORS_ALLOWED_ORIGINS=hq.yaam.su в production — POST /login через прокси с Origin: https://hq.yaam.su отклоняется общим CORS-мидлварем', withProxiedHqApp(
-  { env: { ...process.env, APP_ENV: 'production', TRUST_PROXY: 'loopback', PG_HEALTH_HOST: '127.0.0.1' } },
+  { env: { ...process.env, APP_ENV: 'production', TRUST_PROXY: 'loopback', PG_HEALTH_HOST: '127.0.0.1',
+      // Stage 16: production-режим требует полной конфигурации. Объект env
+      // вычисляется при ОБЪЯВЛЕНИИ теста, когда эфемерная база ещё не
+      // создана, поэтому DATABASE_URL здесь задан явно — он участвует
+      // только в проверке конфигурации; настоящий пул берёт адрес из
+      // process.env уже во время выполнения.
+      DATABASE_URL: 'postgres://validation-placeholder@127.0.0.1:5432/validation', PAYMENT_PROVIDER: 'yookassa', YOOKASSA_ENV: 'sandbox', YOOKASSA_SHOP_ID: '123456', YOOKASSA_SECRET_KEY: 'test_STAGE16FIXTUREKEY0123456', YOOKASSA_RETURN_URL: 'https://api.example.test/return', YOOKASSA_WEBHOOK_URL: 'https://api.example.test/api/webhooks/payment', PUBLIC_BACKEND_URL: 'https://api.example.test', HQ_SESSION_SECRET: 'b2da3f9c2b7d1e648a5906c4f2b8d7e13a94c6f0' } },
   async ({ proxyPort }) => {
     const loginRes = await fetch(`http://127.0.0.1:${proxyPort}/login`, { headers: { 'X-Forwarded-Proto': 'https' } });
     const loginHtml = await loginRes.text();
@@ -359,7 +365,13 @@ test('B9: с CORS_ALLOWED_ORIGINS, включающим https://hq.yaam.su — �
       hqAdminPasswordHash: TEST_HQ_PASSWORD_HASH,
       hqSessionSecret: TEST_SESSION_SECRET,
       hqLinkBasePath: '',
-      env: { ...process.env, APP_ENV: 'production', TRUST_PROXY: 'loopback', PG_HEALTH_HOST: '127.0.0.1' },
+      env: { ...process.env, APP_ENV: 'production', TRUST_PROXY: 'loopback', PG_HEALTH_HOST: '127.0.0.1',
+      // Stage 16: production-режим требует полной конфигурации. Объект env
+      // вычисляется при ОБЪЯВЛЕНИИ теста, когда эфемерная база ещё не
+      // создана, поэтому DATABASE_URL здесь задан явно — он участвует
+      // только в проверке конфигурации; настоящий пул берёт адрес из
+      // process.env уже во время выполнения.
+      DATABASE_URL: 'postgres://validation-placeholder@127.0.0.1:5432/validation', PAYMENT_PROVIDER: 'yookassa', YOOKASSA_ENV: 'sandbox', YOOKASSA_SHOP_ID: '123456', YOOKASSA_SECRET_KEY: 'test_STAGE16FIXTUREKEY0123456', YOOKASSA_RETURN_URL: 'https://api.example.test/return', YOOKASSA_WEBHOOK_URL: 'https://api.example.test/api/webhooks/payment', PUBLIC_BACKEND_URL: 'https://api.example.test', HQ_SESSION_SECRET: 'b2da3f9c2b7d1e648a5906c4f2b8d7e13a94c6f0' },
     });
     await instance.start();
     const { port: upstreamPort } = await waitForAddress(instance);

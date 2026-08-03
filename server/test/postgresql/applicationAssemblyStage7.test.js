@@ -738,20 +738,37 @@ test('H2: APP_ENV=production — dev-роут отсутствует, даже �
   // этот тест не про trust proxy, поэтому просто удовлетворяет предпосылку.
   { ENABLE_DEV_PAYMENT_ROUTES: 'true', APP_ENV: 'production', PAYMENT_PROVIDER: 'mock', TRUST_PROXY: 'loopback' },
   async ({ appModule: reloadedApp }) => {
-    const instance = reloadedApp.createPostgresqlApp({ port: 0, schedulerIntervalMs: 1_000_000 });
-    await instance.start();
-    try {
-      const { port } = instance.address();
-      const res = await fetch(`http://127.0.0.1:${port}/api/orders/YAAM-00001/dev-confirm-payment`, { method: 'POST' });
-      assert.equal(res.status, 404);
-    } finally {
-      await instance.stop();
-    }
+    // Stage 16 УСИЛИЛ гарантию. Раньше приложение запускалось, а dev-роут
+    // просто не монтировался (404). Теперь централизованная проверка
+    // конфигурации (services/config/env.js, вызывается в
+    // createPostgresqlApp) вообще НЕ ДАЁТ СТАРТОВАТЬ: production с
+    // включённым dev-подтверждением оплаты — это конфигурация, которую
+    // нельзя обслуживать, а не которую надо аккуратно обезвредить.
+    // Отказ старта строго сильнее отсутствия маршрута.
+    assert.throws(
+      () => reloadedApp.createPostgresqlApp({ port: 0, schedulerIntervalMs: 1_000_000 }),
+      (err) => {
+        assert.match(err.message, /ENABLE_DEV_PAYMENT_ROUTES/);
+        assert.match(err.message, /production/);
+        return true;
+      },
+    );
   }
 ));
 
 test('H3: явный флаг + APP_ENV=staging + PAYMENT_PROVIDER=mock — dev-роут смонтирован (собственная 404 логика роута, не Express 404)', withEnvReload(
-  { ENABLE_DEV_PAYMENT_ROUTES: 'true', APP_ENV: 'staging', PAYMENT_PROVIDER: 'mock' },
+  // Stage 16: staging обязан быть настроен ПОЛНОСТЬЮ — публичный URL, секрет
+  // сессии и доверие прокси теперь обязательны (services/config/env.js).
+  // Тест не про них, поэтому просто удовлетворяет предпосылки валидным
+  // фиктивным окружением. Сам сценарий — dev-роут доступен в staging на
+  // mock-провайдере: именно так staging проверяет прохождение заказа по
+  // статусам, не трогая реальные деньги.
+  {
+    ENABLE_DEV_PAYMENT_ROUTES: 'true', APP_ENV: 'staging', PAYMENT_PROVIDER: 'mock',
+    TRUST_PROXY: 'loopback',
+    PUBLIC_BACKEND_URL: 'https://api-staging.example.test',
+    HQ_SESSION_SECRET: 'c4f2b8d7e13a94c6f0b2da3f9c2b7d1e648a5906',
+  },
   async ({ appModule: reloadedApp }) => {
     const instance = reloadedApp.createPostgresqlApp({ port: 0, schedulerIntervalMs: 1_000_000 });
     await instance.start();

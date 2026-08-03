@@ -24,14 +24,21 @@ const crypto = require('node:crypto');
 const path = require('node:path');
 
 const apiRoutes = require('../../routes/postgresql/api');
+const settlementDocumentRoutes = require('../../routes/postgresql/settlementDocuments');
 const adminRoutes = require('../../routes/postgresql/admin');
 const { createHqRouter } = require('../../routes/hq');
 const hqOwnerService = require('../hq/ownerService');
 const { createMediaProviderFromEnv, LocalMediaProvider } = require('../hq/media/provider');
 const { buildCorsOptions } = require('../../config/cors');
-const { createPauseExpiryScheduler, createOrderTimeoutScheduler, createRefundReconciliationScheduler } = require('./scheduler');
+const {
+  createPauseExpiryScheduler, createOrderTimeoutScheduler, createRefundReconciliationScheduler,
+  createWeeklySettlementScheduler,
+} = require('./scheduler');
 const { createHealthCheck } = require('./health');
 const { createLifecycle } = require('./lifecycle');
+const { assertEnv } = require('../config/env');
+const { PgSessionStore } = require('../hq/pgSessionStore');
+const migrator = require('./migrator');
 const { startBot } = require('../../bot/postgresql');
 
 const WEBHOOK_PATH = '/api/webhooks/payment';
@@ -313,6 +320,14 @@ function createBotLifecycleAdapter({ token, botClient }) {
     getState() {
       return { state, lastError };
     },
+
+    // Живой bot-клиент для HQ-действия «Отправить тест»
+    // (docs/HQ-PRODUCT-SPEC.md, раздел «Telegram-подключение»). null, если
+    // бот не запущен на этом процессе — HQ тогда честно сообщает, что тест
+    // недоступен, вместо имитации успешной отправки.
+    getBot() {
+      return handle ? handle.bot : null;
+    },
   };
 }
 
@@ -330,7 +345,20 @@ function createPostgresqlApp({
   orderTimeoutIntervalMs,
   refundReconciliationIntervalMs,
   refundReconciliationLimit,
+  // Еженедельное закрытие расчётных периодов — параметры только для тестов
+  // (production использует дефолты scheduler.js). runOnStart=false нужен
+  // тестам, которые не хотят фонового прогона job во время своих сценариев.
+  weeklySettlementIntervalMs,
+  weeklySettlementRunOnStart = true,
   bootstrapOptions,
+  // Stage 15: сколько ждать завершения активных HTTP-запросов при выключении.
+  // Без предела httpServer.close() висит вечно на keep-alive-соединениях, и
+  // systemd в итоге убивает процесс SIGKILL — то есть «graceful» shutdown
+  // оказывался не graceful.
+  shutdownTimeoutMs,
+  // Stage 15: применять ли миграции при старте. Тесты сами накатывают схему
+  // и выключают это; реальный запуск обязан их применять.
+  runMigrations = true,
   corsOptions,
   adminUser,
   adminPass,
@@ -344,6 +372,18 @@ function createPostgresqlApp({
   env = process.env,
 } = {}) {
   validateAppEnv(env);
+
+  // Stage 16: централизованная проверка КОМБИНАЦИИ настроек (services/config/env.js).
+  //
+  // Она была написана в Stage 15, но нигде не вызывалась при старте — только
+  // в readiness. То есть приложение по-прежнему МОГЛО запуститься с
+  // запрещённой конфигурацией (например, production на mock-провайдере), а
+  // «запрет» существовал лишь как отчёт постфактум. Здесь и есть fail fast:
+  // до открытия пула, до миграций, до первого запроса.
+  //
+  // В тестах и development проверка почти ничего не требует (см. inspectEnv),
+  // поэтому вызов безопасен для существующих 1000+ тестов.
+  assertEnv(env);
 
   const resolvedAdminUser = adminUser !== undefined ? adminUser : env.ADMIN_USER;
   const resolvedAdminPass = adminPass !== undefined ? adminPass : env.ADMIN_PASS;
@@ -375,6 +415,14 @@ function createPostgresqlApp({
   // между commit и scheduleRefundProcessing, неоднозначный сетевой исход),
   // никогда не были бы повторены — см. services/postgresql/orderService.js.
   const orderTimeoutScheduler = createOrderTimeoutScheduler({ intervalMs: orderTimeoutIntervalMs });
+  // Еженедельное закрытие расчётных периодов (docs/HQ-PRODUCT-SPEC.md).
+  // weeklySettlementIntervalMs — только для тестов; production использует
+  // дефолт. runOnStart=true даёт catch-up после простоя сервера.
+  const weeklySettlementScheduler = createWeeklySettlementScheduler({
+    intervalMs: weeklySettlementIntervalMs,
+    runOnStart: weeklySettlementRunOnStart,
+  });
+
   const refundReconciliationScheduler = createRefundReconciliationScheduler({
     intervalMs: refundReconciliationIntervalMs,
     limit: refundReconciliationLimit,
@@ -390,7 +438,7 @@ function createPostgresqlApp({
   // периодические sweep'ы, как и в Stage 6) — состояние бота отдельное,
   // наблюдаемое поле readiness(), не участвующее в `ok` (см. health.js).
   const health = createHealthCheck({
-    getSchedulers: () => [scheduler, orderTimeoutScheduler, refundReconciliationScheduler],
+    getSchedulers: () => [scheduler, orderTimeoutScheduler, refundReconciliationScheduler, weeklySettlementScheduler],
     getBotState: () => (botAdapter ? botAdapter.getState() : { state: 'disabled' }),
     // GIT_COMMIT_SHA — см. п.2 задания/health.js. Через уже существующий
     // `env` параметр (по умолчанию process.env) — та же, уже установленная
@@ -400,6 +448,9 @@ function createPostgresqlApp({
   });
 
   let ready = false;
+  // Объявляется здесь, а не рядом с lifecycle ниже: монтирование HQ
+  // происходит РАНЬШЕ, и обращение к переменной из TDZ уронило бы сборку.
+  let hqSessionStore = null;
 
   const app = express();
   app.disable('x-powered-by');
@@ -484,6 +535,11 @@ function createPostgresqlApp({
 
   // 7. публичный API
   app.use('/api', apiRoutes);
+  // Capability-доступ ресторана к своему расчётному документу: /d/:token.
+  // Вне /hq и вне /api — это не HQ и не публичное API заказов. Монтируется на
+  // ЯВНЫЙ префикс, а не как catch-all: иначе этот router попадал бы в стек
+  // любого пути и ломал бы инварианты сборки приложения.
+  app.use('/d', settlementDocumentRoutes);
 
   // 8. admin API — Basic Auth на точке монтирования, тот же паттерн, что
   // SQLite server.js (роутер сам auth-агностичен, см. Stage 4). Fail-closed:
@@ -520,11 +576,20 @@ function createPostgresqlApp({
   // в свои ответы; Nginx на VPS добавляет '/hq' обратно на пути к backend'у
   // (см. докс в финальном отчёте Stage 2.1) — эта строка не меняется.
   if (resolvedHqSessionSecret) {
+    // Живой bot-клиент доступен HQ через app-настройку (действие «Отправить
+    // тест», docs/HQ-PRODUCT-SPEC.md). Геттер, а не сам клиент: бот может
+    // стартовать/останавливаться позже создания роутера.
+    app.set('yaamTelegramBot', null);
+    // Stage 15: HQ-сессии живут в PostgreSQL, а не в памяти процесса.
+    // MemoryStore не переживал перезапуск (деплой разлогинивал владельца),
+    // не чистил истёкшие записи и не работал бы на двух инстансах.
+    hqSessionStore = new PgSessionStore();
     app.use('/hq', createHqRouter({
       sessionSecret: resolvedHqSessionSecret,
       isProduction: env.APP_ENV === 'production',
       linkBasePath: resolvedHqLinkBasePath,
       mediaProvider,
+      sessionStore: hqSessionStore,
     }));
   } else {
     console.warn('[app-postgresql] HQ_SESSION_SECRET не задан — YAAM HQ недоступен, пока его не задать в .env');
@@ -555,18 +620,27 @@ function createPostgresqlApp({
       httpServer.once('error', reject);
     });
 
-    const baseSchedulers = [scheduler, orderTimeoutScheduler, refundReconciliationScheduler];
+    const baseSchedulers = [scheduler, orderTimeoutScheduler, refundReconciliationScheduler, weeklySettlementScheduler];
     lifecycle = createLifecycle({
       schedulers: botAdapter ? [...baseSchedulers, botAdapter] : baseSchedulers,
       httpServer,
       onShutdown: () => {
         ready = false;
+        // Таймер очистки истёкших сессий — тоже ресурс, удерживающий процесс.
+        if (hqSessionStore) hqSessionStore.close();
       },
       onSignal,
+      shutdownTimeoutMs,
+      runMigrations,
     });
 
     try {
       await lifecycle.start({ bootstrap: bootstrapOptions });
+
+      // Бот уже запущен (он входит в schedulers выше) — публикуем живой
+      // клиент для HQ-действия «Отправить тест». Если бот не сконфигурирован,
+      // значение остаётся null, и HQ честно сообщает, что тест недоступен.
+      if (botAdapter) app.set('yaamTelegramBot', botAdapter.getBot());
 
       // Stage 3 — единственное место, где .env вообще участвует во
       // владельце HQ: заполняет ПУСТУЮ таблицу hq_owner РОВНО один раз (сам
@@ -615,7 +689,7 @@ function createPostgresqlApp({
 
   return {
     app, start, stop, isRunning, isReady, address, health, scheduler, botAdapter,
-    orderTimeoutScheduler, refundReconciliationScheduler,
+    orderTimeoutScheduler, refundReconciliationScheduler, weeklySettlementScheduler,
   };
 }
 

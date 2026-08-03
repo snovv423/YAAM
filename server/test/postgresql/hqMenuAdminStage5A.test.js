@@ -356,10 +356,13 @@ test('B: полный HTTP-цикл категория+блюдо, доступ�
     const restaurantId = Number(restaurantPath.split('/').pop());
 
     // Пустое меню.
+    // docs/HQ-PRODUCT-SPEC.md: пустое меню начинается с категорий, глобальной
+    // кнопки «Добавить блюдо» на вкладке больше нет — блюдо создаётся внутри
+    // категории.
     let menuPage = await getPage(base, cookie, `${restaurantPath}/menu`);
-    assert.match(menuPage.html, /В меню пока нет блюд/);
-    assert.doesNotMatch(menuPage.html, /Выбрать блюдо/, 'кнопка не должна называться "Выбрать блюдо" (задание, раздел 6)');
-    assert.match(menuPage.html, /Добавить блюдо/);
+    assert.match(menuPage.html, /Категорий пока нет/);
+    assert.match(menuPage.html, /Добавить категорию/);
+    assert.match(menuPage.html, /Архив/);
 
     // Создать категорию.
     let res = await postForm(base, cookie, `${restaurantPath}/menu/categories`, { _csrf: menuPage.csrf, name: 'Горячее' });
@@ -411,7 +414,7 @@ test('B: полный HTTP-цикл категория+блюдо, доступ�
     const auditUnavailable = await db.query("SELECT action FROM hq_audit_log WHERE action = 'menu_item_unavailable'");
     assert.equal(auditUnavailable.length, 1);
     menuPage = await getPage(base, cookie, `${restaurantPath}/menu`);
-    assert.match(menuPage.html, /Временно недоступно/);
+    assert.match(menuPage.html, /Снято с витрины/);
 
     // Вернуть доступность.
     res = await postForm(base, cookie, `${restaurantPath}/menu/items/${itemId}/available`, { _csrf: menuPage.csrf, available: '1' });
@@ -425,8 +428,10 @@ test('B: полный HTTP-цикл категория+блюдо, доступ�
     assert.equal(res.status, 302);
     const auditArchived = await db.query("SELECT action FROM hq_audit_log WHERE action = 'menu_item_archived'");
     assert.equal(auditArchived.length, 1);
-    menuPage = await getPage(base, cookie, `${restaurantPath}/menu?filter=archived`);
-    assert.match(menuPage.html, /Архивировано/);
+    // Архив — отдельный экран (спецификация), не фильтр на вкладке «Меню».
+    menuPage = await getPage(base, cookie, `${restaurantPath}/menu/archive`);
+    assert.match(menuPage.html, /Шашлык из баранины/);
+    assert.match(menuPage.html, /Восстановить/);
 
     // Восстановить — остаётся недоступным.
     res = await postForm(base, cookie, `${restaurantPath}/menu/items/${itemId}/restore`, { _csrf: menuPage.csrf });
@@ -434,7 +439,7 @@ test('B: полный HTTP-цикл категория+блюдо, доступ�
     const auditRestored = await db.query("SELECT action FROM hq_audit_log WHERE action = 'menu_item_restored'");
     assert.equal(auditRestored.length, 1);
     menuPage = await getPage(base, cookie, `${restaurantPath}/menu`);
-    assert.match(menuPage.html, /Временно недоступно/, 'восстановленное блюдо остаётся недоступным, не открывается автоматически');
+    assert.match(menuPage.html, /Снято с витрины/, 'восстановленное блюдо остаётся снятым с витрины, не возвращается на неё автоматически');
   } finally {
     await stopApp(instance);
   }
@@ -677,7 +682,7 @@ test('E2: отключение последнего доступного блю�
     assert.equal(restaurantRow[0].is_open, 0, 'ресторан должен был автоматически закрыться');
 
     overview = await getPage(base, cookie, restaurantPath);
-    assert.match(overview.html, /Закрыт/);
+    assert.match(overview.html, /Приостановлен/, 'статус «Закрыт» переименован в «Приостановлен» (docs/HQ-PRODUCT-SPEC.md)');
 
     const auditAutoClose = await db.query("SELECT details FROM hq_audit_log WHERE action = 'restaurant_updated' AND details LIKE '%auto%'");
     assert.equal(auditAutoClose.length, 1, 'авто-закрытие должно быть в audit log');

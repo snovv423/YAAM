@@ -611,7 +611,7 @@ test('finalizeRetryAttempt: конфликт (payment уже не creating/pendi
 
 test('sweepTimeouts: просроченный заказ эмитит order:status с payload.status=timed_out', async () => {
   const restaurantId = await pgCreateRestaurant();
-  const order = await pgCreateOrder(restaurantId, { status: 'awaiting_restaurant', statusUpdatedAt: secondsAgo(200) });
+  const order = await pgCreateOrder(restaurantId, { status: 'awaiting_restaurant', statusUpdatedAt: secondsAgo(600) });
   await pgCreatePayment(order.id, { status: 'succeeded' });
 
   const cap = captureEvents(pgOrderService.orderEvents, ['order:status']);
@@ -641,9 +641,9 @@ test('sweepTimeouts: свежий заказ — ничего не эмитит'
 
 test('sweepTimeouts: несколько просроченных заказов в одном свипе — по одному событию на каждый', async () => {
   const restaurantId = await pgCreateRestaurant();
-  const orderA = await pgCreateOrder(restaurantId, { status: 'awaiting_restaurant', statusUpdatedAt: secondsAgo(300) });
+  const orderA = await pgCreateOrder(restaurantId, { status: 'awaiting_restaurant', statusUpdatedAt: secondsAgo(600) });
   await pgCreatePayment(orderA.id, { status: 'succeeded' });
-  const orderB = await pgCreateOrder(restaurantId, { status: 'awaiting_restaurant', statusUpdatedAt: secondsAgo(250) });
+  const orderB = await pgCreateOrder(restaurantId, { status: 'awaiting_restaurant', statusUpdatedAt: secondsAgo(550) });
   await pgCreatePayment(orderB.id, { status: 'succeeded' });
 
   const cap = captureEvents(pgOrderService.orderEvents, ['order:status']);
@@ -659,9 +659,9 @@ test('sweepTimeouts: несколько просроченных заказов 
 
 test('sweepTimeouts: ошибка на одном заказе не мешает эмиссии для соседнего заказа того же свипа', async () => {
   const restaurantId = await pgCreateRestaurant();
-  const orderFail = await pgCreateOrder(restaurantId, { status: 'awaiting_restaurant', statusUpdatedAt: secondsAgo(300) });
+  const orderFail = await pgCreateOrder(restaurantId, { status: 'awaiting_restaurant', statusUpdatedAt: secondsAgo(600) });
   await pgCreatePayment(orderFail.id, { status: 'succeeded' });
-  const orderOk = await pgCreateOrder(restaurantId, { status: 'awaiting_restaurant', statusUpdatedAt: secondsAgo(300) });
+  const orderOk = await pgCreateOrder(restaurantId, { status: 'awaiting_restaurant', statusUpdatedAt: secondsAgo(600) });
   await pgCreatePayment(orderOk.id, { status: 'succeeded' });
 
   const originalExecute = db.execute;
@@ -694,7 +694,7 @@ test('sweepTimeouts: ошибка на одном заказе не мешает
 
 test('sweepTimeouts: два конкурентных прогона на один заказ — ровно одна эмиссия', async () => {
   const restaurantId = await pgCreateRestaurant();
-  const order = await pgCreateOrder(restaurantId, { status: 'awaiting_restaurant', statusUpdatedAt: secondsAgo(300) });
+  const order = await pgCreateOrder(restaurantId, { status: 'awaiting_restaurant', statusUpdatedAt: secondsAgo(600) });
   await pgCreatePayment(order.id, { status: 'succeeded' });
 
   const cap = captureEvents(pgOrderService.orderEvents, ['order:status']);

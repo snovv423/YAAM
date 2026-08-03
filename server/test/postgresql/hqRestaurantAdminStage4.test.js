@@ -148,7 +148,7 @@ test('A: список ресторанов — search/city/status/sort/paginatio
   const svc = require('../../services/hq/restaurantAdminService');
 
   const grozny1 = await svc.createRestaurant({ name: 'Альфа Кафе', cities: 'Грозный' });
-  const grozny2 = await svc.createRestaurant({ name: 'Бета Ресторан', cities: 'Грозный, Аргун' });
+  const grozny2 = await svc.createRestaurant({ name: 'Бета Ресторан', cities: ['Грозный', 'Аргун'] });
   const argun1 = await svc.createRestaurant({ name: 'Гамма Шашлычная', cities: 'Аргун' });
   // Stage 4.1: фильтры open/closed требуют published_at IS NOT NULL (иначе
   // это черновик, отдельная категория) — эти три фикстуры тестируют
@@ -260,7 +260,10 @@ test('B: полный HTTP-цикл управления рестораном + 
     page = await getPage(base, cookie, restaurantPath);
     assert.equal(page.status, 200);
     assert.match(page.html, /Интеграционное Кафе/);
-    assert.match(page.html, /Заказов сегодня/);
+    assert.match(page.html, /Заказы/);
+    assert.match(page.html, /За всё время/);
+    assert.match(page.html, /Доход YAAM сегодня/);
+    assert.match(page.html, /Выплаты/);
 
     // --- Заказы (пусто) ---
     page = await getPage(base, cookie, `${restaurantPath}/orders`);
@@ -276,9 +279,19 @@ test('B: полный HTTP-цикл управления рестораном + 
 
     // --- Настройки: правка ---
     page = await getPage(base, cookie, `${restaurantPath}/settings`);
-    res = await postForm(base, cookie, `${restaurantPath}/settings`, {
-      _csrf: page.csrf, name: 'Интеграционное Кафе 2', cities: 'Грозный, Аргун', cuisine: 'кавказская',
+    // Города приходят как ПОВТОРЯЮЩИЕСЯ ключи cities= (набор чекбоксов,
+    // docs/HQ-PRODUCT-SPEC.md) — URLSearchParams(object) склеил бы массив в
+    // одну строку, поэтому тело собирается явно.
+    const settingsBody = new URLSearchParams({
+      _csrf: page.csrf, name: 'Интеграционное Кафе 2', cuisine: 'кавказская',
       description: 'Новое описание', address: 'ул. Новая, 2', phone: '+79280000098', hours: '09:00-23:00', min_order: '500',
+    });
+    settingsBody.append('cities', 'Грозный');
+    settingsBody.append('cities', 'Аргун');
+    res = await fetch(`${base}${restaurantPath}/settings`, {
+      method: 'POST', redirect: 'manual',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie },
+      body: settingsBody.toString(),
     });
     assert.equal(res.status, 200);
     html = await res.text();
@@ -293,17 +306,19 @@ test('B: полный HTTP-цикл управления рестораном + 
     // опубликованному открытому ресторану — свежесозданный всё ещё черновик
     // и закрыт) ---
     page = await getPage(base, cookie, restaurantPath);
-    assert.match(page.html, /Черновик/, 'свежесозданный ресторан — черновик');
+    assert.match(page.html, /Скрыт/, 'свежесозданный ресторан не опубликован — «Скрыт» (docs/HQ-PRODUCT-SPEC.md)');
+    page = await getPage(base, cookie, `${restaurantPath}/settings`);
     res = await postForm(base, cookie, `${restaurantPath}/publish`, { _csrf: page.csrf });
     assert.equal(res.status, 302);
     const auditAfterPublish = await db.query("SELECT action FROM hq_audit_log WHERE action = 'restaurant_published'");
     assert.equal(auditAfterPublish.length, 1);
     page = await getPage(base, cookie, restaurantPath);
-    assert.match(page.html, /Закрыт/, 'публикация не открывает автоматически (задание, раздел 8)');
+    assert.match(page.html, /Приостановлен/, 'публикация не открывает автоматически (задание, раздел 8)');
     // Открытие требует доступное блюдо (Stage 5A) — этот тест про lifecycle
     // ресторана, не про меню, поэтому минимальное блюдо дано напрямую SQL.
     const catForOpen = await db.execute('INSERT INTO categories (restaurant_id, name) VALUES ($1, $2) RETURNING id', [restaurantId, 'Cat']);
     await db.execute('INSERT INTO menu_items (restaurant_id, category_id, name, price) VALUES ($1,$2,$3,$4)', [restaurantId, catForOpen.rows[0].id, 'Dish', 100]);
+    page = await getPage(base, cookie, `${restaurantPath}/settings`);
     res = await postForm(base, cookie, `${restaurantPath}/open`, { _csrf: page.csrf });
     assert.equal(res.status, 302);
     page = await getPage(base, cookie, restaurantPath);
@@ -317,7 +332,7 @@ test('B: полный HTTP-цикл управления рестораном + 
     const orderService = require('../../services/postgresql/orderService');
     await orderService.pauseRestaurant(restaurantId, 'short');
     page = await getPage(base, cookie, restaurantPath);
-    assert.match(page.html, /Пауза до/, 'HQ должен показывать статус паузы, поставленной через Telegram');
+    assert.match(page.html, /Перерыв до/, 'HQ должен показывать статус перерыва, взятого через Telegram');
     assert.doesNotMatch(page.html, /Пауза: 33 мин|Пауза: 3 часа|Пауза: 11 часов/, 'в HQ не должно быть кнопок управления временной паузой (задание Stage 5A.1)');
     assert.doesNotMatch(page.html, />Возобновить</, 'в HQ не должно быть кнопки возобновления паузы (задание Stage 5A.1)');
 
@@ -335,12 +350,14 @@ test('B: полный HTTP-цикл управления рестораном + 
     const auditAfterArchive = await db.query("SELECT action FROM hq_audit_log WHERE action = 'restaurant_archived'");
     assert.equal(auditAfterArchive.length, 1);
 
-    // Архивированный ресторан по умолчанию скрыт из общего списка, но
-    // виден через фильтр "Архивированные".
+    // Архивированный ресторан исчезает из рабочего списка HQ (спецификация,
+    // «Управление рестораном»). Фильтра «Архивированные» больше нет — сама
+    // страница ресторана остаётся доступной по прямой ссылке, и на ней есть
+    // «Вернуть из архива».
     page = await getPage(base, cookie, '/hq/restaurants');
     assert.doesNotMatch(page.html, /Интеграционное Кафе 2/);
-    page = await getPage(base, cookie, '/hq/restaurants?status=archived');
-    assert.match(page.html, /Интеграционное Кафе 2/);
+    page = await getPage(base, cookie, `${restaurantPath}/settings`);
+    assert.match(page.html, /Вернуть из архива/);
 
     // --- Восстановление ---
     page = await getPage(base, cookie, `${restaurantPath}/settings`);
@@ -350,10 +367,11 @@ test('B: полный HTTP-цикл управления рестораном + 
     assert.match(page.html, /Интеграционное Кафе 2/);
     const auditAfterRestore = await db.query("SELECT action FROM hq_audit_log WHERE action = 'restaurant_restored'");
     assert.equal(auditAfterRestore.length, 1);
-    // Задание, раздел 10: восстановление ВСЕГДА возвращает в черновик, не
-    // публикует автоматически.
+    // Задание, раздел 10: восстановление ВСЕГДА возвращает в неопубликованное
+    // состояние («Скрыт» в терминах docs/HQ-PRODUCT-SPEC.md), не публикует
+    // автоматически.
     page = await getPage(base, cookie, restaurantPath);
-    assert.match(page.html, /Черновик/);
+    assert.match(page.html, /Скрыт/);
   } finally {
     await stopApp(instance);
   }
@@ -534,26 +552,33 @@ test('E: Обзор/Заказы/Оценки/Статистика показы�
     await makeDeliveredRatedOrder(restaurantA);
     await makeDeliveredRatedOrder(restaurantB);
 
-    // Обзор А видит только 2 доставленных, Б — только 1.
-    const overviewA = await (await fetch(`${base}${restaurantA.restaurantPath}/overview.json`, { headers: { Cookie: cookie } })).json();
-    const overviewB = await (await fetch(`${base}${restaurantB.restaurantPath}/overview.json`, { headers: { Cookie: cookie } })).json();
-    assert.equal(overviewA.totalDelivered, 2);
-    assert.equal(overviewB.totalDelivered, 1);
+    // Обзор А видит только 2 своих заказа, Б — только 1. JSON-эндпоинт
+    // overview.json удалён вместе с блоком «Активные заказы»
+    // (docs/HQ-PRODUCT-SPEC.md), поэтому изоляция проверяется по самому
+    // блоку «Заказы» на HTML-странице обзора.
+    const overviewA = await getPage(base, cookie, restaurantA.restaurantPath);
+    const overviewB = await getPage(base, cookie, restaurantB.restaurantPath);
+    const ordersValuesA = (overviewA.html.match(/<div class="orders-value">(\d+)<\/div>/g) || []).map((m) => Number(m.replace(/\D/g, '')));
+    const ordersValuesB = (overviewB.html.match(/<div class="orders-value">(\d+)<\/div>/g) || []).map((m) => Number(m.replace(/\D/g, '')));
+    assert.deepEqual(ordersValuesA, [2, 2], 'у ресторана А — 2 заказа сегодня и 2 за всё время');
+    assert.deepEqual(ordersValuesB, [1, 1], 'у ресторана Б — 1 заказ сегодня и 1 за всё время');
 
     // Заказы А не содержат заказов Б (и наоборот) — проверяем по количеству
     // строк в списке заказов, а не только по счётчику.
     const ordersAPage = await getPage(base, cookie, `${restaurantA.restaurantPath}/orders`);
     const ordersBPage = await getPage(base, cookie, `${restaurantB.restaurantPath}/orders`);
-    const codeCountA = (ordersAPage.html.match(/order-code/g) || []).length;
-    const codeCountB = (ordersBPage.html.match(/order-code/g) || []).length;
+    // Заказы отображаются компактными строками .dish-row (docs/HQ-PRODUCT-SPEC.md),
+    // не таблицей с .order-code.
+    const codeCountA = (ordersAPage.html.match(/class="dish-row"/g) || []).length;
+    const codeCountB = (ordersBPage.html.match(/class="dish-row"/g) || []).length;
     assert.equal(codeCountA, 2);
     assert.equal(codeCountB, 1);
 
     // Оценки — по 4 звезды у каждого, но количество оценок раздельное.
     const ratingsAPage = await getPage(base, cookie, `${restaurantA.restaurantPath}/ratings`);
     const ratingsBPage = await getPage(base, cookie, `${restaurantB.restaurantPath}/ratings`);
-    assert.match(ratingsAPage.html, />2<\/div>\s*<div class="label">Оценок<\/div>/);
-    assert.match(ratingsBPage.html, />1<\/div>\s*<div class="label">Оценок<\/div>/);
+    assert.match(ratingsAPage.html, />2<\/div>\s*<div class="label">Всего оценок<\/div>/);
+    assert.match(ratingsBPage.html, />1<\/div>\s*<div class="label">Всего оценок<\/div>/);
 
     // Статистика — оборот А = 2×700=1400, Б = 1×700=700.
     const statsAPage = await getPage(base, cookie, `${restaurantA.restaurantPath}/statistics`);

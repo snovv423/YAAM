@@ -6,7 +6,6 @@
 // hqAuth.test.js). Источник данных — только PostgreSQL, только реальные
 // таблицы orders/refunds/restaurants; ничего не выдумывается сверх того,
 // что уже существует в схеме.
-const { RESTAURANT_RESPONSE_WINDOW_SEC } = require('../postgresql/orderService');
 
 // YAAM сейчас работает только в Грозном (Europe/Moscow). Этот часовой пояс —
 // фиксированный UTC+3 БЕЗ перехода на летнее/зимнее время с 26.10.2014
@@ -30,139 +29,51 @@ function todayRangeUtc(nowUtc = new Date()) {
   return { startUtc, endUtc };
 }
 
-const ACTIVE_ORDER_STATUSES = ['awaiting_payment', 'awaiting_restaurant', 'accepted', 'preparing', 'courier'];
-
-// --- Верхний блок ------------------------------------------------------
+// --- «Обзор» — 4 показателя верхнего блока (docs/HQ-PRODUCT-SPEC.md) -----
 //
-// Правило (одинаково для всех "сегодня"-метрик — единый якорь времени,
-// см. итоговый отчёт за обсуждение альтернативы "по дате доставки"):
-//   "Заказов сегодня"  = COUNT(orders), created_at попадает в [today, tomorrow)
-//                        по Europe/Moscow, ЛЮБОЙ статус.
-//   "Оборот сегодня"   = SUM(items_total) по ТЕМ ЖЕ заказам, только status='delivered'.
-//   "Комиссия сегодня" = SUM(commission_amount) по тем же, только status='delivered'.
-//   "Активные рестораны" = COUNT(restaurants) WHERE is_open=1. YAAM пока не
-//        имеет статуса публикации (черновик/опубликован/архивирован —
-//        отложено с HQ Stage 1), поэтому единственное существующее сегодня
-//        поле, отражающее "активен для приёма заказов" — is_open.
-async function getTopSummary(db, { now = new Date() } = {}) {
-  const { startUtc, endUtc } = todayRangeUtc(now);
-  const [todayRow] = await db.query(
-    `SELECT
-       COUNT(*)::int AS orders_today,
-       COALESCE(SUM(items_total) FILTER (WHERE status = 'delivered'), 0)::int AS turnover_today,
-       COALESCE(SUM(commission_amount) FILTER (WHERE status = 'delivered'), 0)::int AS commission_today
-     FROM orders
-     WHERE created_at >= $1 AND created_at < $2`,
-    [startUtc, endUtc],
-  );
-  const [activeRestaurantsRow] = await db.query(`SELECT COUNT(*)::int AS c FROM restaurants WHERE is_open = 1`);
-  const attentionCount = await getAttentionCount(db);
+// Период "Сегодня|Неделя|Месяц" переиспользует УЖЕ существующие определения
+// периода (restaurantStatsService.resolvePeriodRange: 'today'/'7d'/'30d') —
+// те же, что уже показаны владельцу на «Финансы»/«Статистика ресторана» —
+// не изобретает календарную неделю/месяц заново.
+//
+// Все четыре числа считаются ОДНИМ вызовом restaurantFinanceService (Stage
+// 7, единственный источник финансовой истины — задание Обзора, раздел 10:
+// "не подменять существующие определения финансов приблизительными
+// формулами") — не второй параллельный SQL-расчёт:
+//   "Заказы"    = COUNT заработанных заказов за период (delivered + успешно
+//                 оплачен + без успешного возврата — EARNED_ORDER_FILTER_SQL,
+//                 restaurantFinanceService.js). Отменённые/неоплаченные/
+//                 возвращённые НЕ считаются — задание, раздел 2, дословно.
+//   "Оборот"    = SUM(items_total) по тем же заказам.
+//   "Доход YAAM"= SUM(commission_amount) по тем же заказам.
+//   "Рестораны" = количество РАЗНЫХ ресторанов среди этих же заказов —
+//                 "сколько ресторанов реально вели бизнес в этом периоде",
+//                 а не текущий is_open-тумблер (операционный, не бизнес-
+//                 показатель — задание прямо исключает "распределение
+//                 заказов по оперативным статусам") и не статический список
+//                 published/архивных (задание требует, чтобы переключатель
+//                 периода менял ВСЕ четыре числа сразу — счётчик, не
+//                 зависящий от периода, этому требованию не отвечает).
+//                 Архивированный ресторан, заработавший в периоде ДО
+//                 архивирования, всё ещё корректно входит в счёт этого
+//                 периода — исторический факт периода не переписывается
+//                 задним числом.
+const PERIOD_TO_RANGE_KEY = { today: 'today', week: '7d', month: '30d' };
 
+async function getOverviewMetrics({ period = 'today', now = new Date() } = {}) {
+  const resolvedPeriod = period === 'week' || period === 'month' ? period : 'today';
+  const rangeKey = PERIOD_TO_RANGE_KEY[resolvedPeriod];
+  const financeService = require('./restaurantFinanceService'); // ленивый require — см. getFinanceSummary ниже
+  const { resolvePeriodRange } = require('./restaurantStatsService');
+  const range = resolvePeriodRange({ period: rangeKey }, now);
+  const rows = await financeService.computeEarningsAggregate({ range });
   return {
-    ordersToday: todayRow.orders_today,
-    turnoverToday: todayRow.turnover_today,
-    commissionToday: todayRow.commission_today,
-    activeRestaurants: activeRestaurantsRow.c,
-    attentionCount,
+    period: resolvedPeriod,
+    ordersCount: rows.reduce((sum, r) => sum + r.delivered_paid_orders, 0),
+    turnover: rows.reduce((sum, r) => sum + r.turnover, 0),
+    commission: rows.reduce((sum, r) => sum + r.commission, 0),
+    restaurantsCount: rows.length,
   };
-}
-
-// --- Активные заказы (6.1) ----------------------------------------------
-//
-// Текущее живое состояние очереди заказов — НЕ ограничено "сегодня": заказ,
-// технически всё ещё активный со вчера, должен быть виден, а не исчезнуть
-// из сводки только потому что дата сменилась.
-async function getActiveOrdersBreakdown(db) {
-  const rows = await db.query(
-    `SELECT status, COUNT(*)::int AS c FROM orders WHERE status = ANY($1) GROUP BY status`,
-    [ACTIVE_ORDER_STATUSES],
-  );
-  const counts = Object.fromEntries(ACTIVE_ORDER_STATUSES.map((s) => [s, 0]));
-  for (const row of rows) counts[row.status] = row.c;
-  return {
-    awaitingPayment: counts.awaiting_payment,
-    awaitingRestaurant: counts.awaiting_restaurant,
-    accepted: counts.accepted,
-    preparing: counts.preparing,
-    courier: counts.courier,
-    needsAttention: await getOverdueAwaitingRestaurantCount(db),
-  };
-}
-
-// "Требует внимания" — ТОЛЬКО два реально существующих в модели проблемных
-// состояния, ничего не придумано:
-//   1. awaiting_restaurant дольше RESTAURANT_RESPONSE_WINDOW_SEC (180с) —
-//      в норме sweepTimeouts() (services/postgresql/scheduler.js) переводит
-//      такие заказы в timed_out каждые 10с, так что здесь почти всегда 0;
-//      ненулевое значение — реальный сигнал, что что-то не так (сам
-//      scheduler не работает, или обнаружена гонка).
-//   2. refunds.status = 'failed' — терминальное состояние возврата (см.
-//      server/docs/refund-architecture-review.md), не ретраится
-//      автоматически по дизайну — требует ручного разбора по определению.
-async function getOverdueAwaitingRestaurantCount(db) {
-  const [row] = await db.query(
-    `SELECT COUNT(*)::int AS c FROM orders
-     WHERE status = 'awaiting_restaurant'
-       AND status_updated_at < NOW() - make_interval(secs => $1)`,
-    [RESTAURANT_RESPONSE_WINDOW_SEC],
-  );
-  return row.c;
-}
-
-async function getFailedRefundsCount(db) {
-  const [row] = await db.query(`SELECT COUNT(*)::int AS c FROM refunds WHERE status = 'failed'`);
-  return row.c;
-}
-
-async function getAttentionCount(db) {
-  const [overdue, failedRefunds] = await Promise.all([
-    getOverdueAwaitingRestaurantCount(db),
-    getFailedRefundsCount(db),
-  ]);
-  return overdue + failedRefunds;
-}
-
-// Компактный список причин "требует внимания" — публичного текста
-// достаточно, без раскрытия ID/сумм на уровне общей сводки (детали — в
-// будущем разделе конкретного ресторана/выплаты, не в этом этапе).
-async function getAttentionItems(db) {
-  const items = [];
-  const overdue = await getOverdueAwaitingRestaurantCount(db);
-  if (overdue > 0) {
-    items.push({ kind: 'overdue_awaiting_restaurant', count: overdue, label: `Заказы без ответа ресторана дольше ${Math.round(RESTAURANT_RESPONSE_WINDOW_SEC / 60)} мин: ${overdue}` });
-  }
-  const failedRefunds = await getFailedRefundsCount(db);
-  if (failedRefunds > 0) {
-    items.push({ kind: 'failed_refund', count: failedRefunds, label: `Возвраты, требующие ручного разбора: ${failedRefunds}` });
-  }
-  return items;
-}
-
-// --- Состояние ресторанов (6.2) -----------------------------------------
-//
-// Публичные/операционные поля ТОЛЬКО — connect_code/telegram_chat_id
-// намеренно не выбираются этим запросом (не только "не рендерятся в
-// шаблоне" — их вообще нет в результате SELECT, чтобы приватные поля не
-// могли случайно утечь при будущей правке шаблона).
-async function getRestaurantsStatus(db) {
-  const rows = await db.query(`
-    SELECT
-      r.id, r.name, r.is_open, r.paused_until,
-      (r.telegram_chat_id IS NOT NULL) AS telegram_connected,
-      COUNT(o.id) FILTER (WHERE o.status = ANY($1))::int AS active_orders
-    FROM restaurants r
-    LEFT JOIN orders o ON o.restaurant_id = r.id
-    GROUP BY r.id
-    ORDER BY r.name
-  `, [ACTIVE_ORDER_STATUSES]);
-  return rows.map((r) => ({
-    id: r.id,
-    name: r.name,
-    isOpen: !!r.is_open,
-    pausedUntil: r.paused_until,
-    telegramConnected: !!r.telegram_connected,
-    activeOrders: r.active_orders,
-  }));
 }
 
 // --- Финансовая сводка (6.3) ---------------------------------------------
@@ -205,10 +116,6 @@ module.exports = {
   PROJECT_TIMEZONE,
   PROJECT_TIMEZONE_OFFSET_MINUTES,
   todayRangeUtc,
-  getTopSummary,
-  getActiveOrdersBreakdown,
-  getRestaurantsStatus,
+  getOverviewMetrics,
   getFinanceSummary,
-  getAttentionItems,
-  getAttentionCount,
 };

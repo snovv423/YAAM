@@ -115,7 +115,8 @@ test('POST /orders с корректной парой создаёт заказ,
   assert.deepEqual(Object.keys(body).sort(), ['context', 'order', 'payment']);
   assert.deepEqual(Object.keys(body.order).sort(), [
     'estimated_ready_minutes', 'fulfillment_type', 'items_total', 'payment_expires_at',
-    'public_code', 'rating', 'refund_status', 'restaurant_phone', 'status', 'status_updated_at',
+    'preparation_deadline', 'public_code', 'rating', 'refund_status', 'restaurant_phone',
+    'status', 'status_updated_at',
   ]);
   assert.match(body.order.public_code, /^YAAM-\d+$/);
   assert.deepEqual(Object.keys(body.payment).sort(), ['paymentExpiresAt', 'paymentUrl', 'qrPayload']);

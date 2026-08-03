@@ -251,7 +251,7 @@ const ADVANCE_MAP = {
 // Дословная копия RESTAURANT_RESPONSE_WINDOW_SEC из orderService.js — окно
 // ожидания ответа ресторана (секунды), после которого sweepTimeouts()
 // просрочивает заказ. Нужен только sweepTimeouts() (Wave 3).
-const RESTAURANT_RESPONSE_WINDOW_SEC = 180;
+const RESTAURANT_RESPONSE_WINDOW_SEC = 300;
 
 // Дословная копия PAUSE_PRESETS_MIN из orderService.js — три пресета
 // перерыва в минутах, показываются ботом как кнопки "33 мин"/"3 часа"/
@@ -1252,12 +1252,37 @@ async function restaurantAdvance(orderId, nextStatus, { estimatedMinutes } = {})
       throw new Error(`нельзя перейти из ${current.status} в ${nextStatus}`);
     }
 
+    // Серверный дедлайн готовности (docs/HQ-PRODUCT-SPEC.md, раздел
+    // «Таймер приготовления»). Считается ОДИН РАЗ, здесь, средствами самой
+    // БД (NOW() + interval), и дальше только читается — клиент никогда не
+    // вычисляет его сам, поэтому refresh/закрытие браузера/переход на другое
+    // устройство не могут его сбросить (именно этот дефект чинился раньше в
+    // pre-status таймере — не повторяем его).
+    //
+    // Оплата на этот момент ГАРАНТИРОВАННО подтверждена: preparing достижим
+    // только из accepted, а accepted — только из awaiting_restaurant, в
+    // который заказ попадает исключительно через markPaid() (успешный
+    // платёж). Отдельная проверка оплаты здесь была бы проверкой уже
+    // структурно невозможного состояния.
     if (nextStatus === 'preparing' && estimatedMinutes) {
+      // Минуты передаются ДВУМЯ отдельными параметрами намеренно: один и тот
+      // же $1 нельзя использовать и как integer (колонка), и как операнд
+      // текстовой конкатенации — PostgreSQL отвечает "inconsistent types
+      // deduced for parameter $1". make_interval() тоже подошёл бы, но
+      // явная пара параметров ближе к остальным запросам этого файла.
       await db.execute(
-        'UPDATE orders SET estimated_ready_minutes = $1 WHERE id = $2',
-        [estimatedMinutes, orderId],
+        `UPDATE orders
+            SET estimated_ready_minutes = $1,
+                preparation_deadline = NOW() + make_interval(mins => $2)
+          WHERE id = $3`,
+        [estimatedMinutes, estimatedMinutes, orderId],
         client
       );
+    }
+    // Готовка закончилась — таймер клиенту больше не показывается
+    // (спецификация: «исчезает, когда ресторан нажимает Передан курьеру»).
+    if (nextStatus === 'courier' || nextStatus === 'delivered') {
+      await db.execute('UPDATE orders SET preparation_deadline = NULL WHERE id = $1', [orderId], client);
     }
 
     const applied = await db.execute(
@@ -1448,7 +1473,8 @@ async function finalizeRefundSucceeded(refundId, providerRefundId) {
 //   5. race-проигрыш -> throw refundInvariant('не удалось атомарно
 //      зафиксировать неуспешный возврат').
 async function finalizeRefundFailed(refundId, errorCode) {
-  return db.transaction(async (client) => {
+  let justFailed = false;
+  const result = await db.transaction(async (client) => {
     const currentRows = await db.query('SELECT * FROM refunds WHERE id = $1', [refundId], client);
     const current = currentRows[0];
     if (!current) throw refundInvariant('строка возврата для финализации не найдена');
@@ -1465,9 +1491,49 @@ async function finalizeRefundFailed(refundId, errorCode) {
       client
     );
     if (updated.rowCount !== 1) throw refundInvariant('не удалось атомарно зафиксировать неуспешный возврат');
+    justFailed = true;
 
     const finalRows = await db.query('SELECT * FROM refunds WHERE id = $1', [refundId], client);
     return finalRows[0];
+  });
+  // HQ «Центр событий» — "ошибка или неразрешённое состояние возврата"
+  // (docs/HQ-PRODUCT-SPEC.md). justFailed=false на idempotent-повторе (уже
+  // был failed) — задание: без информационного шума, ОДНО событие на
+  // реальный переход, не на каждый повторный вызов.
+  if (justFailed) {
+    logRefundFailedEvent(result).catch((err) => {
+      console.error(`[services/postgresql/orderService] hq_events log failed for refund ${refundId}:`, err.message);
+    });
+  }
+  return result;
+}
+
+function describeRefundErrorCode(code) {
+  switch (code) {
+    case 'provider_failed': return 'платёжный провайдер отклонил возврат';
+    case 'provider_unavailable': return 'платёжный провайдер был недоступен';
+    case 'timeout': return 'истекло время ожидания ответа провайдера';
+    case 'invariant_violation': return 'обнаружено внутреннее рассогласование данных';
+    default: return 'причина не определена';
+  }
+}
+
+async function logRefundFailedEvent(refund) {
+  const eventLogService = require('../hq/eventLogService');
+  const [row] = await db.query(
+    `SELECT o.id AS order_id, o.public_code, o.restaurant_id, r.name AS restaurant_name
+     FROM payments p JOIN orders o ON o.id = p.order_id JOIN restaurants r ON r.id = o.restaurant_id
+     WHERE p.id = $1`,
+    [refund.payment_id],
+  );
+  if (!row) return null;
+  return eventLogService.createEvent({
+    category: 'refund_issue',
+    restaurantId: row.restaurant_id,
+    restaurantName: row.restaurant_name,
+    orderId: row.order_id,
+    orderPublicCode: row.public_code,
+    message: `Возврат по заказу ${row.public_code} не удался: ${describeRefundErrorCode(refund.last_error_code)}. Требует ручной проверки.`,
   });
 }
 
@@ -1543,11 +1609,47 @@ async function sweepTimeouts() {
     }
     if (changed) {
       orderEvents.emit('order:status', order);
+      // HQ «Центр событий» (docs/HQ-PRODUCT-SPEC.md) — "каждый отдельный
+      // заказ, который ресторан не принял за разрешённые N минут" — ОДНА
+      // запись на заказ (задание: "не объединять несколько пропущенных
+      // заказов в одну запись"). Fire-and-forget, тем же принципом, что и
+      // scheduleRefundProcessing ниже: сбой записи диагностического события
+      // не должен ронять сам sweep — эта строка заказа уже успешно
+      // просрочена и закоммичена независимо от исхода логирования.
+      logOrderMissedEvent(order).catch((err) => {
+        console.error(`[services/postgresql/orderService] hq_events log failed for order ${id}:`, err.message);
+      });
     }
     // Production Switch — Stage 8: см. cancelByCustomer выше — тот же
     // fire-and-forget post-commit принцип, per-order внутри этого свипа.
     if (changed && refundRow) scheduleRefundProcessing(refundRow.id);
   }
+}
+
+// Минуты — округлены вверх до целого (RESTAURANT_RESPONSE_WINDOW_SEC = 300 =
+// ровно 5 минут, docs/HQ-PRODUCT-SPEC.md; Math.round здесь на случай, если константа когда-
+// либо станет не кратной 60 секундам — текст события не должен показывать
+// дробные минуты).
+function logOrderMissedEvent(order) {
+  const eventLogService = require('../hq/eventLogService'); // ленивый require — см. обоснование лениво импортируемых hq-модулей выше в файле
+  const minutes = Math.round(RESTAURANT_RESPONSE_WINDOW_SEC / 60);
+  const minutesLabel = `${minutes} ${pluralizeMinutes(minutes)}`;
+  return eventLogService.createEvent({
+    category: 'order_missed',
+    restaurantId: order.restaurant_id,
+    restaurantName: order.restaurant_name,
+    orderId: order.id,
+    orderPublicCode: order.public_code,
+    message: `Заказ ${order.public_code} не принят за ${minutesLabel}. Заказ автоматически отменён.`,
+  });
+}
+
+function pluralizeMinutes(n) {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return 'минуту';
+  if ([2, 3, 4].includes(mod10) && ![12, 13, 14].includes(mod100)) return 'минуты';
+  return 'минут';
 }
 
 // ---------------------------------------------------------------------------
@@ -1943,12 +2045,20 @@ function toPublicOrderDTO(order) {
   const {
     public_code, status, status_updated_at, items_total,
     estimated_ready_minutes, restaurant_phone, fulfillment_type, rating,
-    latest_refund_status, payment_expires_at,
+    latest_refund_status, payment_expires_at, preparation_deadline,
   } = order;
   return {
     public_code, status, status_updated_at, items_total,
     estimated_ready_minutes, restaurant_phone, fulfillment_type, rating,
     refund_status: toPublicRefundStatus(latest_refund_status),
+    // Неизменяемый серверный срок готовности (docs/HQ-PRODUCT-SPEC.md,
+    // «Таймер приготовления») — тот же ISO-timestamp на каждом poll и после
+    // любого refresh; клиент считает остаток ОТ НЕГО и никогда не создаёт
+    // собственный дедлайн. NULL, пока заказ не готовится и после передачи
+    // курьеру — тогда таймер просто не показывается.
+    preparation_deadline: preparation_deadline
+      ? new Date(preparation_deadline).toISOString()
+      : null,
     // Stage 11A follow-up: неизменяемый серверный срок текущей попытки
     // оплаты (payment_presentations.expires_at, см. LATEST_PAYMENT_
     // EXPIRES_AT_SUBQUERY) — тот же ISO-timestamp на каждом poll/refresh,
@@ -2739,17 +2849,57 @@ async function sweepStuckRefunds({ limit = REFUND_SWEEP_BATCH_LIMIT } = {}) {
 // conditional/безусловные UPDATE, не требуют db.transaction() (нет
 // многошаговой атомарности, которую нужно защищать — тот же вывод, что и для
 // остальных "класса 1" операций в concurrency-матрице).
+// Человеческая длительность пресета для текста события/сообщения бота.
+const PAUSE_PRESET_LABELS = { short: '33 минуты', medium: '3 часа', long: '11 часов' };
+
+// HH:MM в часовом поясе проекта — то же фиксированное смещение, что и во
+// всём остальном коде (Europe/Moscow, без DST); локальный TZ процесса не
+// участвует.
+function formatProjectTime(date) {
+  const local = new Date(new Date(date).getTime() + 180 * 60 * 1000);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(local.getUTCHours())}:${pad(local.getUTCMinutes())}`;
+}
+
 async function pauseRestaurant(restaurantId, presetKey) {
   const minutes = PAUSE_PRESETS_MIN[presetKey];
   if (!minutes) throw new Error(`неизвестный пресет перерыва: ${presetKey}`);
   const rows = await db.query(`SELECT NOW() + ($1 || ' minutes')::interval AS until`, [minutes]);
   const until = rows[0].until;
   await db.execute('UPDATE restaurants SET is_open = 0, paused_until = $1 WHERE id = $2', [until, restaurantId]);
+  // HQ «Центр событий» — важное управленческое событие, не ошибка
+  // (docs/HQ-PRODUCT-SPEC.md, раздел «Пауза ресторана через Telegram»).
+  logPauseEvent(restaurantId, `Ресторан взял перерыв на ${PAUSE_PRESET_LABELS[presetKey] || `${minutes} мин`}.\nПриём новых заказов приостановлен до ${formatProjectTime(until)}.`)
+    .catch((err) => console.error(`[services/postgresql/orderService] hq_events log failed (pause ${restaurantId}):`, err.message));
   return until;
 }
 
 async function resumeRestaurant(restaurantId) {
-  await db.execute('UPDATE restaurants SET is_open = 1, paused_until = NULL WHERE id = $1', [restaurantId]);
+  const updated = await db.execute(
+    'UPDATE restaurants SET is_open = 1, paused_until = NULL WHERE id = $1 AND paused_until IS NOT NULL',
+    [restaurantId],
+  );
+  // Событие только на РЕАЛЬНОМ снятии перерыва: /open на ресторане, который
+  // и так открыт, — не событие (спецификация: без информационного шума).
+  if (updated.rowCount === 1) {
+    logPauseEvent(restaurantId, 'Перерыв завершён.\nПриём заказов возобновлён.')
+      .catch((err) => console.error(`[services/postgresql/orderService] hq_events log failed (resume ${restaurantId}):`, err.message));
+  } else {
+    // Ресторан не был на паузе — сохраняем прежнее безусловное поведение
+    // (открыть закрытый вручную ресторан командой /open).
+    await db.execute('UPDATE restaurants SET is_open = 1, paused_until = NULL WHERE id = $1', [restaurantId]);
+  }
+}
+
+async function logPauseEvent(restaurantId, message) {
+  const eventLogService = require('../hq/eventLogService');
+  const rows = await db.query('SELECT name FROM restaurants WHERE id = $1', [restaurantId]);
+  return eventLogService.createEvent({
+    category: 'restaurant_pause',
+    restaurantId,
+    restaurantName: rows[0] ? rows[0].name : null,
+    message,
+  });
 }
 
 // ---------------------------------------------------------------------------

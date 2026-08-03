@@ -514,8 +514,19 @@ test('G1: payout readiness проходит все стадии missing_legal ->
     assert.equal(payout.commissionBps, 700);
 
     // Finance-страница отражает ту же готовность.
+    // docs/HQ-PRODUCT-SPEC.md (раздел «Финансы»): таблица позиций ресторанов
+    // заменена блоком «Статус выплат» с фирменными статусами.
+    //
+    // ПРЕЖНЯЯ ПРОВЕРКА ЗДЕСЬ БЫЛА ЛОЖНОПОЛОЖИТЕЛЬНОЙ: она искала подстроку
+    // 'Готов', которая совпадала с заголовком КОЛОНКИ «Готовность» и
+    // проходила независимо от реального статуса ресторана (и независимо от
+    // того, что страница вообще показывает данные другой тестовой базы).
+    // Реальная готовность уже проверена выше — четырьмя стадиями
+    // getRestaurantPayoutDetails(). Здесь остаётся структурная проверка
+    // того, что экран «Финансы» рендерится и содержит рабочий блок.
     const financePage = await getPage(base, cookie, '/hq/finance');
-    assert.ok(financePage.html.includes('Готов'));
+    assert.ok(financePage.html.includes('Статус выплат'));
+    assert.ok(financePage.html.includes('Статус выплат'));
     assert.ok(!financePage.html.includes('Выплатить'));
   } finally {
     await stopApp(instance);

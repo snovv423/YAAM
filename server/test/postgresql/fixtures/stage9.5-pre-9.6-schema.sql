@@ -1511,3 +1511,72 @@ ALTER TABLE restaurant_payouts ADD CONSTRAINT restaurant_payouts_status_check
   CHECK (status IN ('prepared', 'processing', 'unknown', 'succeeded', 'blocked'));
 
 COMMIT;
+
+-- ---------------------------------------------------------------------------
+-- Аддитивные части ТЕКУЩЕЙ схемы, не относящиеся к миграции Stage 9.5 -> 9.6
+-- (её и проверяет этот фикстурный прогон). В реальном деплое schema.sql
+-- применяется целиком ДО запуска нового кода — здесь воспроизводится тот же
+-- порядок ровно для тех колонок, которые нужны сервисному слою, создающему
+-- фикстурные данные до применения новой схемы.
+-- ---------------------------------------------------------------------------
+ALTER TABLE settlement_restaurant_lines ADD COLUMN IF NOT EXISTS restaurant_name_snapshot TEXT;
+ALTER TABLE settlement_restaurant_lines ADD COLUMN IF NOT EXISTS legal_name_snapshot TEXT;
+ALTER TABLE settlement_restaurant_lines ADD COLUMN IF NOT EXISTS legal_form_snapshot TEXT;
+ALTER TABLE settlement_restaurant_lines ADD COLUMN IF NOT EXISTS inn_snapshot TEXT;
+ALTER TABLE settlement_restaurant_lines ADD COLUMN IF NOT EXISTS ogrn_snapshot TEXT;
+ALTER TABLE settlement_restaurant_lines ADD COLUMN IF NOT EXISTS legal_address_snapshot TEXT;
+ALTER TABLE settlement_restaurant_lines ADD COLUMN IF NOT EXISTS contract_signed_at_snapshot DATE;
+ALTER TABLE settlement_restaurant_lines ADD COLUMN IF NOT EXISTS yaam_legal_name_snapshot TEXT;
+ALTER TABLE settlement_restaurant_lines ADD COLUMN IF NOT EXISTS yaam_inn_snapshot TEXT;
+ALTER TABLE settlement_restaurant_lines ADD COLUMN IF NOT EXISTS yaam_kpp_snapshot TEXT;
+
+-- Аддитивные колонки сторно позднего возврата (аудит Stage 13) — к тестируемой
+-- здесь миграции статусов выплат отношения не имеют, но нужны сервисному коду,
+-- создающему фикстурные данные. В реальном деплое schema.sql применяется
+-- целиком ДО запуска нового кода — воспроизводим тот же порядок.
+ALTER TABLE settlement_restaurant_lines
+  ADD COLUMN IF NOT EXISTS refund_adjustment_restaurant_amount INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE settlement_restaurant_lines
+  ADD COLUMN IF NOT EXISTS refund_adjustment_commission INTEGER NOT NULL DEFAULT 0;
+
+-- Stage 13: колонки переноса долга. К тестируемой здесь миграции статусов
+-- выплат отношения не имеют, но нужны сервисному коду, создающему фикстурные
+-- данные (в реальном деплое schema.sql применяется целиком ДО нового кода).
+ALTER TABLE settlement_restaurant_lines
+  ADD COLUMN IF NOT EXISTS carry_forward_applied INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE settlement_restaurant_lines
+  ADD COLUMN IF NOT EXISTS carry_forward_remaining INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE IF NOT EXISTS restaurant_settlement_balances (
+  restaurant_id INTEGER PRIMARY KEY REFERENCES restaurants(id),
+  debt_amount INTEGER NOT NULL DEFAULT 0 CHECK (debt_amount >= 0),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS restaurant_balance_entries (
+  id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  restaurant_id INTEGER NOT NULL REFERENCES restaurants(id),
+  settlement_period_id INTEGER NOT NULL REFERENCES settlement_periods(id),
+  kind TEXT NOT NULL CHECK (kind IN ('debt_accrued', 'debt_settled')),
+  amount INTEGER NOT NULL CHECK (amount > 0),
+  balance_after INTEGER NOT NULL CHECK (balance_after >= 0),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (restaurant_id, settlement_period_id, kind)
+);
+
+-- Stage 14: юр.данные YAAM и снимок в строке расчёта. К тестируемой здесь
+-- миграции статусов выплат отношения не имеют, но нужны сервисному коду.
+CREATE TABLE IF NOT EXISTS yaam_legal_details (
+  id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+  legal_name TEXT NOT NULL,
+  entrepreneur_name TEXT NOT NULL,
+  inn TEXT NOT NULL,
+  ogrnip TEXT NOT NULL,
+  registration_address TEXT NOT NULL,
+  contact_email TEXT NOT NULL DEFAULT '',
+  contact_phone TEXT NOT NULL DEFAULT '',
+  registration_date DATE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+ALTER TABLE settlement_restaurant_lines ADD COLUMN IF NOT EXISTS yaam_ogrnip_snapshot TEXT;
+ALTER TABLE settlement_restaurant_lines ADD COLUMN IF NOT EXISTS yaam_address_snapshot TEXT;
+ALTER TABLE settlement_restaurant_lines ADD COLUMN IF NOT EXISTS yaam_entrepreneur_name_snapshot TEXT;

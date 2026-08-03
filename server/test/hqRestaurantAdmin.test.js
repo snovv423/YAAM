@@ -82,9 +82,12 @@ test('parseRestaurantInput: нечисловая минимальная сумм
   assert.throws(() => parseRestaurantInput({ name: 'Кафе', cities: 'Грозный', min_order: 'много' }), ValidationError);
 });
 
-test('parseRestaurantInput: валидный ввод нормализуется (trim, города -> JSON-массив, пустой min_order -> 0)', () => {
+// docs/HQ-PRODUCT-SPEC.md: города больше не вводятся строкой через запятую —
+// они приходят набором чекбоксов из закрытого списка SUPPORTED_CITIES
+// (массив либо одиночная строка, если выбран ровно один город).
+test('parseRestaurantInput: валидный ввод нормализуется (trim, выбранные города -> JSON-массив, пустой min_order -> 0)', () => {
   const result = parseRestaurantInput({
-    name: '  Тест Кафе  ', cities: ' Грозный , Аргун ,, ', cuisine: '  кавказская ', description: '', address: '', hours: '', phone: '',
+    name: '  Тест Кафе  ', cities: ['Грозный', 'Аргун'], cuisine: '  кавказская ', description: '', address: '', hours: '', phone: '',
   });
   assert.equal(result.name, 'Тест Кафе');
   assert.deepEqual(JSON.parse(result.cities), ['Грозный', 'Аргун']);

@@ -1,0 +1,98 @@
+# YAAM — Nginx для STAGING backend (Stage 15). ШАБЛОН, не применялся ни к
+# одному реальному серверу и не выпускал ни одного сертификата.
+#
+# ДОМЕН НЕ ЗАШИТ. Перед применением подставьте:
+#   envsubst '${YAAM_BACKEND_DOMAIN} ${YAAM_FRONTEND_ORIGIN} ${YAAM_APP_PORT}' \
+#     < nginx-yaam-staging.conf.template > /etc/nginx/sites-available/yaam-staging
+# Выдуманного домена здесь нет намеренно: конфиг с чужим доменом,
+# применённый по невнимательности, увёл бы трафик не туда.
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${YAAM_BACKEND_DOMAIN};
+
+    # ACME-challenge для Let's Encrypt — единственное, что доступно по http.
+    location /.well-known/acme-challenge/ { root /var/www/certbot; }
+    location / { return 301 https://$host$request_uri; }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name ${YAAM_BACKEND_DOMAIN};
+
+    ssl_certificate     /etc/letsencrypt/live/${YAAM_BACKEND_DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${YAAM_BACKEND_DOMAIN}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+
+    # --- Security headers --------------------------------------------------
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "no-referrer" always;
+    # Staging не должен попадать в поисковую выдачу.
+    add_header X-Robots-Tag "noindex, nofollow" always;
+
+    # Листинг каталогов выключен явно, а не «по умолчанию».
+    autoindex off;
+    server_tokens off;
+
+    # --- Общие лимиты ------------------------------------------------------
+    # 1 МБ достаточно для любого запроса YAAM: заказы небольшие, файлы сюда
+    # не загружаются. Больший лимит — бесплатный вектор нагрузки.
+    client_max_body_size 1m;
+    client_body_timeout 15s;
+    client_header_timeout 15s;
+
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    # ВАЖНО: $proxy_add_x_forwarded_for ДОПИСЫВАЕТ реальный IP к тому, что
+    # прислал клиент. Приложение доверяет только последнему звену
+    # (TRUST_PROXY=loopback), поэтому подделать свой IP заголовком нельзя.
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_connect_timeout 5s;
+    proxy_send_timeout 30s;
+    proxy_read_timeout 30s;
+
+    # --- Webhook платёжного провайдера -------------------------------------
+    # Отдельный location: тело читается сырым (подпись/каноническая
+    # перепроверка), буферизация не нужна, лимит жёстче общего.
+    location = /api/webhooks/payment {
+        client_max_body_size 64k;
+        proxy_request_buffering off;
+        proxy_pass http://127.0.0.1:${YAAM_APP_PORT};
+    }
+
+    # --- Capability-ссылки на расчётные документы --------------------------
+    # Токен находится В ПУТИ, поэтому access_log для этого location выключен:
+    # иначе секрет оседал бы в логах Nginx в открытом виде.
+    location /d/ {
+        access_log off;
+        add_header Cache-Control "no-store, private" always;
+        add_header X-Robots-Tag "noindex, nofollow" always;
+        proxy_pass http://127.0.0.1:${YAAM_APP_PORT};
+    }
+
+    # --- HQ ----------------------------------------------------------------
+    location /hq/ {
+        proxy_pass http://127.0.0.1:${YAAM_APP_PORT};
+    }
+
+    # --- Health ------------------------------------------------------------
+    # Наружу не публикуется: проверки выполняет сам сервер по localhost.
+    location /health/ {
+        allow 127.0.0.1;
+        deny all;
+        proxy_pass http://127.0.0.1:${YAAM_APP_PORT};
+    }
+
+    # --- Всё остальное -----------------------------------------------------
+    location / {
+        proxy_pass http://127.0.0.1:${YAAM_APP_PORT};
+    }
+}

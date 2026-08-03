@@ -7,6 +7,9 @@ const { esc } = require('./layout');
 const lifecycle = require('../services/hq/restaurantLifecycle');
 const { renderPhotoManager } = require('./photosViews');
 const financeViews = require('./restaurantFinanceViews');
+const { PROJECT_TIMEZONE_OFFSET_MINUTES } = require('../services/hq/dashboardMetrics');
+const { READINESS_LABELS: PAYOUT_READINESS_LABELS } = require('../services/hq/restaurantPayoutService');
+const { SUPPORTED_CITIES } = require('../services/hq/restaurantAdminService');
 
 const ORDER_STATUS_LABELS = {
   awaiting_payment: 'Ожидает оплаты',
@@ -29,23 +32,27 @@ const REFUND_STATUS_LABELS = {
   requested: 'Запрошен', processing: 'В обработке', succeeded: 'Выполнен', failed: 'Не выполнен',
 };
 
-// Stage 4.1 — единая компактная метка lifecycle-статуса (задание, раздел 6,
-// вариант "компактная итоговая метка" — выбран вместо двух раздельных строк
-// "Публикация: X / Приём заказов: Y", чтобы не перегружать интерфейс, тот же
-// минимализм, что и остальной HQ). Источник истины — resolveLifecycleStatus
-// (services/hq/restaurantLifecycle.js), не повторный inline-расчёт здесь.
+// Единая компактная метка статуса (docs/HQ-PRODUCT-SPEC.md). Источник
+// истины — resolveLifecycleStatus (services/hq/restaurantLifecycle.js), не
+// повторный inline-расчёт здесь. Названия приведены к продуктовым терминам
+// спецификации (раздел «Управление рестораном»): скрытый черновик = «Скрыт»,
+// ручное закрытие владельцем = «Приостановлен»; «Перерыв до HH:MM» —
+// отдельное состояние, которое ресторан берёт САМ через Telegram, и его
+// нельзя путать с админской приостановкой.
 function statusBadge(r) {
   const status = lifecycle.resolveLifecycleStatus(r);
-  if (status === 'draft') return '<span class="badge paused">Черновик</span>';
+  if (status === 'draft') return '<span class="badge paused">Скрыт</span>';
   if (status === 'archived') return '<span class="badge closed">В архиве</span>';
   if (status === 'open') return '<span class="badge open">Открыт</span>';
   if (status === 'paused') {
     const until = r.paused_until instanceof Date ? r.paused_until : new Date(r.paused_until);
-    const hh = String(until.getHours()).padStart(2, '0');
-    const mm = String(until.getMinutes()).padStart(2, '0');
-    return `<span class="badge paused">Пауза до ${hh}:${mm}</span>`;
+    const offsetMs = PROJECT_TIMEZONE_OFFSET_MINUTES * 60 * 1000;
+    const local = new Date(until.getTime() + offsetMs);
+    const hh = String(local.getUTCHours()).padStart(2, '0');
+    const mm = String(local.getUTCMinutes()).padStart(2, '0');
+    return `<span class="badge paused">Перерыв до ${hh}:${mm}</span>`;
   }
-  return '<span class="badge closed">Закрыт</span>';
+  return '<span class="badge closed">Приостановлен</span>';
 }
 
 function formatDateTime(date) {
@@ -111,67 +118,38 @@ function renderPagination({ page, totalPages, baseUrl, query }) {
 // Список ресторанов
 // ===========================================================================
 
-function renderRestaurantsList({ restaurants, page, totalPages, total, filters, linkBasePath }) {
-  const query = { search: filters.search, city: filters.city, status: filters.status, sort: filters.sort };
-  const rows = restaurants.map((r) => `
-    <tr>
-      <td data-label="Название"><a href="${linkBasePath}/restaurants/${r.id}">${esc(r.name)}</a></td>
-      <td data-label="Город">${esc(parseCities(r.cities).join(', '))}</td>
-      <td data-label="Кухня">${esc(r.cuisine || '—')}</td>
-      <td data-label="Статус">${statusBadge(r)}</td>
-      <td data-label="Рейтинг">${r.rating_count > 0 ? `${stars(Number(r.rating).toFixed(1))} · ${r.rating_count}` : '—'}</td>
-      <td data-label="Доставлено">${r.delivered_count}</td>
-      <td data-label="Активных">${r.active_count}</td>
-      <td data-label="Telegram">${r.telegram_chat_id ? 'Подключён' : 'Не подключён'}</td>
-      <td data-label=""><a class="btn ghost" href="${linkBasePath}/restaurants/${r.id}">Открыть</a></td>
-    </tr>`).join('');
-
-  const emptyMessage = total === 0 && !filters.search && !filters.city && !filters.status
-    ? 'Ресторанов пока нет.'
-    : 'По заданным фильтрам ничего не найдено.';
-
+// docs/HQ-PRODUCT-SPEC.md, раздел «Список ресторанов»: без поиска, фильтров,
+// сортировки и пагинации (10-20 ресторанов — искать нечего), без Telegram/
+// выплат/юридических данных на карточке. Только то, по чему владелец
+// узнаёт ресторан: название, города, кухня, статус, рейтинг, «Открыть».
+function renderRestaurantCard(r, linkBasePath) {
+  const cities = parseCities(r.cities);
+  const cityChips = cities.length
+    ? cities.map((c) => `<span class="city-chip">${esc(c)}</span>`).join('')
+    : '<span class="city-chip muted">Город не указан</span>';
+  const rating = r.rating_count > 0
+    ? `${stars(Number(r.rating).toFixed(1))} · ${r.rating_count}`
+    : 'Оценок нет';
   return `
-    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px">
-      <h1 style="margin:0">Рестораны</h1>
-      <a class="btn" href="${linkBasePath}/restaurants/new">+ Добавить ресторан</a>
-    </div>
-
-    <form class="filters panel" method="get" action="${linkBasePath}/restaurants">
-      <div class="field"><label for="lf-search">Поиск по названию</label><input id="lf-search" type="text" name="search" value="${esc(filters.search || '')}" placeholder="Название..."></div>
-      <div class="field"><label for="lf-city">Город</label><input id="lf-city" type="text" name="city" value="${esc(filters.city || '')}" placeholder="Грозный"></div>
-      <div class="field">
-        <label for="lf-status">Статус</label>
-        <select id="lf-status" name="status">
-          <option value="">Все</option>
-          <option value="draft" ${filters.status === 'draft' ? 'selected' : ''}>Черновики</option>
-          <option value="published" ${filters.status === 'published' ? 'selected' : ''}>Опубликованные</option>
-          <option value="open" ${filters.status === 'open' ? 'selected' : ''}>Открыт</option>
-          <option value="closed" ${filters.status === 'closed' ? 'selected' : ''}>Закрыт</option>
-          <option value="paused" ${filters.status === 'paused' ? 'selected' : ''}>Пауза</option>
-          <option value="archived" ${filters.status === 'archived' ? 'selected' : ''}>Архивированные</option>
-        </select>
+    <div class="rest-card">
+      <div class="rest-card-main">
+        <div class="rest-card-title">${esc(r.name)}</div>
+        <div class="rest-card-cities">${cityChips}</div>
+        <div class="rest-card-meta">${esc(r.cuisine || 'Кухня не указана')} · ${statusBadge(r)} · ${esc(rating)}</div>
       </div>
-      <div class="field">
-        <label for="lf-sort">Сортировка</label>
-        <select id="lf-sort" name="sort">
-          <option value="name" ${filters.sort === 'name' ? 'selected' : ''}>По названию</option>
-          <option value="orders" ${filters.sort === 'orders' ? 'selected' : ''}>По доставленным заказам</option>
-          <option value="rating" ${filters.sort === 'rating' ? 'selected' : ''}>По рейтингу</option>
-          <option value="created" ${filters.sort === 'created' ? 'selected' : ''}>По дате добавления</option>
-        </select>
-      </div>
-      <button type="submit">Применить</button>
-    </form>
+      <a class="btn ghost compact" href="${linkBasePath}/restaurants/${r.id}">Открыть</a>
+    </div>`;
+}
 
-    ${total === 0 ? `<div class="panel"><div class="empty-state">${esc(emptyMessage)}</div></div>` : `
-    <div class="panel">
-      <table class="responsive">
-        <thead><tr><th>Название</th><th>Город</th><th>Кухня</th><th>Статус</th><th>Рейтинг</th><th>Доставлено</th><th>Активных</th><th>Telegram</th><th></th></tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
+function renderRestaurantsList({ restaurants, linkBasePath }) {
+  return `
+    <h1>Рестораны</h1>
+    <div class="add-restaurant-row">
+      <a class="btn compact" href="${linkBasePath}/restaurants/new">+ Добавить ресторан</a>
     </div>
-    ${renderPagination({ page, totalPages, baseUrl: `${linkBasePath}/restaurants`, query })}
-    `}
+    ${restaurants.length
+      ? `<div class="rest-list">${restaurants.map((r) => renderRestaurantCard(r, linkBasePath)).join('')}</div>`
+      : '<div class="panel"><div class="empty-state">Ресторанов пока нет.</div></div>'}
   `;
 }
 
@@ -188,8 +166,11 @@ function renderCreateForm({ values, error, linkBasePath, csrfToken }) {
         <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
         <label for="rf-name">Название</label>
         <input id="rf-name" name="name" type="text" value="${esc(v.name)}" required autofocus autocomplete="off">
-        <label for="rf-cities">Города (через запятую)</label>
-        <input id="rf-cities" name="cities" type="text" value="${esc(v.cities)}" placeholder="Грозный, Аргун" required autocomplete="off">
+        <label>Города</label>
+        <div class="city-checks">${SUPPORTED_CITIES.map((city, index) => {
+          const selected = Array.isArray(v.cities) ? v.cities.includes(city) : false;
+          return `<label class="city-check"><input type="checkbox" name="cities" value="${esc(city)}" ${selected ? 'checked' : ''} id="rf-city-${index}"><span>${esc(city)}</span></label>`;
+        }).join('')}</div>
         <label for="rf-cuisine">Кухня</label>
         <input id="rf-cuisine" name="cuisine" type="text" value="${esc(v.cuisine)}" placeholder="Кавказская" autocomplete="off">
         <label for="rf-description">Краткое описание</label>
@@ -247,37 +228,18 @@ function simpleActionForm({ action, csrfToken, label, cls, confirm: confirmMsg }
 // без единого блюда (задание Stage 5A, раздел 12) — предупреждение целиком в
 // client-side confirm(), тем же паттерном, что уже использует архив в этом
 // же файле (никакого отдельного server-rendered экрана подтверждения).
-function renderRestaurantHeader({ restaurant: r, csrfToken, linkBasePath, menuItemsCount = 0, payoutReadiness = null }) {
-  const status = lifecycle.resolveLifecycleStatus(r);
-  const base = `${linkBasePath}/restaurants/${r.id}`;
-  const actions = [];
-
-  if (status === 'draft') {
-    const publishConfirm = menuItemsCount === 0
-      ? `У ресторана «${r.name}» пока нет блюд. Опубликовать всё равно?`
-      : `Опубликовать «${r.name}»? Ресторан станет виден клиентам.`;
-    actions.push(simpleActionForm({ action: `${base}/publish`, csrfToken, label: 'Опубликовать', confirm: publishConfirm }));
-  } else if (status !== 'archived') {
-    if (status === 'closed') {
-      actions.push(simpleActionForm({ action: `${base}/open`, csrfToken, label: 'Открыть' }));
-    } else if (status === 'open') {
-      actions.push(simpleActionForm({ action: `${base}/close`, csrfToken, label: 'Закрыть', cls: 'ghost', confirm: `Закрыть «${r.name}» для новых заказов?` }));
-    }
-    // status === 'paused' — намеренно без Открыть/Закрыть: пока ресторан на
-    // паузе через Telegram, оба действия структурно отклонены guard'ами
-    // (assertCanOpen/assertCanClose требуют "не на паузе") — показывать их
-    // здесь означало бы кнопку, которая всегда ошибается; статус "Пауза до
-    // HH:MM" уже виден в statusBadge выше.
-    actions.push(simpleActionForm({ action: `${base}/unpublish`, csrfToken, label: 'Скрыть', cls: 'ghost', confirm: `Скрыть «${r.name}»? Ресторан исчезнет из публичного каталога.` }));
-  }
-
+// docs/HQ-PRODUCT-SPEC.md, раздел «Заголовок ресторана»: только название,
+// города, статус и рейтинг. Telegram, готовность к выплатам, юридические и
+// банковские данные — на своих внутренних экранах, не в общей шапке.
+// Действия приостановить/скрыть/архивировать переехали в «Настройки» →
+// «Управление рестораном» и больше не торчат над каждой вкладкой.
+function renderRestaurantHeader({ restaurant: r }) {
+  const cities = parseCities(r.cities);
+  const rating = r.rating_count > 0 ? `${stars(Number(r.rating).toFixed(1))} (${r.rating_count})` : 'Оценок нет';
   return `
-    <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:14px;margin-bottom:16px">
-      <div>
-        <h1 style="margin-bottom:6px">${esc(r.name)}</h1>
-        <div style="color:var(--txt2);font-size:13px">${esc(parseCities(r.cities).join(', '))} · ${statusBadge(r)} · ${r.rating_count > 0 ? `${stars(Number(r.rating).toFixed(1))} (${r.rating_count})` : 'Оценок нет'} · Telegram: ${r.telegram_chat_id ? 'подключён' : 'не подключён'}${payoutReadiness ? ` · ${financeViews.renderPayoutReadinessInline(payoutReadiness)}` : ''}</div>
-      </div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap">${actions.join(' ')}</div>
+    <div class="rest-header">
+      <h1>${esc(r.name)}</h1>
+      <div class="rest-header-meta">${esc(cities.join(' · ') || 'Город не указан')} · ${statusBadge(r)} · ${esc(rating)}</div>
     </div>
   `;
 }
@@ -309,38 +271,113 @@ function renderTabs({ restaurantId, active, linkBasePath }) {
 // Обзор
 // ===========================================================================
 
-function renderOverviewTab({ restaurant, overview, linkBasePath }) {
-  const activeRows = [
-    ['awaiting_payment', 'Ожидают оплаты', overview.active.awaitingPayment],
-    ['awaiting_restaurant', 'Ожидают ресторан', overview.active.awaitingRestaurant],
-    ['accepted', 'Приняты', overview.active.accepted],
-    ['preparing', 'Готовятся', overview.active.preparing],
-    ['courier', 'В доставке', overview.active.courier],
-  ];
-  const totalActive = activeRows.reduce((sum, [, , v]) => sum + v, 0);
+// Дата расчётного периода в человеческом виде: "21.07.2026–27.07.2026".
+// period_from/period_to хранятся как DATE — драйвер pg отдаёт их JS-датой в
+// ЛОКАЛЬНОЙ таймзоне процесса, поэтому читаем именно локальные компоненты
+// (тот же приём, что уже применён к settlement-датам после фикса
+// timezone-стабильности), а не toISOString(), который сдвинул бы дату.
+function formatSettlementDate(value) {
+  if (!value) return '';
+  const d = value instanceof Date ? value : new Date(value);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${d.getFullYear()}`;
+}
+
+function formatSettlementRange(from, to) {
+  return `${formatSettlementDate(from)}–${formatSettlementDate(to)}`;
+}
+
+const WEEKDAY_NAMES = ['Воскресенье', 'Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота'];
+
+function pluralDays(n) {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return 'день';
+  if ([2, 3, 4].includes(mod10) && ![12, 13, 14].includes(mod100)) return 'дня';
+  return 'дней';
+}
+
+// docs/HQ-PRODUCT-SPEC.md, раздел «Обзор ресторана → Выплаты». Одно
+// человеческое состояние, которое ВЫБРАЛ СЕРВЕР (services/hq/
+// restaurantPayoutStateService.js) — шаблон только оформляет, не решает.
+function renderPayoutStateBlock({ restaurant, state, csrfToken, linkBasePath }) {
+  const base = `${linkBasePath}/restaurants/${restaurant.id}`;
+  let body;
+
+  if (state.kind === 'scheduled') {
+    const offsetMs = PROJECT_TIMEZONE_OFFSET_MINUTES * 60 * 1000;
+    const local = new Date(state.at.getTime() + offsetMs);
+    const weekday = WEEKDAY_NAMES[local.getUTCDay()];
+    const hh = String(local.getUTCHours()).padStart(2, '0');
+    const when = state.daysLeft === 0 ? 'Сегодня' : `Через ${state.daysLeft} ${pluralDays(state.daysLeft)}`;
+    body = `
+      <div class="payout-line">${esc(when)}</div>
+      <div class="payout-sub">${esc(weekday)} · ${hh}:00</div>`;
+  } else if (state.kind === 'ready') {
+    const confirmText = `Подготовить выплату «${restaurant.name}» на ${state.amount} ₽ за период ${formatSettlementRange(state.periodFrom, state.periodTo)}?`;
+    body = `
+      <div class="payout-line">Готово к выплате</div>
+      <div class="payout-amount">${money(state.amount)}</div>
+      <div class="payout-sub">Период: ${esc(formatSettlementRange(state.periodFrom, state.periodTo))}</div>
+      <form method="post" action="${base}/payout" onsubmit="return confirm('${esc(confirmText)}')" style="margin-top:12px">
+        <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
+        <button type="submit" class="compact">Подготовить выплату</button>
+      </form>`;
+  } else if (state.kind === 'not_ready') {
+    const reason = PAYOUT_READINESS_LABELS[state.readiness] || 'Реквизиты требуют проверки';
+    body = `
+      <div class="payout-line">Не готово к выплате</div>
+      <div class="payout-sub">${esc(reason)}</div>`;
+  } else if (state.kind === 'processing') {
+    body = `
+      <div class="payout-line">Выплата обрабатывается</div>
+      <div class="payout-amount">${money(state.amount)}</div>
+      <div class="payout-sub">Период: ${esc(formatSettlementRange(state.periodFrom, state.periodTo))}</div>`;
+  } else if (state.kind === 'blocked') {
+    body = `
+      <div class="payout-line">Выплата не прошла</div>
+      <div class="payout-amount">${money(state.amount)}</div>
+      <div class="payout-sub">${esc(state.reason || 'Требует решения')}</div>`;
+  } else {
+    body = `
+      <div class="payout-line">Выплачено</div>
+      <div class="payout-amount">${money(state.amount)}</div>
+      <div class="payout-sub">Период: ${esc(formatSettlementRange(state.periodFrom, state.periodTo))}</div>`;
+  }
 
   return `
-    <div id="hq-live-overview" data-endpoint="${linkBasePath}/restaurants/${restaurant.id}/overview.json">
-      <div class="metric-grid">
-        <div class="metric"><div class="value" data-metric="ordersToday">${overview.ordersToday}</div><div class="label">Заказов сегодня</div></div>
-        <div class="metric"><div class="value" data-metric="deliveredToday">${overview.deliveredToday}</div><div class="label">Доставлено сегодня</div></div>
-        <div class="metric"><div class="value" data-metric="turnoverToday">${money(overview.turnoverToday)}</div><div class="label">Оборот сегодня</div></div>
-        <div class="metric"><div class="value" data-metric="avgCheckToday">${overview.avgCheckToday === null ? '—' : money(overview.avgCheckToday)}</div><div class="label">Средний чек сегодня</div></div>
-        <div class="metric"><div class="value" data-metric="totalDelivered">${overview.totalDelivered}</div><div class="label">Всего доставлено</div></div>
-      </div>
+    <div class="panel payout-block">
+      <div class="panel-title">Выплаты</div>
+      ${body}
+    </div>`;
+}
 
-      <div class="panel">
-        <div style="font-weight:700;margin-bottom:14px">Активные заказы</div>
-        ${totalActive === 0 ? '<div class="empty-state">Активных заказов нет.</div>' : `
-        <div class="metric-grid">
-          ${activeRows.map(([key, label, value]) => `
-            <div class="metric">
-              <div class="value" data-metric="active.${key.replace(/_([a-z])/g, (_, c) => c.toUpperCase())}">${value}</div>
-              <div class="label">${esc(label)}</div>
-            </div>`).join('')}
-        </div>`}
+// docs/HQ-PRODUCT-SPEC.md, раздел «Обзор ресторана». Один широкий блок
+// «Заказы» (сегодня / за всё время, цифры под подписями, без внутренних
+// рамок), два компактных финансовых показателя, блок «Выплаты». Рейтинг
+// отдельной карточкой не дублируется — он уже в шапке.
+function renderOverviewTab({ restaurant, overview, payoutState, csrfToken, linkBasePath }) {
+  return `
+    <div class="panel orders-block">
+      <div class="panel-title">Заказы</div>
+      <div class="orders-split">
+        <div class="orders-part">
+          <div class="orders-label">Сегодня</div>
+          <div class="orders-value">${overview.ordersToday}</div>
+        </div>
+        <div class="orders-part">
+          <div class="orders-label">За всё время</div>
+          <div class="orders-value">${overview.ordersAllTime}</div>
+        </div>
       </div>
     </div>
+
+    <div class="metric-grid compact">
+      <div class="metric"><div class="value">${money(overview.turnoverToday)}</div><div class="label">Оборот сегодня</div></div>
+      <div class="metric"><div class="value">${money(overview.commissionToday)}</div><div class="label">Доход YAAM сегодня</div></div>
+    </div>
+
+    ${renderPayoutStateBlock({ restaurant, state: payoutState, csrfToken, linkBasePath })}
   `;
 }
 
@@ -348,90 +385,103 @@ function renderOverviewTab({ restaurant, overview, linkBasePath }) {
 // Заказы
 // ===========================================================================
 
+// Точное локальное время (Europe/Moscow) — спецификация требует «дата и
+// точное время создания». Читаем UTC-компоненты сдвинутой копии, а не
+// локальные геттеры процесса: сервер может стоять в любом TZ.
+function formatMoscowDateTime(date) {
+  if (!date) return '';
+  const d = date instanceof Date ? date : new Date(date);
+  const local = new Date(d.getTime() + PROJECT_TIMEZONE_OFFSET_MINUTES * 60 * 1000);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(local.getUTCDate())}.${pad(local.getUTCMonth() + 1)}.${local.getUTCFullYear()} · ${pad(local.getUTCHours())}:${pad(local.getUTCMinutes())}:${pad(local.getUTCSeconds())}`;
+}
+
+// docs/HQ-PRODUCT-SPEC.md, раздел «Заказы ресторана»: сверху ТОЛЬКО фильтр
+// по датам (быстрый фильтр, фильтр по статусу и поиск по номеру удалены).
+// Поля и кнопка выровнены в одну сетку, на мобильном кнопка уходит на свою
+// строку и не накладывается на поля дат (см. .date-filter в layout.js).
 function renderOrdersTab({ restaurant, orders, page, totalPages, total, filters, linkBasePath }) {
-  const query = { filter: filters.filter, status: filters.status, code: filters.code, from: filters.from, to: filters.to };
+  const query = { from: filters.from, to: filters.to };
   const baseUrl = `${linkBasePath}/restaurants/${restaurant.id}/orders`;
 
   const rows = orders.map((o) => {
     const items = (o.item_names || []).slice(0, 2).join(', ') + (o.item_count > 2 ? ` +${o.item_count - 2}` : '');
-    const refund = o.refund_status ? `<div style="font-size:11px;color:var(--txt2)">Возврат: ${esc(REFUND_STATUS_LABELS[o.refund_status] || o.refund_status)}</div>` : '';
     return `
-    <tr>
-      <td data-label="Заказ"><a class="order-code" href="${baseUrl}/${o.id}">${esc(o.public_code)}</a></td>
-      <td data-label="Создан">${formatDateTime(o.created_at)}</td>
-      <td data-label="Состав">${esc(items)} (${o.item_count})</td>
-      <td data-label="Сумма">${money(o.items_total)}</td>
-      <td data-label="Статус заказа">${esc(ORDER_STATUS_LABELS[o.status] || o.status)}</td>
-      <td data-label="Оплата">${esc(PAYMENT_STATUS_LABELS[o.payment_status] || o.payment_status || '—')}${refund}</td>
-      <td data-label="Оценка">${o.rating ? stars(o.rating) : '—'}</td>
-    </tr>`;
+      <li class="dish-row">
+        <a class="dish-link" href="${baseUrl}/${o.id}">
+          <span class="dish-main">
+            <span class="dish-name">${esc(o.public_code)} · ${money(o.items_total)}</span>
+            <span class="dish-meta">${esc(formatMoscowDateTime(o.created_at))}</span>
+            <span class="dish-meta">${esc(items)} · ${esc(ORDER_STATUS_LABELS[o.status] || o.status)}${o.rating ? ` · ${stars(o.rating)}` : ''}</span>
+          </span>
+          <span class="dish-chevron" aria-hidden="true"></span>
+        </a>
+      </li>`;
   }).join('');
 
   return `
-    <form class="filters panel" method="get" action="${baseUrl}">
-      <div class="field">
-        <label for="of-filter">Быстрый фильтр</label>
-        <select id="of-filter" name="filter">
-          <option value="">Все</option>
-          <option value="active" ${filters.filter === 'active' ? 'selected' : ''}>Активные</option>
-          <option value="today" ${filters.filter === 'today' ? 'selected' : ''}>Сегодня</option>
-          <option value="delivered" ${filters.filter === 'delivered' ? 'selected' : ''}>Доставленные</option>
-          <option value="cancelled" ${filters.filter === 'cancelled' ? 'selected' : ''}>Отменённые/отклонённые/просроченные</option>
-        </select>
-      </div>
-      <div class="field">
-        <label for="of-status">Статус</label>
-        <select id="of-status" name="status">
-          <option value="">Любой</option>
-          ${Object.entries(ORDER_STATUS_LABELS).map(([key, label]) => `<option value="${key}" ${filters.status === key ? 'selected' : ''}>${esc(label)}</option>`).join('')}
-        </select>
-      </div>
-      <div class="field"><label for="of-code">Номер YAAM</label><input id="of-code" type="text" name="code" value="${esc(filters.code || '')}" placeholder="YAAM-00001"></div>
+    <form class="date-filter panel" method="get" action="${baseUrl}">
       <div class="field"><label for="of-from">С даты</label><input id="of-from" type="date" name="from" value="${esc(filters.from || '')}"></div>
       <div class="field"><label for="of-to">По дату</label><input id="of-to" type="date" name="to" value="${esc(filters.to || '')}"></div>
-      <button type="submit">Применить</button>
+      <button type="submit" class="compact">Показать</button>
     </form>
 
-    ${total === 0 ? '<div class="panel"><div class="empty-state">По заданным фильтрам заказов нет.</div></div>' : `
+    ${total === 0 ? '<div class="panel"><div class="empty-state">За выбранный период заказов нет.</div></div>' : `
     <div class="panel">
-      <table class="responsive">
-        <thead><tr><th>Заказ</th><th>Создан</th><th>Состав</th><th>Сумма</th><th>Статус заказа</th><th>Оплата</th><th>Оценка</th></tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
+      <ul class="dish-list">${rows}</ul>
     </div>
     ${renderPagination({ page, totalPages, baseUrl, query })}
     `}
   `;
 }
 
+// Полная карточка заказа (спецификация, раздел «Заказы ресторана»). Пустые
+// строки не выводятся: комментарий — только если он был; возврат — только
+// если он существует. Персональные данные (имя/телефон/адрес) видны здесь и
+// только здесь — этот экран доступен исключительно авторизованному владельцу
+// HQ, в публичные ссылки и в «Центр событий» они не попадают.
 function renderOrderDetail({ restaurant, detail, linkBasePath }) {
   const { order: o, items, payments, refunds } = detail;
-  const itemsRows = items.map((i) => `<tr><td>${esc(i.name)}</td><td>${i.qty}</td><td>${money(i.price)}</td><td>${money(i.price * i.qty)}</td></tr>`).join('');
-  const paymentsRows = payments.map((p) => `<tr><td>${esc(PAYMENT_STATUS_LABELS[p.status] || p.status)}</td><td>${money(p.amount)}</td><td>${formatDateTime(p.created_at)}</td></tr>`).join('')
-    || '<tr><td colspan="3" class="empty-state">Платежей нет</td></tr>';
-  const refundsRows = refunds.map((r) => `<tr><td>${esc(REFUND_STATUS_LABELS[r.status] || r.status)}</td><td>${money(r.amount)}</td><td>${formatDateTime(r.created_at)}</td></tr>`).join('')
-    || '<tr><td colspan="3" class="empty-state">Возвратов нет</td></tr>';
+  const itemsRows = items.map((i) => `
+    <tr>
+      <td>${esc(i.name)}</td>
+      <td style="text-align:right">${i.qty}</td>
+      <td style="text-align:right">${money(i.price)}</td>
+      <td style="text-align:right">${money(i.price * i.qty)}</td>
+    </tr>`).join('');
+
+  const lastPayment = payments.length ? payments[payments.length - 1] : null;
+  const succeededRefund = refunds.find((r) => r.status === 'succeeded') || null;
+  const otherRefund = !succeededRefund && refunds.length ? refunds[refunds.length - 1] : null;
 
   return `
     <h1>Заказ ${esc(o.public_code)}</h1>
     <div class="panel">
       <table>
-        <tr><td>Статус</td><td style="text-align:right">${esc(ORDER_STATUS_LABELS[o.status] || o.status)}</td></tr>
-        <tr><td>Создан</td><td style="text-align:right">${formatDateTime(o.created_at)}</td></tr>
+        <tr><td>Создан</td><td style="text-align:right">${esc(formatMoscowDateTime(o.created_at))}</td></tr>
+        <tr><td>Статус заказа</td><td style="text-align:right">${esc(ORDER_STATUS_LABELS[o.status] || o.status)}</td></tr>
         <tr><td>Тип получения</td><td style="text-align:right">${o.fulfillment_type === 'pickup' ? 'Самовывоз' : 'Доставка'}</td></tr>
-        <tr><td>Сумма блюд</td><td style="text-align:right">${money(o.items_total)}</td></tr>
-        <tr><td>Комиссия YAAM</td><td style="text-align:right">${money(o.commission_amount)}</td></tr>
-        <tr><td>Оценка</td><td style="text-align:right">${o.rating ? stars(o.rating) : '—'}</td></tr>
+        <tr><td>Статус оплаты</td><td style="text-align:right">${esc(lastPayment ? (PAYMENT_STATUS_LABELS[lastPayment.status] || lastPayment.status) : 'Платежей нет')}</td></tr>
+        ${succeededRefund ? `<tr><td>Возврат</td><td style="text-align:right">${esc(REFUND_STATUS_LABELS[succeededRefund.status])} · ${money(succeededRefund.amount)}</td></tr>` : ''}
+        ${otherRefund ? `<tr><td>Возврат</td><td style="text-align:right">${esc(REFUND_STATUS_LABELS[otherRefund.status] || otherRefund.status)}</td></tr>` : ''}
+        ${o.rating ? `<tr><td>Оценка клиента</td><td style="text-align:right">${stars(o.rating)}</td></tr>` : ''}
       </table>
     </div>
 
     <div class="panel">
-      <div style="font-weight:700;margin-bottom:14px">Состав заказа</div>
-      <table><thead><tr><th>Блюдо</th><th>Кол-во</th><th>Цена</th><th>Сумма</th></tr></thead><tbody>${itemsRows}</tbody></table>
+      <div class="panel-title">Состав заказа</div>
+      <table>
+        <thead><tr><th>Блюдо</th><th style="text-align:right">Кол-во</th><th style="text-align:right">Цена</th><th style="text-align:right">Сумма</th></tr></thead>
+        <tbody>${itemsRows}</tbody>
+      </table>
+      <table style="margin-top:10px">
+        <tr><td>Сумма блюд</td><td style="text-align:right">${money(o.items_total)}</td></tr>
+        <tr><td>Итого к оплате</td><td style="text-align:right"><strong>${money(o.items_total)}</strong></td></tr>
+      </table>
     </div>
 
     <div class="panel">
-      <div style="font-weight:700;margin-bottom:14px">Контакт клиента</div>
+      <div class="panel-title">Клиент</div>
       <table>
         <tr><td>Имя</td><td style="text-align:right">${esc(o.customer_name)}</td></tr>
         <tr><td>Телефон</td><td style="text-align:right">${esc(o.customer_phone)}</td></tr>
@@ -440,17 +490,7 @@ function renderOrderDetail({ restaurant, detail, linkBasePath }) {
       </table>
     </div>
 
-    <div class="panel">
-      <div style="font-weight:700;margin-bottom:14px">Платежи</div>
-      <table><thead><tr><th>Статус</th><th>Сумма</th><th>Создан</th></tr></thead><tbody>${paymentsRows}</tbody></table>
-    </div>
-
-    <div class="panel">
-      <div style="font-weight:700;margin-bottom:14px">Возвраты</div>
-      <table><thead><tr><th>Статус</th><th>Сумма</th><th>Создан</th></tr></thead><tbody>${refundsRows}</tbody></table>
-    </div>
-
-    <a class="btn ghost" href="${linkBasePath}/restaurants/${restaurant.id}/orders">← К списку заказов</a>
+    <a class="btn ghost compact" href="${linkBasePath}/restaurants/${restaurant.id}/orders">← К списку заказов</a>
   `;
 }
 
@@ -471,32 +511,36 @@ function renderRatingsTab({ restaurant: r, distribution, ratings, page, totalPag
       </div>`;
   }).join('');
 
+  // «Дата заказа», а не «дата оценки» — схема не хранит момент выставления
+  // оценки (rateOrder() обновляет только колонку rating). Спецификация прямо
+  // запрещает выдумывать это время, поэтому подписано честно; отдельного
+  // пояснительного блока внизу больше нет (спецификация его удаляет).
   const rows = ratings.map((o) => `
-    <tr>
-      <td data-label="Заказ"><a class="order-code" href="${linkBasePath}/restaurants/${r.id}/orders/${o.id}">${esc(o.public_code)}</a></td>
-      <td data-label="Оценка">${stars(o.rating)}</td>
-      <td data-label="Дата заказа">${formatDateTime(o.created_at)}</td>
-    </tr>`).join('');
+      <li class="dish-row">
+        <a class="dish-link" href="${linkBasePath}/restaurants/${r.id}/orders/${o.id}">
+          <span class="dish-main">
+            <span class="dish-name">${esc(o.public_code)} · ${stars(o.rating)}</span>
+            <span class="dish-meta">Дата заказа: ${esc(formatMoscowDateTime(o.created_at))}</span>
+          </span>
+          <span class="dish-chevron" aria-hidden="true"></span>
+        </a>
+      </li>`).join('');
 
   return `
-    <div class="metric-grid">
+    <div class="metric-grid compact">
       <div class="metric"><div class="value">${r.rating_count > 0 ? Number(r.rating).toFixed(1) : '—'}</div><div class="label">Средний рейтинг</div></div>
-      <div class="metric"><div class="value">${r.rating_count}</div><div class="label">Оценок</div></div>
+      <div class="metric"><div class="value">${r.rating_count}</div><div class="label">Всего оценок</div></div>
     </div>
 
     <div class="panel">
-      <div style="font-weight:700;margin-bottom:14px">Распределение</div>
+      <div class="panel-title">Распределение</div>
       ${r.rating_count === 0 ? '<div class="empty-state">Оценок пока нет.</div>' : distRows}
     </div>
 
     ${r.rating_count === 0 ? '' : `
     <div class="panel">
-      <div style="font-weight:700;margin-bottom:14px">Оценённые заказы</div>
-      <div class="empty-state" style="margin-bottom:12px">В YAAM нет текстовых отзывов — только оценка звёздами. «Дата заказа» — момент оформления заказа: схема не хранит отдельно момент, когда клиент поставил оценку.</div>
-      <table class="responsive">
-        <thead><tr><th>Заказ</th><th>Оценка</th><th>Дата заказа</th></tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
+      <div class="panel-title">Оценённые заказы</div>
+      <ul class="dish-list">${rows}</ul>
     </div>
     ${renderPagination({ page, totalPages, baseUrl: `${linkBasePath}/restaurants/${r.id}/ratings`, query: {} })}
     `}
@@ -521,9 +565,28 @@ function renderDailyChart(dailySeries) {
   }).join('')}</div>`;
 }
 
-function renderStatisticsTab({ restaurant, statistics: s, financialPosition: f, periodOptions, linkBasePath, error }) {
+function renderHourlyChart(hourlySeries) {
+  const max = Math.max(1, ...hourlySeries.map((h) => h.count));
+  return `<div class="chart">${hourlySeries.map((h) => {
+    const heightPct = Math.max(2, Math.round((h.count / max) * 100));
+    // Подписи каждые 3 часа — 24 подписи подряд не читаются на телефоне.
+    const showLabel = h.hour % 3 === 0;
+    return `<div class="chart-bar${h.count === 0 ? ' zero' : ''}" style="height:${heightPct}%">
+      <div class="chart-value">${h.count || ''}</div>
+      ${showLabel ? `<div class="chart-label">${String(h.hour).padStart(2, '0')}</div>` : ''}
+    </div>`;
+  }).join('')}</div>`;
+}
+
+// docs/HQ-PRODUCT-SPEC.md, раздел «Статистика»: вкладка отвечает только на
+// два вопроса — как меняется спрос и какие блюда продаются лучше. Все
+// финансовые блоки (оборот, комиссия, сумма ресторана, возвраты, готовность
+// к выплатам) и повторные карточки создано/оплачено/выполнено удалены — они
+// уже есть на «Обзоре» и «Финансах», дублирование запрещено.
+function renderStatisticsTab({ restaurant, statistics: s, periodOptions, linkBasePath, error }) {
   const baseUrl = `${linkBasePath}/restaurants/${restaurant.id}/statistics`;
   const period = periodOptions.period || 'today';
+  const periodTabs = [['today', 'Сегодня'], ['7d', 'Неделя'], ['30d', 'Месяц'], ['custom', 'Свой период']];
 
   const popularQtyRows = s.popularByQty.length
     ? s.popularByQty.map((d) => `<tr><td>${esc(d.name)}</td><td style="text-align:right">${d.qty}</td></tr>`).join('')
@@ -532,64 +595,37 @@ function renderStatisticsTab({ restaurant, statistics: s, financialPosition: f, 
     ? s.popularByRevenue.map((d) => `<tr><td>${esc(d.name)}</td><td style="text-align:right">${money(d.revenue)}</td></tr>`).join('')
     : '<tr><td colspan="2" class="empty-state">Нет данных за период</td></tr>';
 
+  const chartTitle = period === 'today' ? 'Заказы по часам' : 'Заказы по дням';
+  const chart = period === 'today' && s.hourlySeries
+    ? renderHourlyChart(s.hourlySeries)
+    : renderDailyChart(s.dailySeries);
+
   return `
-    <form class="filters panel" method="get" action="${baseUrl}">
-      <div class="field">
-        <label for="pf-period">Период</label>
-        <select id="pf-period" name="period" onchange="this.form.submit()">
-          <option value="today" ${period === 'today' ? 'selected' : ''}>Сегодня</option>
-          <option value="7d" ${period === '7d' ? 'selected' : ''}>7 дней</option>
-          <option value="30d" ${period === '30d' ? 'selected' : ''}>30 дней</option>
-          <option value="custom" ${period === 'custom' ? 'selected' : ''}>Произвольный период</option>
-        </select>
-      </div>
-      ${period === 'custom' ? `
+    <div class="period-switch">
+      ${periodTabs.map(([key, label]) => `<a href="${baseUrl}?period=${key}" class="${period === key ? 'on' : ''}">${esc(label)}</a>`).join('')}
+    </div>
+
+    ${period === 'custom' ? `
+    <form class="date-filter panel" method="get" action="${baseUrl}">
+      <input type="hidden" name="period" value="custom">
       <div class="field"><label for="pf-from">С даты</label><input id="pf-from" type="date" name="from" value="${esc(periodOptions.from || '')}"></div>
       <div class="field"><label for="pf-to">По дату</label><input id="pf-to" type="date" name="to" value="${esc(periodOptions.to || '')}"></div>
-      ` : ''}
-      <button type="submit">Показать</button>
-    </form>
+      <button type="submit" class="compact">Показать</button>
+    </form>` : ''}
     ${error ? `<div class="panel"><div class="error" style="margin-top:0">${esc(error)} Показан период «Сегодня».</div></div>` : ''}
 
-    <div class="metric-grid">
-      <div class="metric"><div class="value">${s.created}</div><div class="label">Создано заказов</div></div>
-      <div class="metric"><div class="value">${s.paid}</div><div class="label">Оплачено</div></div>
-      <div class="metric"><div class="value">${s.delivered}</div><div class="label">Доставлено</div></div>
-      <div class="metric"><div class="value">${money(s.turnover)}</div><div class="label">Оборот (delivered)</div></div>
-      <div class="metric"><div class="value">${s.avgCheck === null ? '—' : money(s.avgCheck)}</div><div class="label">Средний чек</div></div>
-      <div class="metric"><div class="value">${s.avgRating === null ? '—' : s.avgRating}</div><div class="label">Средняя оценка (${s.ratingCount})</div></div>
-      <div class="metric"><div class="value">${s.customerCancels}</div><div class="label">Отмены клиента</div></div>
-      <div class="metric"><div class="value">${s.restaurantDeclines}</div><div class="label">Отказы ресторана</div></div>
-      <div class="metric"><div class="value">${s.timedOut}</div><div class="label">Истекли по времени</div></div>
-      <div class="metric"><div class="value">${s.paymentFailed}</div><div class="label">Ошибки оплаты</div></div>
-      <div class="metric"><div class="value">${s.conversionPercent === null ? '—' : `${s.conversionPercent}%`}</div><div class="label">Конверсия создано → доставлено</div></div>
-    </div>
-    <div class="empty-state" style="margin-top:-10px;margin-bottom:20px">Конверсия — доля заказов периода, дошедших до статуса «доставлен» на СЕЙЧАС. Заказы, ещё не завершившиеся к моменту просмотра (в пути/готовятся), не считаются ни доставленными, ни отменёнными — для незакрытых периодов (например «сегодня») конверсия занижена относительно итоговой судьбы этих заказов.</div>
-
     <div class="panel">
-      <div style="font-weight:700;margin-bottom:14px">Финансы за период</div>
-      <table>
-        <tr><td>Доставленных оплаченных заказов</td><td style="text-align:right">${f.deliveredPaidOrders}</td></tr>
-        <tr><td>Оборот</td><td style="text-align:right">${money(f.turnover)}</td></tr>
-        <tr><td>Комиссия YAAM</td><td style="text-align:right">${money(f.commission)}</td></tr>
-        <tr><td>Сумма ресторана</td><td style="text-align:right">${money(f.restaurantEarnings)}</td></tr>
-        <tr><td>Возвращено клиентам</td><td style="text-align:right">${f.successfulRefundsCount} шт · ${money(f.successfulRefunds)}</td></tr>
-      </table>
-      <div class="empty-state" style="margin-top:10px">Возвраты показаны отдельно и не вычитаются повторно из заработка ресторана, если отменённый заказ не входил в доставленный оборот. Остаток к будущей выплате (за всё время, временная формула до отдельного этапа выплат): ${money(f.payableBalance)}. ${financeViews.renderPayoutReadinessInline(f.payoutReadiness)}.</div>
-    </div>
-
-    <div class="panel">
-      <div style="font-weight:700;margin-bottom:6px">Заказы по дням</div>
-      ${renderDailyChart(s.dailySeries)}
+      <div class="panel-title">${esc(chartTitle)}</div>
+      ${chart}
     </div>
 
     <div class="row">
       <div class="panel">
-        <div style="font-weight:700;margin-bottom:14px">Популярные блюда — по количеству</div>
+        <div class="panel-title">Популярные блюда — по количеству</div>
         <table><thead><tr><th>Блюдо</th><th style="text-align:right">Кол-во</th></tr></thead><tbody>${popularQtyRows}</tbody></table>
       </div>
       <div class="panel">
-        <div style="font-weight:700;margin-bottom:14px">Популярные блюда — по выручке</div>
+        <div class="panel-title">Популярные блюда — по выручке</div>
         <table><thead><tr><th>Блюдо</th><th style="text-align:right">Выручка</th></tr></thead><tbody>${popularRevenueRows}</tbody></table>
       </div>
     </div>
@@ -600,30 +636,120 @@ function renderStatisticsTab({ restaurant, statistics: s, financialPosition: f, 
 // Настройки ресторана
 // ===========================================================================
 
-function renderRestaurantSettingsTab({
-  restaurant: r, linkBasePath, csrfToken, error, notice,
-  photos = [], mediaConfigured = false, maxPhotos = 0,
-  legal = null, bank = null, contract = null,
-}) {
-  const archiveAction = r.archived_at
-    ? `<form method="post" action="${linkBasePath}/restaurants/${r.id}/restore" onsubmit="return confirm('Восстановить «${esc(r.name)}» из архива?')">
-        <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
-        <button type="submit">Восстановить из архива</button>
-      </form>`
-    : `<form method="post" action="${linkBasePath}/restaurants/${r.id}/archive" onsubmit="return confirm('Архивировать «${esc(r.name)}»? Ресторан будет скрыт с публичного сайта, история заказов и оценок сохранится.')">
-        <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
-        <button type="submit" class="danger">Архивировать ресторан</button>
-      </form>`;
+// docs/HQ-PRODUCT-SPEC.md, раздел «Управление рестораном»: три действия
+// владельца YAAM, каждое с коротким подтверждением, собраны в один блок
+// внизу настроек — на остальных вкладках их больше нет.
+//   Приостановить = закрыть приём заказов, ресторан остаётся на сайте
+//                   (is_open=0; НЕ путать с паузой, которую ресторан берёт
+//                   сам через Telegram);
+//   Скрыть        = убрать с публичного сайта (published_at=NULL);
+//   Архивировать  = убрать из рабочего списка HQ, сохранив всю историю.
+function renderManagementBlock({ restaurant: r, csrfToken, linkBasePath }) {
+  const base = `${linkBasePath}/restaurants/${r.id}`;
+  const status = lifecycle.resolveLifecycleStatus(r);
+
+  if (r.archived_at) {
+    return `
+      <div class="panel">
+        <div class="panel-title">Управление рестораном</div>
+        <div class="empty-state" style="margin-bottom:14px">Ресторан в архиве с ${esc(formatDateTime(r.archived_at))}. История заказов, оценок и выплат сохранена полностью.</div>
+        ${simpleActionForm({ action: `${base}/restore`, csrfToken, label: 'Вернуть из архива', cls: 'compact', confirm: `Вернуть «${r.name}» из архива?` })}
+      </div>`;
+  }
+
+  const actions = [];
+  if (status === 'draft') {
+    actions.push(simpleActionForm({
+      action: `${base}/publish`, csrfToken, label: 'Показать на сайте', cls: 'compact',
+      confirm: `Показать «${r.name}» на сайте?`,
+    }));
+  } else {
+    if (status === 'open') {
+      actions.push(simpleActionForm({
+        action: `${base}/close`, csrfToken, label: 'Приостановить', cls: 'ghost compact',
+        confirm: `Приостановить приём заказов у «${r.name}»? Ресторан останется на сайте.`,
+      }));
+    } else if (status === 'closed') {
+      actions.push(simpleActionForm({ action: `${base}/open`, csrfToken, label: 'Возобновить приём заказов', cls: 'compact' }));
+    }
+    // status === 'paused' — ресторан сам взял перерыв через Telegram;
+    // открыть/закрыть в это время структурно отклоняется guard'ами
+    // (assertCanOpen/assertCanClose), поэтому кнопки не показываются.
+    actions.push(simpleActionForm({
+      action: `${base}/unpublish`, csrfToken, label: 'Скрыть с сайта', cls: 'ghost compact',
+      confirm: `Скрыть «${r.name}» с сайта? Ресторан исчезнет из публичного каталога, данные сохранятся.`,
+    }));
+  }
+  actions.push(simpleActionForm({
+    action: `${base}/archive`, csrfToken, label: 'Архивировать', cls: 'ghost compact',
+    confirm: `Архивировать «${r.name}»? Ресторан исчезнет из рабочего списка HQ, вся история сохранится.`,
+  }));
 
   return `
     <div class="panel">
-      <div style="font-weight:700;margin-bottom:14px">Основные данные</div>
+      <div class="panel-title">Управление рестораном</div>
+      <div class="manage-actions">${actions.join('')}</div>
+    </div>`;
+}
+
+// Telegram-блок (docs/HQ-PRODUCT-SPEC.md, раздел «Telegram-подключение»).
+// После подключения код НЕ показывается — только состояние и действия.
+function renderTelegramBlock({ restaurant: r, telegram, csrfToken, linkBasePath }) {
+  const base = `${linkBasePath}/restaurants/${r.id}/telegram`;
+  if (!r.telegram_chat_id) {
+    return `
+      <div class="panel">
+        <div class="panel-title">Telegram</div>
+        <div class="payout-line">Не подключён</div>
+        <div class="empty-state" style="margin:6px 0 14px">Создайте рабочую группу ресторана, добавьте в неё бота YAAM и отправьте в группе код подключения. Код одноразовый и перестаёт работать сразу после привязки.</div>
+        ${telegram && telegram.connectCode
+          ? `<div class="connect-code">${esc(telegram.connectCode)}</div>`
+          : ''}
+        ${simpleActionForm({ action: `${base}/new-code`, csrfToken, label: telegram && telegram.connectCode ? 'Выпустить новый код' : 'Создать код подключения', cls: 'compact' })}
+      </div>`;
+  }
+  return `
+    <div class="panel">
+      <div class="panel-title">Telegram</div>
+      <div class="payout-line">Подключён</div>
+      <div class="payout-sub">${esc(r.telegram_chat_title || 'Рабочая группа ресторана')}</div>
+      <div class="manage-actions" style="margin-top:12px">
+        ${simpleActionForm({ action: `${base}/test`, csrfToken, label: 'Отправить тест', cls: 'ghost compact' })}
+        ${simpleActionForm({ action: `${base}/reconnect`, csrfToken, label: 'Переподключить', cls: 'ghost compact', confirm: 'Отвязать текущую группу и выпустить новый код подключения?' })}
+        ${simpleActionForm({ action: `${base}/disconnect`, csrfToken, label: 'Отключить', cls: 'ghost compact', confirm: 'Отключить Telegram? Ресторан перестанет получать заказы, пока не подключится снова.' })}
+      </div>
+    </div>`;
+}
+
+function renderRestaurantSettingsTab({
+  restaurant: r, linkBasePath, csrfToken, error, notice,
+  photos = [], mediaConfigured = false, maxPhotos = 0,
+  legal = null, bank = null, contract = null, telegram = null,
+}) {
+  const selectedCities = parseCities(r.cities);
+  const cityCheckboxes = SUPPORTED_CITIES.map((city, index) => `
+    <label class="city-check">
+      <input type="checkbox" name="cities" value="${esc(city)}" ${selectedCities.includes(city) ? 'checked' : ''} id="sf-city-${index}">
+      <span>${esc(city)}</span>
+    </label>`).join('');
+
+  return `
+    ${renderPhotoManager({
+      title: 'Фотографии ресторана',
+      photos, mediaConfigured, maxPhotos,
+      uploadAction: `${linkBasePath}/restaurants/${r.id}/photos`,
+      actionBase: `${linkBasePath}/restaurants/${r.id}/photos`,
+      csrfToken,
+    })}
+
+    <div class="panel">
+      <div class="panel-title">Основные данные</div>
       <form method="post" action="${linkBasePath}/restaurants/${r.id}/settings">
         <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
         <label for="sf-name">Название</label>
         <input id="sf-name" name="name" type="text" value="${esc(r.name)}" required autocomplete="off">
-        <label for="sf-cities">Города (через запятую)</label>
-        <input id="sf-cities" name="cities" type="text" value="${esc(parseCities(r.cities).join(', '))}" required autocomplete="off">
+        <label>Города</label>
+        <div class="city-checks">${cityCheckboxes}</div>
         <label for="sf-cuisine">Кухня</label>
         <input id="sf-cuisine" name="cuisine" type="text" value="${esc(r.cuisine)}" autocomplete="off">
         <label for="sf-description">Краткое описание</label>
@@ -636,7 +762,7 @@ function renderRestaurantSettingsTab({
         <input id="sf-hours" name="hours" type="text" value="${esc(r.hours)}" autocomplete="off">
         <label for="sf-min-order">Минимальная сумма заказа, ₽</label>
         <input id="sf-min-order" name="min_order" type="number" min="0" value="${r.min_order}" autocomplete="off">
-        <button type="submit">Сохранить</button>
+        <div class="save-row"><button type="submit" class="compact">Сохранить</button></div>
         ${error ? `<div class="error">${esc(error)}</div>` : ''}
         ${notice ? `<div class="notice">${esc(notice)}</div>` : ''}
       </form>
@@ -645,28 +771,8 @@ function renderRestaurantSettingsTab({
     ${financeViews.renderLegalDetailsSection({ restaurant: r, legal, linkBasePath })}
     ${financeViews.renderBankDetailsSection({ restaurant: r, bank, linkBasePath })}
     ${financeViews.renderContractSection({ restaurant: r, contract, linkBasePath })}
-
-    ${renderPhotoManager({
-      title: 'Фотографии ресторана',
-      photos, mediaConfigured, maxPhotos,
-      uploadAction: `${linkBasePath}/restaurants/${r.id}/photos`,
-      actionBase: `${linkBasePath}/restaurants/${r.id}/photos`,
-      csrfToken,
-    })}
-
-    <div class="panel">
-      <div style="font-weight:700;margin-bottom:14px">Telegram</div>
-      <table>
-        <tr><td>Статус</td><td style="text-align:right">${r.telegram_chat_id ? 'Подключён' : 'Не подключён'}</td></tr>
-      </table>
-      <div class="empty-state" style="margin-top:10px">Переподключение бота выполняется самим рестораном по коду в Telegram — код показывается только внутри защищённого HQ и не публикуется.</div>
-    </div>
-
-    <div class="panel">
-      <div style="font-weight:700;margin-bottom:14px">${r.archived_at ? 'В архиве' : 'Архивирование'}</div>
-      ${r.archived_at ? `<div class="empty-state" style="margin-bottom:14px">Ресторан архивирован ${formatDateTime(r.archived_at)}. Он скрыт с публичного сайта, история заказов и оценок сохранена.</div>` : `<div class="empty-state" style="margin-bottom:14px">Архивирование скрывает ресторан с публичного сайта. История заказов и оценок сохраняется полностью — это не удаление.</div>`}
-      ${archiveAction}
-    </div>
+    ${renderTelegramBlock({ restaurant: r, telegram, csrfToken, linkBasePath })}
+    ${renderManagementBlock({ restaurant: r, csrfToken, linkBasePath })}
   `;
 }
 

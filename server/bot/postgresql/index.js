@@ -108,7 +108,7 @@ async function handleOrderNew(bot, order) {
   const fulfillmentLine = order.fulfillment_type === 'pickup'
     ? '🏃 Самовывоз (курьер не нужен)'
     : `🛵 Доставка\nАдрес: ${order.address}`;
-  const text = `🆕 Новый заказ ${order.public_code}\n\n${itemsList}\n\nИтого: ${order.items_total} ₽\n${fulfillmentLine}\nТелефон: ${order.customer_phone}\nКомментарий: ${order.comment || '—'}\n\nОтветьте в течение 3 минут, иначе заказ отменится автоматически.`;
+  const text = `🆕 Новый заказ ${order.public_code}\n\n${itemsList}\n\nИтого: ${order.items_total} ₽\n${fulfillmentLine}\nТелефон: ${order.customer_phone}\nКомментарий: ${order.comment || '—'}\n\nОтветьте в течение 5 минут, иначе заказ отменится автоматически.`;
   await bot.sendMessage(restaurant.telegram_chat_id, text, {
     reply_markup: {
       inline_keyboard: [[
@@ -119,16 +119,17 @@ async function handleOrderNew(bot, order) {
   });
 }
 
-// Три варианта времени готовки относительно своего времени ресторана
-// (default_cook_minutes из админки) — не одно фиксированное число на всех.
-async function sendCookTimeButtons(bot, chatId, orderId) {
-  const order = await pgOrderService.getOrder(orderId);
-  const restaurant = await restaurantById(order.restaurant_id);
-  const base = restaurant.default_cook_minutes || 40;
-  const options = [Math.max(10, base - 10), base, base + 15];
-  await bot.sendMessage(chatId, `Заказ ${order.public_code}: сколько времени на готовку?`, {
+// docs/HQ-PRODUCT-SPEC.md, раздел «Выбор времени приготовления»: ровно три
+// варианта — 30/45/60 минут, одинаковые для всех ресторанов (прежние
+// значения выводились из restaurants.default_cook_minutes и у каждого
+// ресторана были свои). Без выбора времени заказ НЕ считается принятым —
+// см. двухшаговое «Принять» в handleCallbackQuery ниже.
+const COOK_TIME_OPTIONS_MIN = [30, 45, 60];
+
+async function sendCookTimeButtons(bot, chatId, orderId, publicCode) {
+  await bot.sendMessage(chatId, `Заказ ${publicCode}: за сколько приготовите?`, {
     reply_markup: {
-      inline_keyboard: [options.map((m) => ({ text: `~${m} мин`, callback_data: `cook_time:${orderId}:${m}` }))],
+      inline_keyboard: [COOK_TIME_OPTIONS_MIN.map((m) => ({ text: `${m} мин`, callback_data: `cook_time:${orderId}:${m}` }))],
     },
   });
 }
@@ -155,6 +156,11 @@ async function handleCallbackQuery(bot, query) {
   const messageId = query.message.message_id;
   try {
     if (action === 'accept') {
+      // ШАГ 1 из двух (docs/HQ-PRODUCT-SPEC.md, раздел «Выбор времени
+      // приготовления»): «Принять» САМО ПО СЕБЕ заказ не принимает — оно
+      // только показывает выбор 30/45/60. Заказ переходит в accepted лишь
+      // на шаге cook_time ниже, поэтому «без выбора времени заказ нельзя
+      // принять» выполняется структурно, а не проверкой постфактум.
       const orderId = Number(parts[1]);
       const current = await pgOrderService.getOrder(orderId);
       if (!current) {
@@ -164,9 +170,8 @@ async function handleCallbackQuery(bot, query) {
         // событием — см. header-комментарий модуля, адаптация п.2.
         await bot.editMessageText('Заказ уже обработан.', { chat_id: chatId, message_id: messageId });
       } else {
-        await pgOrderService.restaurantAccept(orderId);
-        await bot.editMessageText(`✅ Заказ принят.`, { chat_id: chatId, message_id: messageId });
-        await sendCookTimeButtons(bot, chatId, orderId);
+        await bot.editMessageText(`Заказ ${current.public_code}: выберите время приготовления.`, { chat_id: chatId, message_id: messageId });
+        await sendCookTimeButtons(bot, chatId, orderId, current.public_code);
       }
     } else if (action === 'decline') {
       const orderId = Number(parts[1]);
@@ -180,12 +185,29 @@ async function handleCallbackQuery(bot, query) {
         await bot.editMessageText(`❌ Заказ отклонён, деньги клиенту возвращены.`, { chat_id: chatId, message_id: messageId });
       }
     } else if (action === 'cook_time') {
-      // cook_time:orderId:minutes — ресторан выбрал время на шаге "Готовится"
+      // ШАГ 2 из двух: именно здесь заказ реально принимается
+      // (awaiting_restaurant -> accepted -> preparing) вместе с выбранным
+      // временем. Идемпотентность: если заказ уже не ждёт ресторан (второй
+      // клик по той же кнопке, replay, параллельный клик другого сотрудника
+      // группы) — ничего не делаем и честно об этом сообщаем; сами переходы
+      // дополнительно защищены atomic conditional UPDATE в orderService.
       const orderId = Number(parts[1]);
       const minutes = Number(parts[2]);
-      await pgOrderService.restaurantAdvance(orderId, 'preparing', { estimatedMinutes: minutes });
-      await bot.editMessageText(`Готовится — клиенту показано «~${minutes} мин».`, { chat_id: chatId, message_id: messageId });
-      await sendProgressButton(bot, chatId, orderId, 'preparing');
+      if (!COOK_TIME_OPTIONS_MIN.includes(minutes)) {
+        await bot.answerCallbackQuery(query.id, { text: 'Недопустимое время приготовления.', show_alert: true });
+        return;
+      }
+      const current = await pgOrderService.getOrder(orderId);
+      if (!current) {
+        await bot.editMessageText('Заказ не найден.', { chat_id: chatId, message_id: messageId });
+      } else if (current.status !== 'awaiting_restaurant') {
+        await bot.editMessageText('Заказ уже обработан.', { chat_id: chatId, message_id: messageId });
+      } else {
+        await pgOrderService.restaurantAccept(orderId);
+        await pgOrderService.restaurantAdvance(orderId, 'preparing', { estimatedMinutes: minutes });
+        await bot.editMessageText(`Заказ ${current.public_code} принят. Готовится — клиенту показано «${minutes} мин».`, { chat_id: chatId, message_id: messageId });
+        await sendProgressButton(bot, chatId, orderId, 'preparing');
+      }
     } else if (action === 'advance') {
       // advance:nextStatus:orderId (courier -> delivered, или preparing -> delivered напрямую для самовывоза)
       const nextStatus = parts[1];
@@ -232,12 +254,54 @@ function createBotHandlers(bot) {
     const p = handleOrderNew(bot, order)
       .catch((err) => {
         console.error(`[bot/postgresql] order:new handler failed for order ${order && order.public_code}:`, err.message);
+        // HQ «Центр событий» — "серьёзный сбой Telegram-бота или доставки
+        // Telegram-сообщения" (docs/HQ-PRODUCT-SPEC.md): ресторан не узнает
+        // о заказе через бота — реальная проблема, требующая владельца,
+        // независимо от sweepTimeouts (тот лишь отменит заказ через 3
+        // минуты, но не объяснит ПОЧЕМУ ресторан не ответил).
+        const eventLogService = require('../../services/hq/eventLogService');
+        eventLogService.createEvent({
+          category: 'telegram_issue',
+          restaurantId: order ? order.restaurant_id : null,
+          restaurantName: order ? order.restaurant_name : null,
+          orderId: order ? order.id : null,
+          orderPublicCode: order ? order.public_code : null,
+          message: `Не удалось отправить уведомление о заказе ${order ? order.public_code : '?'} ресторану в Telegram: ${err.message}`,
+        }).catch((logErr) => {
+          console.error('[bot/postgresql] hq_events log failed (order:new):', logErr.message);
+        });
       })
       .finally(() => inFlight.delete(p));
     inFlight.add(p);
     return p;
   };
   pgOrderService.orderEvents.on('order:new', onOrderNew);
+
+  // «Вы пропустили заказ» (docs/HQ-PRODUCT-SPEC.md, раздел «Получение
+  // нового заказа в Telegram»). Слушаем существующий order:status и
+  // реагируем ТОЛЬКО на timed_out — единственный переход, который означает
+  // «ресторан не ответил вовремя» (отклонение рестораном даёт declined и
+  // группе уже показано её собственным сообщением). Отдельное событие в
+  // «Центре событий» HQ создаёт sweepTimeouts() в orderService — здесь
+  // только уведомление самой группы, дублирования нет.
+  const onOrderStatus = (order) => {
+    if (!order || order.status !== 'timed_out') return;
+    const p = (async () => {
+      const restaurant = await restaurantById(order.restaurant_id);
+      if (!restaurant || !restaurant.telegram_chat_id) return;
+      await bot.sendMessage(
+        restaurant.telegram_chat_id,
+        `Вы пропустили заказ ${order.public_code} — ответа не было 5 минут, заказ автоматически отменён.`,
+      );
+    })()
+      .catch((err) => {
+        console.error(`[bot/postgresql] order:status timed_out notify failed for ${order && order.public_code}:`, err.message);
+      })
+      .finally(() => inFlight.delete(p));
+    inFlight.add(p);
+    return p;
+  };
+  pgOrderService.orderEvents.on('order:status', onOrderStatus);
 
   bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
     try {
@@ -248,12 +312,21 @@ function createBotHandlers(bot) {
           'Код подключения выдаёт команда YAAM при добавлении вашего ресторана в админке — пришлите его командой:\n/start ВАШКОД');
         return;
       }
-      const restaurant = await restaurantByConnectCode(code);
-      if (!restaurant) {
-        await bot.sendMessage(msg.chat.id, 'Код не найден. Проверьте и попробуйте снова.');
+      // Привязка идёт ЧЕРЕЗ telegramLinkService (docs/HQ-PRODUCT-SPEC.md):
+      // код одноразовый (гасится той же транзакцией) и один чат не может
+      // обслуживать два ресторана — оба правила живут в сервисе, а не здесь.
+      const telegramLinkService = require('../../services/hq/telegramLinkService');
+      let restaurant;
+      try {
+        restaurant = await telegramLinkService.consumeConnectCode(code, msg.chat.id, msg.chat.title || null);
+      } catch (err) {
+        await bot.sendMessage(msg.chat.id, err.message);
         return;
       }
-      await db.execute('UPDATE restaurants SET telegram_chat_id = $1 WHERE id = $2', [String(msg.chat.id), restaurant.id]);
+      if (!restaurant) {
+        await bot.sendMessage(msg.chat.id, 'Код не найден или уже использован. Запросите новый код у YAAM.');
+        return;
+      }
       await bot.sendMessage(msg.chat.id, `Готово! «${restaurant.name}» подключён. Сюда будут приходить новые заказы.`);
     } catch (err) {
       console.error('[bot/postgresql] /start failed:', err.message);
@@ -332,7 +405,18 @@ function createBotHandlers(bot) {
     })
   );
 
-  bot.on('polling_error', (err) => console.error('[bot/postgresql] polling error:', err.message));
+  bot.on('polling_error', (err) => {
+    console.error('[bot/postgresql] polling error:', err.message);
+    // HQ «Центр событий» — весь бот потерял связь с Telegram (не одно
+    // сообщение, а вся доставка ресторанам), задание, раздел 3.
+    const eventLogService = require('../../services/hq/eventLogService');
+    eventLogService.createEvent({
+      category: 'telegram_issue',
+      message: `Telegram-бот потерял соединение с сервером Telegram: ${err.message}`,
+    }).catch((logErr) => {
+      console.error('[bot/postgresql] hq_events log failed (polling_error):', logErr.message);
+    });
+  });
 
   console.log('[bot/postgresql] запущен (long polling)');
 
@@ -340,6 +424,7 @@ function createBotHandlers(bot) {
     bot,
     async stop() {
       pgOrderService.orderEvents.removeListener('order:new', onOrderNew);
+      pgOrderService.orderEvents.removeListener('order:status', onOrderStatus);
       if (typeof bot.stopPolling === 'function') {
         await bot.stopPolling({ cancel: true, reason: 'YAAM graceful shutdown' });
       }

@@ -20,6 +20,10 @@ const PUBLIC_ALLOWLIST = [
   'public_code', 'status', 'status_updated_at', 'items_total',
   'estimated_ready_minutes', 'restaurant_phone', 'fulfillment_type', 'rating',
   'refund_status', 'payment_expires_at',
+  // Серверный срок готовности (docs/HQ-PRODUCT-SPEC.md, «Таймер
+  // приготовления») — не ПДн и не секрет: только момент времени, от которого
+  // клиент считает обратный отсчёт вместо создания собственного дедлайна.
+  'preparation_deadline',
 ];
 const FORBIDDEN_FIELDS = [
   'id', 'restaurant_id', 'city', 'customer_name', 'customer_phone', 'address',

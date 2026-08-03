@@ -31,7 +31,7 @@ const { createRequireHqAuth } = require('./middleware');
 // Внутренний mount point роутера в services/postgresql/app.js ВСЕГДА '/hq' —
 // linkBasePath меняет только то, что сам роутер ПИШЕТ в свои же ответы
 // (redirect/href/form action/cookie path), не то, где Express его слушает.
-function createHqRouter({ sessionSecret, isProduction, linkBasePath, mediaProvider = null }) {
+function createHqRouter({ sessionSecret, isProduction, linkBasePath, mediaProvider = null, sessionStore = null }) {
   if (!sessionSecret) {
     throw new Error('createHqRouter требует sessionSecret');
   }
@@ -73,6 +73,8 @@ function createHqRouter({ sessionSecret, isProduction, linkBasePath, mediaProvid
     secret: sessionSecret,
     isProduction: Boolean(isProduction),
     cookiePath: hqRootPath(resolvedLinkBasePath),
+    // Stage 15: в production обязателен PostgreSQL-стор (см. app.js).
+    store: sessionStore,
   }));
 
   router.use('/', createAuthRouter({ linkBasePath: resolvedLinkBasePath }));

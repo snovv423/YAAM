@@ -175,7 +175,73 @@ function createRefundReconciliationScheduler({ intervalMs = DEFAULT_REFUND_RECON
   };
 }
 
+// ---------------------------------------------------------------------------
+// Еженедельное закрытие расчётных периодов (docs/HQ-PRODUCT-SPEC.md)
+// ---------------------------------------------------------------------------
+//
+// НЕ полагается только на setInterval (задание, раздел 1): сам job каждый раз
+// заново вычисляет, какие недели ДОЛЖНЫ быть закрыты к текущему моменту
+// (weeklySettlementService.findDueWeeks), поэтому пропущенный тик, рестарт
+// процесса или многодневный простой не теряют период — при следующем запуске
+// сработает catch-up. Таймер здесь — только «когда посмотреть», а не
+// «источник истины о том, что пора закрывать».
+//
+// Тик раз в 15 минут: точность до минуты для еженедельной бухгалтерии не
+// нужна, а редкие тики дешевле и не создают нагрузки. Первый прогон
+// выполняется сразу при старте (runOnStart) — именно он и закрывает
+// пропущенное, если сервер лежал в воскресенье.
+const DEFAULT_WEEKLY_SETTLEMENT_INTERVAL_MS = 15 * 60 * 1000;
+
+function createWeeklySettlementScheduler({
+  intervalMs = DEFAULT_WEEKLY_SETTLEMENT_INTERVAL_MS, runOnStart = true, onError,
+} = {}) {
+  let timer = null;
+  let running = false;
+
+  async function tick() {
+    // Перекрытие тиков невозможно: длинный прогон не должен запускаться
+    // второй раз параллельно самому себе (advisory-лока в самом job — вторая,
+    // межпроцессная линия защиты; этот флаг — внутрипроцессная).
+    if (running) return;
+    running = true;
+    try {
+      const weeklySettlementService = require('../hq/weeklySettlementService');
+      await weeklySettlementService.runWeeklySettlementJob();
+    } catch (err) {
+      if (onError) onError(err);
+      else console.error('[scheduler/postgresql] runWeeklySettlementJob failed:', err.message);
+    } finally {
+      running = false;
+    }
+  }
+
+  return {
+    start() {
+      if (timer) return;
+      timer = setInterval(tick, intervalMs);
+      if (typeof timer.unref === 'function') timer.unref();
+      // Catch-up после простоя — сразу, не дожидаясь первого тика.
+      if (runOnStart) {
+        tick().catch((err) => console.error('[scheduler/postgresql] стартовый прогон settlement job:', err.message));
+      }
+    },
+    stop() {
+      if (!timer) return;
+      clearInterval(timer);
+      timer = null;
+    },
+    isRunning() {
+      return timer !== null;
+    },
+    async runOnce() {
+      await tick();
+    },
+  };
+}
+
 module.exports = {
+  createWeeklySettlementScheduler,
+  DEFAULT_WEEKLY_SETTLEMENT_INTERVAL_MS,
   createPauseExpiryScheduler,
   DEFAULT_INTERVAL_MS,
   createOrderTimeoutScheduler,

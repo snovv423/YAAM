@@ -395,6 +395,197 @@ async function countAvailableMenuItems(restaurantId) {
   return rows[0].n;
 }
 
+// ---------------------------------------------------------------------------
+// docs/HQ-PRODUCT-SPEC.md, раздел «Меню» — операции, которых требует новый
+// экран (accordion-категории, drag-and-drop, архив, непустая категория).
+// ---------------------------------------------------------------------------
+
+// Перестановка перетаскиванием: клиент присылает ПОЛНЫЙ новый порядок id.
+// Именно полный список, а не «переставь X на позицию N» — так результат не
+// зависит от того, совпадает ли представление клиента о текущем порядке с
+// БД (иначе параллельная правка из другой вкладки давала бы тихо неверный
+// результат). Чужие/архивированные id молча игнорируются: они не могут
+// попасть в перетаскиваемый список легитимно, а падать с ошибкой на гонке
+// (кто-то архивировал блюдо, пока владелец тащил соседнее) — хуже, чем
+// применить порядок к тому, что реально осталось.
+async function reorderCategories(restaurantId, orderedIds) {
+  const ids = (Array.isArray(orderedIds) ? orderedIds : [])
+    .map((v) => Number.parseInt(v, 10))
+    .filter((v) => Number.isInteger(v) && v > 0);
+  if (!ids.length) return 0;
+  return db.transaction(async (client) => {
+    const rows = await db.query(
+      'SELECT id FROM categories WHERE restaurant_id = $1 AND archived_at IS NULL',
+      [restaurantId],
+      client,
+    );
+    const allowed = new Set(rows.map((r) => r.id));
+    let position = 0;
+    let applied = 0;
+    for (const id of ids) {
+      if (!allowed.has(id)) continue;
+      position += 1;
+      // eslint-disable-next-line no-await-in-loop
+      await db.execute(
+        'UPDATE categories SET sort_order = $1 WHERE id = $2 AND restaurant_id = $3',
+        [position, id, restaurantId],
+        client,
+      );
+      applied += 1;
+    }
+    return applied;
+  });
+}
+
+async function reorderMenuItems(restaurantId, categoryId, orderedIds) {
+  const numericCategoryId = Number.parseInt(categoryId, 10);
+  if (!Number.isInteger(numericCategoryId)) throw new ValidationError('Некорректная категория.');
+  const ids = (Array.isArray(orderedIds) ? orderedIds : [])
+    .map((v) => Number.parseInt(v, 10))
+    .filter((v) => Number.isInteger(v) && v > 0);
+  if (!ids.length) return 0;
+  return db.transaction(async (client) => {
+    const rows = await db.query(
+      'SELECT id FROM menu_items WHERE restaurant_id = $1 AND category_id = $2 AND archived_at IS NULL',
+      [restaurantId, numericCategoryId],
+      client,
+    );
+    const allowed = new Set(rows.map((r) => r.id));
+    let position = 0;
+    let applied = 0;
+    for (const id of ids) {
+      if (!allowed.has(id)) continue;
+      position += 1;
+      // eslint-disable-next-line no-await-in-loop
+      await db.execute(
+        'UPDATE menu_items SET sort_order = $1 WHERE id = $2 AND restaurant_id = $3',
+        [position, id, restaurantId],
+        client,
+      );
+      applied += 1;
+    }
+    return applied;
+  });
+}
+
+// Архивирование НЕПУСТОЙ категории, вариант 2 спецификации: «архивировать
+// категорию вместе с блюдами». Физического удаления нет ни на одном шаге —
+// history заказов ссылается на menu_items, и archived_at её сохраняет.
+async function archiveCategoryWithItems(restaurantId, categoryId) {
+  const category = await getCategoryById(restaurantId, categoryId);
+  if (!category) return null;
+  if (category.archived_at) throw new ValidationError('Категория уже архивирована.');
+  return db.transaction(async (client) => {
+    await db.execute(
+      'UPDATE menu_items SET archived_at = NOW() WHERE category_id = $1 AND restaurant_id = $2 AND archived_at IS NULL',
+      [category.id, restaurantId],
+      client,
+    );
+    const updated = await db.execute(
+      'UPDATE categories SET archived_at = NOW() WHERE id = $1 AND restaurant_id = $2 RETURNING *',
+      [category.id, restaurantId],
+      client,
+    );
+    return updated.rows[0] || null;
+  });
+}
+
+// Вариант 1 спецификации: «перенести блюда в другую категорию», после чего
+// исходная категория становится пустой и архивируется — обе операции в ОДНОЙ
+// транзакции, чтобы не осталось состояния «блюда уже перенесены, а категория
+// ещё жива» (или наоборот).
+async function moveItemsAndArchiveCategory(restaurantId, categoryId, targetCategoryId) {
+  const category = await getCategoryById(restaurantId, categoryId);
+  if (!category) return null;
+  if (category.archived_at) throw new ValidationError('Категория уже архивирована.');
+  const target = await getCategoryById(restaurantId, targetCategoryId);
+  if (!target) throw new ValidationError('Категория для переноса не найдена.');
+  if (target.archived_at) throw new ValidationError('Нельзя переносить блюда в архивированную категорию.');
+  if (target.id === category.id) throw new ValidationError('Выберите другую категорию для переноса.');
+
+  return db.transaction(async (client) => {
+    const maxRows = await db.query(
+      'SELECT COALESCE(MAX(sort_order), 0)::int AS max_order FROM menu_items WHERE category_id = $1 AND archived_at IS NULL',
+      [target.id],
+      client,
+    );
+    // Перенесённые блюда встают В КОНЕЦ целевой категории и сохраняют свой
+    // относительный порядок — не перемешиваются с уже существующими.
+    const moving = await db.query(
+      'SELECT id FROM menu_items WHERE category_id = $1 AND restaurant_id = $2 AND archived_at IS NULL ORDER BY sort_order, id',
+      [category.id, restaurantId],
+      client,
+    );
+    let position = maxRows[0].max_order;
+    for (const row of moving) {
+      position += 1;
+      // eslint-disable-next-line no-await-in-loop
+      await db.execute(
+        'UPDATE menu_items SET category_id = $1, sort_order = $2 WHERE id = $3 AND restaurant_id = $4',
+        [target.id, position, row.id, restaurantId],
+        client,
+      );
+    }
+    const updated = await db.execute(
+      'UPDATE categories SET archived_at = NOW() WHERE id = $1 AND restaurant_id = $2 RETURNING *',
+      [category.id, restaurantId],
+      client,
+    );
+    return { category: updated.rows[0] || null, movedCount: moving.length, targetCategory: target };
+  });
+}
+
+// Архив меню (спецификация, раздел «Архив меню»): архивированные блюда с их
+// прежней категорией + архивированные категории. Флаг categoryArchived
+// говорит UI, что при восстановлении блюда прежней категории уже нет в
+// рабочем меню и нужно выбрать другую.
+async function listMenuArchive(restaurantId) {
+  const items = await db.query(`
+    SELECT mi.*, c.name AS category_name, (c.archived_at IS NOT NULL) AS category_archived
+      FROM menu_items mi
+      LEFT JOIN categories c ON c.id = mi.category_id
+     WHERE mi.restaurant_id = $1 AND mi.archived_at IS NOT NULL
+     ORDER BY mi.archived_at DESC NULLS LAST, mi.id DESC
+  `, [restaurantId]);
+  const categories = await db.query(`
+    SELECT * FROM categories
+     WHERE restaurant_id = $1 AND archived_at IS NOT NULL
+     ORDER BY archived_at DESC NULLS LAST, id DESC
+  `, [restaurantId]);
+  return { items, categories };
+}
+
+// Восстановление блюда с явным выбором категории (спецификация: «если
+// прежней категории больше нет, предложить выбрать другую»). Без
+// targetCategoryId ведёт себя как прежний restoreMenuItem, но дополнительно
+// отказывается молча вернуть блюдо в архивированную категорию — иначе
+// «восстановленное» блюдо не появилось бы в рабочем меню, и это выглядело бы
+// как потеря.
+async function restoreMenuItemToCategory(restaurantId, itemId, targetCategoryId = null) {
+  const item = await getMenuItemById(restaurantId, itemId);
+  if (!item) return null;
+  if (!item.archived_at) throw new ValidationError('Блюдо не архивировано.');
+
+  let categoryId = item.category_id;
+  if (targetCategoryId !== null && targetCategoryId !== undefined && targetCategoryId !== '') {
+    const target = await getCategoryById(restaurantId, targetCategoryId);
+    if (!target) throw new ValidationError('Категория не найдена.');
+    if (target.archived_at) throw new ValidationError('Нельзя восстановить блюдо в архивированную категорию.');
+    categoryId = target.id;
+  } else {
+    const current = await getCategoryById(restaurantId, item.category_id);
+    if (!current || current.archived_at) {
+      throw new ValidationError('Прежней категории больше нет в рабочем меню — выберите категорию для восстановления.');
+    }
+  }
+
+  const updated = await db.execute(
+    'UPDATE menu_items SET archived_at = NULL, category_id = $1 WHERE id = $2 AND restaurant_id = $3 RETURNING *',
+    [categoryId, itemId, restaurantId],
+  );
+  return updated.rows[0] || null;
+}
+
 module.exports = {
   CATEGORY_NAME_MAX,
   ITEM_NAME_MAX,
@@ -422,4 +613,10 @@ module.exports = {
   moveMenuItemToCategory,
   listMenu,
   countAvailableMenuItems,
+  reorderCategories,
+  reorderMenuItems,
+  archiveCategoryWithItems,
+  moveItemsAndArchiveCategory,
+  listMenuArchive,
+  restoreMenuItemToCategory,
 };

@@ -33,6 +33,14 @@ const EXPECTED_TABLES = [
   'restaurant_legal_details', 'restaurant_bank_details', 'restaurant_contracts',
   // YAAM HQ Stage 8 (расчётные периоды и immutable snapshot обязательств).
   'settlement_periods', 'settlement_restaurant_lines', 'settlement_order_lines', 'settlement_refunds',
+  'settlement_adjustments',
+  // YAAM HQ Stage 13 — перенос долга и capability-доступ к документам.
+  'restaurant_settlement_balances', 'restaurant_balance_entries',
+  'settlement_document_access_tokens',
+  // YAAM HQ Stage 14 — юр.данные YAAM и фискальные чеки.
+  'yaam_legal_details', 'fiscal_receipts',
+  // Stage 15 — хранилище HQ-сессий в PostgreSQL (было MemoryStore).
+  'hq_sessions',
   // YAAM HQ Stage 9 (payout entity — без банковской интеграции).
   'restaurant_payouts',
   // YAAM HQ Stage 9.5 (payout attempts — реальные попытки обращения к банку).
@@ -40,6 +48,10 @@ const EXPECTED_TABLES = [
   // YAAM HQ Stage 9.6 (T-Bank integration readiness): реквизиты YAAM как
   // плательщика (singleton) + неизменяемый снимок реквизитов на попытку.
   'yaam_bank_details', 'payout_attempt_requisites',
+  // HQ «Обзор» — Центр событий (docs/HQ-PRODUCT-SPEC.md).
+  'hq_events',
+  // Расчётные документы периода: «Отчёт агента» и «Реестр заказов».
+  'settlement_documents',
 ];
 
 const EXPECTED_INDEXES = {
@@ -58,6 +70,8 @@ const EXPECTED_INDEXES = {
   // перестали быть partial (нет WHERE archived_at IS NULL).
   ix_restaurant_photos_owner: { unique: false, partial: false },
   ix_menu_item_photos_owner: { unique: false, partial: false },
+  // HQ «Обзор» — Центр событий (docs/HQ-PRODUCT-SPEC.md): сортировка ленты.
+  ix_hq_events_occurred_at: { unique: false, partial: false },
 };
 
 // Таблицы, где по схеме есть колонка created_at (categories/menu_items/order_items — нет).
@@ -78,6 +92,16 @@ const TABLES_WITH_CREATED_AT = [
   // requisites тоже (но не updated_at — строка неизменяема с момента вставки,
   // "updated" не может произойти никогда, поэтому этой колонки у неё нет).
   'yaam_bank_details', 'payout_attempt_requisites',
+  // Документы расчётного периода.
+  'settlement_adjustments',
+  'settlement_documents',
+  // Stage 13 — ledger долга и capability-токены документов.
+  // restaurant_settlement_balances сюда НЕ входит: это текущее состояние с
+  // updated_at, а не событие с моментом создания.
+  'restaurant_balance_entries',
+  'settlement_document_access_tokens',
+  // Stage 14.
+  'yaam_legal_details', 'fiscal_receipts',
 ];
 
 const EXPECTED_FUNCTIONS = [
@@ -100,11 +124,15 @@ const EXPECTED_FUNCTIONS = [
   'fn_payout_attempts_block_delete_after_terminal',
   // YAAM HQ Stage 9.6 — безусловная immutability на payout_attempt_requisites
   // (одна функция обслуживает и UPDATE-, и DELETE-триггер — см. schema.sql).
+  'fn_fiscal_receipts_payload_immutable',
   'fn_payout_attempt_requisites_immutable',
   // YAAM HQ Stage 9.8 (аудит Stage 9.7, находка F2) — amount неизменяем с
   // момента создания restaurant_payouts, отдельная функция/триггер, не
   // встроено в fn_restaurant_payouts_valid_transition.
   'fn_restaurant_payouts_amount_immutable',
+  // Документы периода неизменяемы — корректировка выпускает новую версию.
+  'fn_settlement_document_chain_consistent',
+  'fn_settlement_documents_immutable',
 ];
 
 // event — массив (не строка): некоторые Stage 8 триггеры объявлены как
@@ -131,6 +159,15 @@ const EXPECTED_TRIGGERS = {
   trg_payout_attempt_requisites_block_update: ['UPDATE'],
   trg_payout_attempt_requisites_block_delete: ['DELETE'],
   trg_restaurant_payouts_amount_immutable: ['UPDATE'],
+  trg_settlement_documents_immutable: ['UPDATE', 'DELETE'],
+  // Цепочка корректирующих версий: период/ресторан/вид/номер версии.
+  trg_settlement_document_chain: ['INSERT'],
+  // Сторно позднего возврата — такая же неизменяемая финансовая запись.
+  trg_settlement_adjustments_immutable: ['UPDATE', 'DELETE'],
+  // Проводка долга — такая же неизменяемая финансовая запись.
+  trg_restaurant_balance_entries_immutable: ['UPDATE', 'DELETE'],
+  // payload и связи чека неизменяемы; статус и попытки меняться могут.
+  trg_fiscal_receipts_payload_immutable: ['UPDATE'],
 };
 
 // hq_owner НЕ входит: его id — фиксированная константа (DEFAULT 1 CHECK
@@ -145,6 +182,11 @@ const IDENTITY_TABLES = [
   'restaurant_payouts',
   // YAAM HQ Stage 9.5.
   'payout_attempts',
+  // HQ «Обзор» — Центр событий (docs/HQ-PRODUCT-SPEC.md).
+  'hq_events',
+  // Расчётные документы периода: «Отчёт агента» и «Реестр заказов».
+  'settlement_adjustments',
+  'settlement_documents',
 ];
 
 let cluster;
@@ -169,7 +211,7 @@ async function runSchemaAndInspect(t, databaseName) {
       await client.query(SCHEMA_SQL);
     });
 
-    await t.test('создаются все 29 таблиц', async () => {
+    await t.test('создаются все 38 таблиц', async () => {
       const { rows } = await client.query(
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename`
       );
@@ -177,13 +219,13 @@ async function runSchemaAndInspect(t, databaseName) {
       assert.deepEqual(names, [...EXPECTED_TABLES].sort());
     });
 
-    await t.test('создаются все 33 внешних ключей', async () => {
+    await t.test('создаются все 51 внешний ключ', async () => {
       const { rows } = await client.query(`
         SELECT count(*)::int AS n
         FROM information_schema.table_constraints
         WHERE constraint_schema = 'public' AND constraint_type = 'FOREIGN KEY'
       `);
-      assert.equal(rows[0].n, 33);
+      assert.equal(rows[0].n, 51);
     });
 
     await t.test('CHECK-ограничения присутствуют (>=12, включая новый на payments.status)', async () => {
@@ -200,7 +242,7 @@ async function runSchemaAndInspect(t, databaseName) {
       assert.ok(onRefundsAmount, 'ожидали CHECK(amount > 0) на refunds');
     });
 
-    await t.test('создаются все 10 индексов, из них 7 partial unique', async () => {
+    await t.test('создаются все 11 индексов, из них 7 partial unique', async () => {
       const { rows } = await client.query(`
         SELECT
           i.relname AS index_name,
@@ -214,7 +256,7 @@ async function runSchemaAndInspect(t, databaseName) {
       `, [Object.keys(EXPECTED_INDEXES)]);
 
       const byName = Object.fromEntries(rows.map((r) => [r.index_name, r]));
-      assert.equal(Object.keys(byName).length, 10, 'ожидали ровно 10 именованных индексов из schema.sql');
+      assert.equal(Object.keys(byName).length, 11, 'ожидали ровно 11 именованных индексов из schema.sql');
 
       let partialUniqueCount = 0;
       for (const [name, expected] of Object.entries(EXPECTED_INDEXES)) {
@@ -227,7 +269,7 @@ async function runSchemaAndInspect(t, databaseName) {
       assert.equal(partialUniqueCount, 7, 'ожидали ровно 7 partial UNIQUE индексов');
     });
 
-    await t.test('создаются 14 PL/pgSQL-функций', async () => {
+    await t.test('создаются 17 PL/pgSQL-функций', async () => {
       const { rows } = await client.query(`
         SELECT routine_name, external_language
         FROM information_schema.routines
@@ -241,7 +283,7 @@ async function runSchemaAndInspect(t, databaseName) {
       }
     });
 
-    await t.test('создаются 17 триггеров (refunds + Stage 8 settlement-immutability + Stage 9/9.5/9.6/9.8 payout state machine) с ожидаемыми событиями', async () => {
+    await t.test('создаются 22 триггера (refunds + Stage 8 settlement-immutability + Stage 9/9.5/9.6/9.8 payout state machine) с ожидаемыми событиями', async () => {
       const { rows } = await client.query(`
         SELECT trigger_name, event_manipulation, event_object_table
         FROM information_schema.triggers
@@ -259,7 +301,7 @@ async function runSchemaAndInspect(t, databaseName) {
         eventsByName.get(r.trigger_name).add(r.event_manipulation);
         tableByName.set(r.trigger_name, r.event_object_table);
       }
-      assert.equal(eventsByName.size, 17, `ожидали 17 различных триггеров, получили: ${[...eventsByName.keys()].join(', ')}`);
+      assert.equal(eventsByName.size, 22, `ожидали 22 различных триггеров, получили: ${[...eventsByName.keys()].join(', ')}`);
 
       const EXPECTED_TABLE_BY_TRIGGER = {
         trg_refunds_amount_matches_payment: 'refunds',
@@ -274,6 +316,11 @@ async function runSchemaAndInspect(t, databaseName) {
         trg_restaurant_payouts_block_update_after_terminal: 'restaurant_payouts',
         trg_restaurant_payouts_block_delete_after_terminal: 'restaurant_payouts',
         trg_restaurant_payouts_amount_immutable: 'restaurant_payouts',
+        trg_settlement_documents_immutable: 'settlement_documents',
+        trg_settlement_document_chain: 'settlement_documents',
+        trg_settlement_adjustments_immutable: 'settlement_adjustments',
+        trg_restaurant_balance_entries_immutable: 'restaurant_balance_entries',
+        trg_fiscal_receipts_payload_immutable: 'fiscal_receipts',
         trg_payout_attempts_valid_transition: 'payout_attempts',
         trg_payout_attempts_block_update_after_terminal: 'payout_attempts',
         trg_payout_attempts_block_delete_after_terminal: 'payout_attempts',
@@ -319,7 +366,7 @@ async function runSchemaAndInspect(t, databaseName) {
       assert.equal(rows[0].data_type, 'bytea');
     });
 
-    await t.test('DEFAULT NOW() присутствует на всех 26 датовых колонках created_at', async () => {
+    await t.test('DEFAULT NOW() присутствует на всех 30 датовых колонках created_at', async () => {
       const { rows } = await client.query(`
         SELECT table_name, column_default
         FROM information_schema.columns

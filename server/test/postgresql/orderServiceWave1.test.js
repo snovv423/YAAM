@@ -539,11 +539,19 @@ test('restaurantAdvance 11+12. Клиенты возвращены в пул, wa
 //     отладке) — сравнивается по паттерну "начинается с YAAM-", не дословно.
 function normalizeForParity(order) {
   if (!order) return null;
-  const { id, restaurant_id, order_id, created_at, status_updated_at, public_code, ...rest } = order;
+  // preparation_deadline исключён из побайтового сравнения по той же причине,
+  // что created_at/status_updated_at выше: SQLite хранит дату TEXT-ом
+  // (datetime('now', ...)), PostgreSQL — TIMESTAMPTZ, и драйвер отдаёт Date.
+  // Сравнивается сам ФАКТ наличия дедлайна, а не его представление.
+  const {
+    id, restaurant_id, order_id, created_at, status_updated_at, public_code,
+    preparation_deadline, ...rest
+  } = order;
   return {
     ...rest,
     hasCreatedAt: created_at != null,
     hasStatusUpdatedAt: status_updated_at != null,
+    hasPreparationDeadline: preparation_deadline != null,
     publicCodeLooksRight: typeof public_code === 'string' && public_code.startsWith('YAAM-'),
   };
 }

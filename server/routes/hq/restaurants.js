@@ -15,6 +15,12 @@ const legalService = require('../../services/hq/restaurantLegalDetailsService');
 const bankService = require('../../services/hq/restaurantBankDetailsService');
 const contractService = require('../../services/hq/restaurantContractService');
 const payoutService = require('../../services/hq/restaurantPayoutService');
+// Сущность выплаты (обязательство/попытки) — ОТДЕЛЬНЫЙ сервис от
+// payoutService выше (тот про готовность реквизитов); имя намеренно другое,
+// тем же приёмом, что и в routes/hq/pages.js.
+const payoutRecordService = require('../../services/hq/payoutService');
+const payoutStateService = require('../../services/hq/restaurantPayoutStateService');
+const telegramLinkService = require('../../services/hq/telegramLinkService');
 const financeService = require('../../services/hq/restaurantFinanceService');
 const {
   logAuditEvent, summarizeRestaurantDiff, summarizeMenuItemDiff, summarizeCategoryDiff, summarizePhotoDetails,
@@ -50,17 +56,18 @@ function createRestaurantsRouter({ linkBasePath, mediaProvider = null }) {
   // Список + создание
   // ---------------------------------------------------------------------
 
+  // docs/HQ-PRODUCT-SPEC.md: без поиска/фильтров/сортировки/пагинации —
+  // простой список всех неархивированных ресторанов по алфавиту.
   router.get('/', async (req, res, next) => {
     try {
-      const filters = { search: req.query.search, city: req.query.city, status: req.query.status, sort: req.query.sort };
-      const result = await svc.listRestaurants({ ...filters, page: req.query.page });
+      const restaurants = await svc.listRestaurantsForHq();
       const csrfToken = ensureCsrfToken(req);
       res.send(layout({
         title: 'Рестораны',
         active: 'restaurants',
         csrfToken,
         linkBasePath,
-        body: views.renderRestaurantsList({ ...result, filters, linkBasePath }),
+        body: views.renderRestaurantsList({ restaurants, linkBasePath }),
       }));
     } catch (err) {
       next(err);
@@ -133,13 +140,16 @@ function createRestaurantsRouter({ linkBasePath, mediaProvider = null }) {
   // этом окружении — сама вкладка Настроек продолжает работать, просто без
   // раздела фотографий. Stage 5B.1: нет архивированных фотографий вовсе
   // (удаление необратимо) — список всегда один, без раздельного active/archived.
+  // maxPhotos — RESTAURANT_MAX_PHOTOS (3, docs/HQ-PRODUCT-SPEC.md), не общий
+  // MAX_PHOTOS_PER_OWNER: галерея ресторана ограничена тремя фотографиями и
+  // на уровне сервиса (photoService.uploadPhoto), и в подписи формы.
   async function restaurantPhotoViewData(restaurantId) {
-    if (!mediaProvider) return { photos: [], mediaConfigured: false, maxPhotos: photoService.MAX_PHOTOS_PER_OWNER };
+    if (!mediaProvider) return { photos: [], mediaConfigured: false, maxPhotos: photoService.RESTAURANT_MAX_PHOTOS };
     const all = await photoService.listRestaurantPhotos(restaurantId);
     return {
       photos: all.map((p) => ({ ...p, urls: photoService.photoVariantUrls(mediaProvider, p) })),
       mediaConfigured: true,
-      maxPhotos: photoService.MAX_PHOTOS_PER_OWNER,
+      maxPhotos: photoService.RESTAURANT_MAX_PHOTOS,
     };
   }
 
@@ -156,14 +166,13 @@ function createRestaurantsRouter({ linkBasePath, mediaProvider = null }) {
   }
 
   async function pageShell({ restaurant, active, csrfToken, tabBody, req }) {
-    const menuItemsCount = active === 'overview' || active === 'settings' ? await svc.countMenuItems(restaurant.id) : 0;
-    // Готовность к выплатам (задание, раздел 11) — компактная строка в
-    // шапке, видна на КАЖДОЙ вкладке ресторана (три быстрых point-lookup'а
-    // по PK из отдельных таблиц — дёшево на масштабе YAAM).
-    const payout = await payoutService.getRestaurantPayoutDetails(restaurant.id);
+    // docs/HQ-PRODUCT-SPEC.md, «Заголовок ресторана»: шапка содержит только
+    // название/города/статус/рейтинг — готовность к выплатам и Telegram
+    // больше не рендерятся на КАЖДОЙ вкладке (они на своих экранах), поэтому
+    // здесь исчезли и соответствующие запросы.
     const banner = views.renderActionBanner({ error: req?.query?.error, notice: req?.query?.notice });
     return banner
-      + views.renderRestaurantHeader({ restaurant, csrfToken, linkBasePath, menuItemsCount, payoutReadiness: payout.readiness })
+      + views.renderRestaurantHeader({ restaurant })
       + views.renderTabs({ restaurantId: restaurant.id, active, linkBasePath })
       + tabBody;
   }
@@ -191,11 +200,14 @@ function createRestaurantsRouter({ linkBasePath, mediaProvider = null }) {
   // --- Обзор ---
   router.get('/:id', async (req, res, next) => {
     try {
-      const overview = await statsService.getOverview(req.restaurant.id);
+      const [overview, payoutState] = await Promise.all([
+        statsService.getOverview(req.restaurant.id),
+        payoutStateService.getRestaurantPayoutState(req.restaurant.id),
+      ]);
       const csrfToken = ensureCsrfToken(req);
       const body = await pageShell({
         restaurant: req.restaurant, active: 'overview', csrfToken, req,
-        tabBody: views.renderOverviewTab({ restaurant: req.restaurant, overview, linkBasePath }),
+        tabBody: views.renderOverviewTab({ restaurant: req.restaurant, overview, payoutState, csrfToken, linkBasePath }),
       });
       res.send(layout({ title: req.restaurant.name, active: 'restaurants', csrfToken, linkBasePath, body }));
     } catch (err) {
@@ -203,14 +215,23 @@ function createRestaurantsRouter({ linkBasePath, mediaProvider = null }) {
     }
   });
 
-  // Polling JSON — тот же auth-периметр (requireHqAuth на точке монтирования
-  // всего роутера), no-store уже выставлен глобально hqSecurityHeaders, CSRF
-  // не требуется для GET (задание, раздел 12).
-  router.get('/:id/overview.json', async (req, res, next) => {
+  // Индивидуальная выплата ОДНОМУ ресторану (docs/HQ-PRODUCT-SPEC.md).
+  // Проходит через тот же payoutService.prepareRestaurantPayout(), что и
+  // общая вкладка «Выплаты» — отдельного приблизительного расчёта нет.
+  // Общая вкладка «Выплаты» этой задачей не переписывалась.
+  router.post('/:id/payout', requireCsrf, async (req, res, next) => {
+    const base = `${linkBasePath}/restaurants/${req.restaurant.id}`;
     try {
-      const overview = await statsService.getOverview(req.restaurant.id);
-      res.json(overview);
+      const payout = await payoutStateService.payRestaurantNow(req.restaurant.id);
+      await logAuditEvent({
+        action: 'restaurant_payout_prepared', restaurantId: req.restaurant.id,
+        details: `выплата #${payout.id}: ${payout.amount} ₽`, ip: req.ip,
+      });
+      res.redirect(`${base}?notice=${encodeURIComponent('Выплата подготовлена. Деньги будут отправлены после подключения банка.')}`);
     } catch (err) {
+      if (err instanceof payoutRecordService.ValidationError) {
+        return res.redirect(`${base}?error=${encodeURIComponent(err.message)}`);
+      }
       next(err);
     }
   });
@@ -285,19 +306,170 @@ function createRestaurantsRouter({ linkBasePath, mediaProvider = null }) {
     };
   }
 
+  // Превью блюда в компактной строке меню — первая (основная) загруженная
+  // фотография, если медиа настроено; иначе внешний photo_url, если он
+  // заполнен. Один запрос на всё меню, не N+1 по блюдам.
+  async function attachDishThumbs(restaurantId, menu) {
+    const byItem = new Map();
+    if (mediaProvider) {
+      const photos = await photoService.listMenuItemPhotosForRestaurant(restaurantId);
+      for (const p of photos) {
+        if (byItem.has(p.menu_item_id)) continue;
+        byItem.set(p.menu_item_id, photoService.photoVariantUrls(mediaProvider, p).thumb);
+      }
+    }
+    return menu.map((category) => ({
+      ...category,
+      items: category.items.map((item) => ({
+        ...item,
+        thumb_url: byItem.get(item.id) || item.photo_url || null,
+      })),
+    }));
+  }
+
   router.get('/:id/menu', async (req, res, next) => {
     try {
-      const menu = await menuSvc.listMenu(req.restaurant.id);
+      const rawMenu = await menuSvc.listMenu(req.restaurant.id);
+      const menu = await attachDishThumbs(req.restaurant.id, rawMenu);
       const csrfToken = ensureCsrfToken(req);
       const body = await pageShell({
         restaurant: req.restaurant, active: 'menu', csrfToken, req,
         tabBody: menuViews.renderMenuTab({
-          restaurant: req.restaurant, menu, filter: req.query.filter, csrfToken, linkBasePath,
+          restaurant: req.restaurant, menu, csrfToken, linkBasePath,
           error: req.query.error, notice: req.query.notice,
         }),
       });
       res.send(layout({ title: `Меню — ${req.restaurant.name}`, active: 'restaurants', csrfToken, linkBasePath, body }));
     } catch (err) {
+      next(err);
+    }
+  });
+
+  // --- Архив меню (docs/HQ-PRODUCT-SPEC.md, раздел «Архив меню») ---
+  router.get('/:id/menu/archive', async (req, res, next) => {
+    try {
+      const [archive, menu] = await Promise.all([
+        menuSvc.listMenuArchive(req.restaurant.id),
+        menuSvc.listMenu(req.restaurant.id),
+      ]);
+      const itemsWithThumbs = mediaProvider
+        ? await (async () => {
+            const photos = await photoService.listMenuItemPhotosForRestaurant(req.restaurant.id);
+            const byItem = new Map();
+            for (const p of photos) {
+              if (!byItem.has(p.menu_item_id)) byItem.set(p.menu_item_id, photoService.photoVariantUrls(mediaProvider, p).thumb);
+            }
+            return archive.items.map((i) => ({ ...i, thumb_url: byItem.get(i.id) || i.photo_url || null }));
+          })()
+        : archive.items.map((i) => ({ ...i, thumb_url: i.photo_url || null }));
+      const csrfToken = ensureCsrfToken(req);
+      const body = await pageShell({
+        restaurant: req.restaurant, active: 'menu', csrfToken, req,
+        tabBody: menuViews.renderMenuArchive({
+          restaurant: req.restaurant,
+          archive: { items: itemsWithThumbs, categories: archive.categories },
+          activeCategories: menu.filter((c) => !c.archived_at),
+          csrfToken, linkBasePath,
+        }),
+      });
+      res.send(layout({ title: `Архив меню — ${req.restaurant.name}`, active: 'restaurants', csrfToken, linkBasePath, body }));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // --- Порядок перетаскиванием (спецификация: без кнопок «Выше»/«Ниже») ---
+  // JSON-эндпоинты: клиент присылает полный новый порядок id, сервер
+  // применяет его целиком (см. menuAdminService.reorderCategories).
+  router.post('/:id/menu/reorder-categories', requireCsrf, async (req, res, next) => {
+    try {
+      const applied = await menuSvc.reorderCategories(req.restaurant.id, req.body.order);
+      if (applied > 0) {
+        await logAuditEvent({
+          action: 'category_moved', restaurantId: req.restaurant.id,
+          details: `новый порядок категорий (${applied})`, ip: req.ip,
+        });
+      }
+      res.json({ ok: true, applied });
+    } catch (err) {
+      if (err instanceof svc.ValidationError) return res.status(400).json({ error: err.message });
+      next(err);
+    }
+  });
+
+  router.post('/:id/menu/categories/:categoryId/reorder-items', requireCsrf, async (req, res, next) => {
+    try {
+      const applied = await menuSvc.reorderMenuItems(req.restaurant.id, req.category.id, req.body.order);
+      if (applied > 0) {
+        await logAuditEvent({
+          action: 'menu_item_moved', restaurantId: req.restaurant.id,
+          details: `новый порядок блюд в «${req.category.name}» (${applied})`, ip: req.ip,
+        });
+      }
+      res.json({ ok: true, applied });
+    } catch (err) {
+      if (err instanceof svc.ValidationError) return res.status(400).json({ error: err.message });
+      next(err);
+    }
+  });
+
+  // --- Архивирование НЕПУСТОЙ категории: два варианта ---
+  router.get('/:id/menu/categories/:categoryId/archive-options', async (req, res, next) => {
+    try {
+      const menu = await menuSvc.listMenu(req.restaurant.id);
+      const current = menu.find((c) => c.id === req.category.id);
+      const itemsCount = current ? current.items.filter((i) => !i.archived_at).length : 0;
+      const csrfToken = ensureCsrfToken(req);
+      const body = await pageShell({
+        restaurant: req.restaurant, active: 'menu', csrfToken, req,
+        tabBody: menuViews.renderCategoryArchiveOptions({
+          restaurant: req.restaurant, category: req.category, itemsCount,
+          otherCategories: menu.filter((c) => !c.archived_at && c.id !== req.category.id),
+          csrfToken, linkBasePath, error: req.query.error,
+        }),
+      });
+      res.send(layout({ title: `Архивирование категории — ${req.restaurant.name}`, active: 'restaurants', csrfToken, linkBasePath, body }));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post('/:id/menu/categories/:categoryId/archive-with-items', requireCsrf, async (req, res, next) => {
+    try {
+      const archived = await menuSvc.archiveCategoryWithItems(req.restaurant.id, req.category.id);
+      if (archived) {
+        await logAuditEvent({
+          action: 'category_archived', restaurantId: req.restaurant.id,
+          details: `name: "${archived.name}" (вместе с блюдами)`, ip: req.ip,
+        });
+        await autoCloseIfNoAvailableDishes(req.restaurant, req.ip);
+      }
+      menuActionRedirect(res, req.restaurant.id, { notice: 'Категория архивирована вместе с блюдами.' });
+    } catch (err) {
+      if (err instanceof svc.ValidationError) {
+        return res.redirect(`${linkBasePath}/restaurants/${req.restaurant.id}/menu/categories/${req.category.id}/archive-options?error=${encodeURIComponent(err.message)}`);
+      }
+      next(err);
+    }
+  });
+
+  router.post('/:id/menu/categories/:categoryId/move-items-archive', requireCsrf, async (req, res, next) => {
+    try {
+      const result = await menuSvc.moveItemsAndArchiveCategory(
+        req.restaurant.id, req.category.id, req.body.target_category_id,
+      );
+      if (result) {
+        await logAuditEvent({
+          action: 'category_archived', restaurantId: req.restaurant.id,
+          details: `name: "${req.category.name}" (блюда перенесены в "${result.targetCategory.name}": ${result.movedCount})`,
+          ip: req.ip,
+        });
+      }
+      menuActionRedirect(res, req.restaurant.id, { notice: `Блюда перенесены (${result ? result.movedCount : 0}), категория архивирована.` });
+    } catch (err) {
+      if (err instanceof svc.ValidationError) {
+        return res.redirect(`${linkBasePath}/restaurants/${req.restaurant.id}/menu/categories/${req.category.id}/archive-options?error=${encodeURIComponent(err.message)}`);
+      }
       next(err);
     }
   });
@@ -372,37 +544,32 @@ function createRestaurantsRouter({ linkBasePath, mediaProvider = null }) {
           details: `name: "${restored.name}"`, ip: req.ip,
         });
       }
-      menuActionRedirect(res, req.restaurant.id);
+      res.redirect(`${linkBasePath}/restaurants/${req.restaurant.id}/menu/archive`);
     } catch (err) {
       if (err instanceof svc.ValidationError) {
-        return menuActionRedirect(res, req.restaurant.id, { error: err.message });
+        return res.redirect(`${linkBasePath}/restaurants/${req.restaurant.id}/menu/archive?error=${encodeURIComponent(err.message)}`);
       }
       next(err);
     }
   });
 
-  router.post('/:id/menu/categories/:categoryId/move', requireCsrf, async (req, res, next) => {
-    try {
-      await menuSvc.moveCategory(req.restaurant.id, req.category.id, req.body.direction === 'up' ? 'up' : 'down');
-      await logAuditEvent({
-        action: 'category_moved', restaurantId: req.restaurant.id,
-        details: `name: "${req.category.name}", direction: ${req.body.direction}`, ip: req.ip,
-      });
-      menuActionRedirect(res, req.restaurant.id);
-    } catch (err) {
-      if (err instanceof svc.ValidationError) {
-        return menuActionRedirect(res, req.restaurant.id, { error: err.message });
-      }
-      next(err);
-    }
-  });
+  // moveCategory/moveMenuItem (кнопки «Выше»/«Ниже») удалены —
+  // docs/HQ-PRODUCT-SPEC.md запрещает их, порядок меняется перетаскиванием
+  // через /reorder-categories и /reorder-items выше. Сами сервисные функции
+  // moveCategory()/moveMenuItem() оставлены нетронутыми: они по-прежнему
+  // покрыты тестами Stage 5A и не мешают, но HTTP-поверхности у них больше
+  // нет.
 
+  // ?category=N — блюдо создаётся ВНУТРИ выбранной категории (спецификация:
+  // глобальной кнопки «Добавить блюдо» в меню больше нет), поэтому нужная
+  // категория уже выбрана в форме.
   router.get('/:id/menu/items/new', async (req, res, next) => {
     try {
       const menu = await menuSvc.listMenu(req.restaurant.id);
       const csrfToken = ensureCsrfToken(req);
       const body = menuViews.renderMenuItemForm({
         restaurant: req.restaurant, item: null, categories: menu, csrfToken, linkBasePath, isNew: true,
+        presetCategoryId: req.query.category || null,
       });
       res.send(layout({ title: `Новое блюдо — ${req.restaurant.name}`, active: 'restaurants', csrfToken, linkBasePath, body }));
     } catch (err) {
@@ -611,35 +778,26 @@ function createRestaurantsRouter({ linkBasePath, mediaProvider = null }) {
     }
   });
 
+  // Восстановление из архива (спецификация: «возвращать блюдо в прежнюю
+  // категорию; если прежней категории больше нет, предложить выбрать
+  // другую») — target_category_id приходит из селектора на экране архива
+  // только когда прежняя категория архивирована.
   router.post('/:id/menu/items/:itemId/restore', requireCsrf, async (req, res, next) => {
+    const archiveUrl = `${linkBasePath}/restaurants/${req.restaurant.id}/menu/archive`;
     try {
-      const restored = await menuSvc.restoreMenuItem(req.restaurant.id, req.menuItem.id);
+      const restored = await menuSvc.restoreMenuItemToCategory(
+        req.restaurant.id, req.menuItem.id, req.body.target_category_id || null,
+      );
       if (restored) {
         await logAuditEvent({
           action: 'menu_item_restored', restaurantId: req.restaurant.id,
           details: `name: "${restored.name}"`, ip: req.ip,
         });
       }
-      menuActionRedirect(res, req.restaurant.id);
+      res.redirect(archiveUrl);
     } catch (err) {
       if (err instanceof svc.ValidationError) {
-        return menuActionRedirect(res, req.restaurant.id, { error: err.message });
-      }
-      next(err);
-    }
-  });
-
-  router.post('/:id/menu/items/:itemId/move', requireCsrf, async (req, res, next) => {
-    try {
-      await menuSvc.moveMenuItem(req.restaurant.id, req.menuItem.id, req.body.direction === 'up' ? 'up' : 'down');
-      await logAuditEvent({
-        action: 'menu_item_moved', restaurantId: req.restaurant.id,
-        details: `name: "${req.menuItem.name}", direction: ${req.body.direction}`, ip: req.ip,
-      });
-      menuActionRedirect(res, req.restaurant.id);
-    } catch (err) {
-      if (err instanceof svc.ValidationError) {
-        return menuActionRedirect(res, req.restaurant.id, { error: err.message });
+        return res.redirect(`${archiveUrl}?error=${encodeURIComponent(err.message)}`);
       }
       next(err);
     }
@@ -664,10 +822,9 @@ function createRestaurantsRouter({ linkBasePath, mediaProvider = null }) {
   // --- Заказы ---
   router.get('/:id/orders', async (req, res, next) => {
     try {
-      const filters = {
-        filter: req.query.filter, status: req.query.status, code: req.query.code,
-        from: req.query.from, to: req.query.to,
-      };
+      // docs/HQ-PRODUCT-SPEC.md: на вкладке остался только фильтр по датам —
+      // status/filter/code больше не читаются из query.
+      const filters = { from: req.query.from, to: req.query.to };
       const result = await statsService.listRestaurantOrders(req.restaurant.id, { ...filters, page: req.query.page });
       const csrfToken = ensureCsrfToken(req);
       const body = await pageShell({
@@ -731,15 +888,13 @@ function createRestaurantsRouter({ linkBasePath, mediaProvider = null }) {
         periodOptions.period = 'today';
         statistics = await statsService.getStatistics(req.restaurant.id, { period: 'today' });
       }
-      // YAAM HQ Stage 7 — тот же (уже провалидированный/упавший-на-today
-      // periodOptions) период, что и статистика выше, — один селектор
-      // периода управляет обоими блоками (задание, раздел 8: "не создавать
-      // лишнюю вкладку, если данные логично помещаются в текущий экран").
-      const financialPosition = await financeService.getRestaurantFinancialPosition(req.restaurant.id, periodOptions);
+      // Финансовый блок со «Статистики» удалён (docs/HQ-PRODUCT-SPEC.md:
+      // дублирование «Обзора» и «Финансов» запрещено) — вместе с ним исчез и
+      // запрос getRestaurantFinancialPosition() на этой странице.
       const csrfToken = ensureCsrfToken(req);
       const body = await pageShell({
         restaurant: req.restaurant, active: 'statistics', csrfToken, req,
-        tabBody: views.renderStatisticsTab({ restaurant: req.restaurant, statistics, financialPosition, periodOptions, linkBasePath, error: periodError }),
+        tabBody: views.renderStatisticsTab({ restaurant: req.restaurant, statistics, periodOptions, linkBasePath, error: periodError }),
       });
       res.send(layout({ title: `Статистика — ${req.restaurant.name}`, active: 'restaurants', csrfToken, linkBasePath, body }));
     } catch (err) {
@@ -753,9 +908,13 @@ function createRestaurantsRouter({ linkBasePath, mediaProvider = null }) {
       const csrfToken = ensureCsrfToken(req);
       const photoData = await restaurantPhotoViewData(req.restaurant.id);
       const financeData = await restaurantFinanceViewData(req.restaurant.id);
+      const telegram = await telegramLinkService.getLinkState(req.restaurant.id);
       const body = await pageShell({
         restaurant: req.restaurant, active: 'settings', csrfToken, req,
-        tabBody: views.renderRestaurantSettingsTab({ restaurant: req.restaurant, linkBasePath, csrfToken, ...photoData, ...financeData }),
+        tabBody: views.renderRestaurantSettingsTab({
+          restaurant: req.restaurant, linkBasePath, csrfToken, telegram,
+          error: req.query.error, notice: req.query.notice, ...photoData, ...financeData,
+        }),
       });
       res.send(layout({ title: `Настройки — ${req.restaurant.name}`, active: 'restaurants', csrfToken, linkBasePath, body }));
     } catch (err) {
@@ -772,9 +931,10 @@ function createRestaurantsRouter({ linkBasePath, mediaProvider = null }) {
       const csrfToken = ensureCsrfToken(req);
       const photoData = await restaurantPhotoViewData(updated.id);
       const financeData = await restaurantFinanceViewData(updated.id);
+      const telegram = await telegramLinkService.getLinkState(updated.id);
       const body = await pageShell({
         restaurant: updated, active: 'settings', csrfToken, req,
-        tabBody: views.renderRestaurantSettingsTab({ restaurant: updated, linkBasePath, csrfToken, notice: 'Изменения сохранены.', ...photoData, ...financeData }),
+        tabBody: views.renderRestaurantSettingsTab({ restaurant: updated, linkBasePath, csrfToken, telegram, notice: 'Изменения сохранены.', ...photoData, ...financeData }),
       });
       res.send(layout({ title: `Настройки — ${updated.name}`, active: 'restaurants', csrfToken, linkBasePath, body }));
     } catch (err) {
@@ -807,6 +967,66 @@ function createRestaurantsRouter({ linkBasePath, mediaProvider = null }) {
   });
 
   // --- Юридические данные (Stage 6) ---
+
+  // --- Telegram-подключение (docs/HQ-PRODUCT-SPEC.md) ---
+  // HQ только ВЫДАЁТ/гасит одноразовый код; сама привязка чата происходит в
+  // Telegram-группе (bot/postgresql/index.js: /start КОД) — chat_id известен
+  // только Telegram-стороне.
+  function telegramRedirect(res, restaurantId, extra) {
+    const qs = extra ? `?${new URLSearchParams(extra).toString()}` : '';
+    res.redirect(`${linkBasePath}/restaurants/${restaurantId}/settings${qs}`);
+  }
+
+  router.post('/:id/telegram/new-code', requireCsrf, async (req, res, next) => {
+    try {
+      await telegramLinkService.issueConnectCode(req.restaurant.id);
+      telegramRedirect(res, req.restaurant.id, { notice: 'Код подключения выпущен. Отправьте его в рабочей группе ресторана.' });
+    } catch (err) {
+      if (err instanceof svc.ValidationError) return telegramRedirect(res, req.restaurant.id, { error: err.message });
+      next(err);
+    }
+  });
+
+  router.post('/:id/telegram/reconnect', requireCsrf, async (req, res, next) => {
+    try {
+      await telegramLinkService.reconnect(req.restaurant.id);
+      telegramRedirect(res, req.restaurant.id, { notice: 'Группа отвязана, выпущен новый код подключения.' });
+    } catch (err) {
+      if (err instanceof svc.ValidationError) return telegramRedirect(res, req.restaurant.id, { error: err.message });
+      next(err);
+    }
+  });
+
+  router.post('/:id/telegram/disconnect', requireCsrf, async (req, res, next) => {
+    try {
+      await telegramLinkService.disconnect(req.restaurant.id);
+      telegramRedirect(res, req.restaurant.id, { notice: 'Telegram отключён. Ресторан не будет получать заказы, пока не подключится снова.' });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // «Отправить тест» — реальная отправка сообщения в привязанную группу
+  // через уже работающего бота. Бот доступен HQ только если он запущен на
+  // этом процессе (botHandlers прокидывается из services/postgresql/app.js);
+  // если нет — владельцу честно сообщается, что тест недоступен, а не
+  // рисуется ложный успех.
+  router.post('/:id/telegram/test', requireCsrf, async (req, res, next) => {
+    try {
+      const state = await telegramLinkService.getLinkState(req.restaurant.id);
+      if (!state || !state.connected) {
+        return telegramRedirect(res, req.restaurant.id, { error: 'Telegram не подключён.' });
+      }
+      const bot = req.app.get('yaamTelegramBot');
+      if (!bot || typeof bot.sendMessage !== 'function') {
+        return telegramRedirect(res, req.restaurant.id, { error: 'Telegram-бот сейчас не запущен на этом сервере — тест отправить нельзя.' });
+      }
+      await bot.sendMessage(state.chatId, 'Проверка связи YAAM. Эта группа подключена и получает заказы.');
+      telegramRedirect(res, req.restaurant.id, { notice: 'Тестовое сообщение отправлено в группу.' });
+    } catch (err) {
+      return telegramRedirect(res, req.restaurant.id, { error: `Не удалось отправить сообщение: ${err.message}` });
+    }
+  });
 
   router.get('/:id/legal-details/edit', async (req, res, next) => {
     try {

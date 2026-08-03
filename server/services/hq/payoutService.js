@@ -510,7 +510,31 @@ async function markAttemptFailed(attemptId, { bankStatus = null, errorCode = nul
       ', failed_at = NOW(), failure_reason = $4',
       [sanitizeErrorMessage(errorMessage)],
     );
-    return { attempt: updatedAttempt.rows[0], payout };
+    return { attempt: updatedAttempt.rows[0], payout, blocked: nextObligationStatus === 'blocked' };
+  }).then((result) => {
+    // HQ «Центр событий» — "ошибка выплаты ресторану" (docs/HQ-PRODUCT-
+    // SPEC.md). Только 'blocked' (retryable=false) считается реальной
+    // проблемой, требующей владельца: retryable=true возвращает
+    // обязательство в 'prepared' и будет автоматически повторено — задание,
+    // раздел 3: "без информационного шума", терминальная лента не для
+    // самовосстанавливающихся сбоев.
+    if (result.blocked) {
+      logPayoutBlockedEvent(result.payout).catch((err) => {
+        console.error(`[services/hq/payoutService] hq_events log failed for payout ${result.payout.id}:`, err.message);
+      });
+    }
+    return result;
+  });
+}
+
+async function logPayoutBlockedEvent(payout) {
+  const eventLogService = require('./eventLogService');
+  const [row] = await db.query(`SELECT name FROM restaurants WHERE id = $1`, [payout.restaurant_id]);
+  return eventLogService.createEvent({
+    category: 'payout_issue',
+    restaurantId: payout.restaurant_id,
+    restaurantName: row ? row.name : null,
+    message: `Выплата ресторану на сумму ${payout.amount} ₽ заблокирована: ${payout.failure_reason}. Требует решения.`,
   });
 }
 

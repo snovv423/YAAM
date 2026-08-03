@@ -69,6 +69,7 @@ const yaamBankDetailsService = require('../../services/hq/yaamBankDetailsService
 const restaurantBankDetailsService = require('../../services/hq/restaurantBankDetailsService');
 const restaurantContractService = require('../../services/hq/restaurantContractService');
 const tbankPayoutStatusMapper = require('../../services/hq/tbankPayoutStatusMapper');
+const eventLogService = require('../../services/hq/eventLogService');
 
 // Те же вымышленные, но математически корректные (проходят реальные
 // checksum-проверки БИК/р/с) реквизиты, что уже используются во всех
@@ -456,6 +457,19 @@ async function main() {
         [paymentId, paymentAmount, `hqtest-seed-refund-${problemRefundOrder.id}`],
       );
       log(`YAAM-HQT012: демонстрационный НЕУСПЕШНЫЙ возврат создан напрямую (см. комментарий в коде) — единственное исключение из "только сервисы"`);
+      // HQ «Центр событий» — реальный код (orderService.finalizeRefundFailed)
+      // не выполняется на этом пути (см. комментарий блока выше — прямой
+      // INSERT в refunds, не сервисный вызов), поэтому событие для demo
+      // категории "ошибка возврата" создаётся здесь явно тем же текстом,
+      // что произвёл бы реальный хук.
+      await eventLogService.createEvent({
+        category: 'refund_issue',
+        restaurantId: restA.id,
+        restaurantName: 'HQTEST Хачапурная (тест)',
+        orderId: problemRefundOrder.id,
+        orderPublicCode: 'YAAM-HQT012',
+        message: 'Возврат по заказу YAAM-HQT012 не удался: платёжный провайдер был недоступен. Требует ручной проверки.',
+      });
     }
   }
 
@@ -534,6 +548,36 @@ async function main() {
     await payoutService.markAttemptSubmitting(attemptB.id);
     await tbankPayoutStatusMapper.applyTBankPayoutStatus(attemptB.id, tbankPayoutStatusMapper.EXTERNAL_STATUS_CANCELLED, { retryableOnFailure: false });
     log(`выплата ${payoutB.id}: проблемная попытка ${attemptB.id} (CANCELLED от Т-Банка, обязательство -> blocked)`);
+  }
+
+  // -------------------------------------------------------------------
+  // 6. Демонстрационные события категорий БЕЗ подключённого production-
+  //    источника (docs/HQ-PRODUCT-SPEC.md, раздел "Источники событий") —
+  //    "payment_issue" (нет надёжного отличия от штатного отклонения карты
+  //    клиентом — см. итоговый отчёт), "backend_issue"/"telegram_issue" в
+  //    их процессно-уровневой форме (сбой всего процесса/бота, а не одного
+  //    уведомления — ту форму уже покрывает реальный хук в bot/postgresql/
+  //    index.js, см. блок 3i выше для order_missed). Идемпотентность — по
+  //    наличию хотя бы одного payment_issue-события: production-код никогда
+  //    его не создаёт, значит только этот блок могло его создать раньше.
+  // -------------------------------------------------------------------
+  const existingDemoEvent = await db.query(`SELECT id FROM hq_events WHERE category = 'payment_issue' LIMIT 1`);
+  if (existingDemoEvent[0]) {
+    log('демонстрационные события категорий без источника уже созданы — пропуск');
+  } else {
+    await eventLogService.createEvent({
+      category: 'payment_issue',
+      message: 'hqtest seed: демонстрационное событие категории «ошибка оплаты» — источник ещё не подключён в production (см. отчёт).',
+    });
+    await eventLogService.createEvent({
+      category: 'backend_issue',
+      message: 'hqtest seed: демонстрационное событие категории «сбой backend».',
+    });
+    await eventLogService.createEvent({
+      category: 'telegram_issue',
+      message: 'hqtest seed: демонстрационное событие категории «сбой Telegram-бота».',
+    });
+    log('демонстрационные события созданы (payment_issue/backend_issue/telegram_issue)');
   }
 
   log('готово.');

@@ -13,16 +13,21 @@ const { SESSION_COOKIE_NAME } = require('../../services/hq/session');
 const { hqRootPath } = require('../../services/hq/basePath');
 const ownerService = require('../../services/hq/ownerService');
 const { logSecurityEvent } = require('../../services/hq/securityLog');
+const rateLimit = require('express-rate-limit');
+const yaamLegalDetailsService = require('../../services/hq/yaamLegalDetailsService');
+const fiscalReceiptService = require('../../services/fiscalization/fiscalReceiptService');
+const settingsViews = require('../../hq/settingsViews');
 const dashboardMetrics = require('../../services/hq/dashboardMetrics');
+const eventLogService = require('../../services/hq/eventLogService');
+const payoutStatusService = require('../../services/hq/payoutStatusService');
+// Сущность выплаты — ОТДЕЛЬНЫЙ сервис от payoutService выше (тот про
+// готовность реквизитов); имя намеренно другое, тем же приёмом, что и в
+// routes/hq/restaurants.js.
+const payoutRecordService = require('../../services/hq/payoutService');
 const payoutService = require('../../services/hq/restaurantPayoutService');
 const financeService = require('../../services/hq/restaurantFinanceService');
 const settlementService = require('../../services/hq/settlementService');
 const settlementViews = require('../../hq/settlementViews');
-// Stage 9 — payoutRecordService (НЕ payoutService выше, который про
-// готовность к выплате, Stage 6): реальная сущность выплаты (создана/в
-// обработке/успешна/ошибка). Имя переменной намеренно другое — во избежание
-// коллизии с уже существующим "payoutService" (readiness) в этом же файле.
-const payoutRecordService = require('../../services/hq/payoutService');
 const { CONTRACT_STATUS_LABELS } = require('../../services/hq/restaurantContractService');
 const { ValidationError } = require('../../services/hq/restaurantAdminService');
 // Stage 9.6 — реквизиты YAAM как плательщика (T-Bank T-API from.*), HQ-only
@@ -45,89 +50,104 @@ const STATUS_LABELS = {
 // одна проверка длины.
 const MIN_PASSWORD_LENGTH = 8;
 
-function renderOverview({ top, active, restaurants, finance, payoutStats, attentionItems, csrfToken, linkBasePath }) {
-  const attentionBlock = attentionItems.length
-    ? `<ul style="margin:0;padding-left:18px">${attentionItems.map((i) => `<li class="attention-item">${esc(i.label)}</li>`).join('')}</ul>`
-    : `<div class="attention-ok">Всё спокойно. Действий не требуется.</div>`;
+// docs/HQ-PRODUCT-SPEC.md — HQ «Обзор» переработан как кабинет владельца:
+// 4 показателя бизнеса за выбранный период + терминальный «Центр событий»
+// (только реальные проблемы). Рестораны/Финансы/Выплаты/Настройки не
+// затронуты этой правкой — их SSR-страницы ниже в этом же файле не менялись.
+const OVERVIEW_PERIODS = [
+  ['today', 'Сегодня'],
+  ['week', 'Неделя'],
+  ['month', 'Месяц'],
+];
 
-  const activeOrdersRows = [
-    ['awaitingPayment', 'Ожидают оплаты'],
-    ['awaitingRestaurant', 'Ожидают ресторан'],
-    ['accepted', 'Приняты'],
-    ['preparing', 'Готовятся'],
-    ['courier', 'В доставке'],
-  ].map(([key, label]) => `
-    <div class="metric">
-      <div class="value">${active[key]}</div>
-      <div class="label">${esc(label)}</div>
-    </div>`).join('');
+function renderPeriodSwitch(period, linkBasePath) {
+  return `<div class="period-switch" role="tablist" aria-label="Период">${OVERVIEW_PERIODS.map(([key, label]) => {
+    const isOn = key === period;
+    return `<a href="${linkBasePath}/?period=${key}" role="tab" aria-selected="${isOn}" class="${isOn ? 'on' : ''}">${esc(label)}</a>`;
+  }).join('')}</div>`;
+}
 
-  const restaurantsRows = restaurants.length
-    ? restaurants.map((r) => {
-        const statusBadge = r.pausedUntil
-          ? '<span class="badge paused">На паузе</span>'
-          : (r.isOpen ? '<span class="badge open">Открыт</span>' : '<span class="badge closed">Закрыт</span>');
-        return `<tr>
-          <td>${esc(r.name)}</td>
-          <td>${statusBadge}</td>
-          <td>${r.activeOrders}</td>
-          <td>${r.telegramConnected ? 'Подключён' : 'Не подключён'}</td>
-        </tr>`;
-      }).join('')
-    : `<tr><td colspan="4" class="empty-state">Ресторанов пока нет.</td></tr>`;
+function renderOverviewMetrics(metrics) {
+  return `
+    <div class="metric-grid compact">
+      <div class="metric"><div class="value">${metrics.ordersCount}</div><div class="label">Заказы</div></div>
+      <div class="metric"><div class="value">${metrics.turnover} ₽</div><div class="label">Оборот</div></div>
+      <div class="metric"><div class="value">${metrics.commission} ₽</div><div class="label">Доход YAAM</div></div>
+      <div class="metric"><div class="value">${metrics.restaurantsCount}</div><div class="label">Рестораны</div></div>
+    </div>`;
+}
 
+// Единственный ряд ленты — переиспользуется полной страницей «Обзор»,
+// страницей «История» и JSON-фрагментом живого обновления (routes ниже),
+// чтобы разметка одного события не могла разойтись между тремя местами.
+function renderEventRow(event, now) {
+  const timeLabel = eventLogService.formatEventTimestamp(event.occurredAt, now);
+  const restaurantLine = event.restaurantName
+    ? `<div class="event-restaurant">${esc(event.restaurantName)}</div>` : '';
+  return `<div class="event-row" data-event-id="${event.id}">
+    <div class="event-time">${esc(timeLabel)}</div>
+    ${restaurantLine}
+    <div class="event-message">${esc(event.message)}</div>
+  </div>`;
+}
+
+// «Центр событий» (задание, раздел 3-4) — терминальная лента, тёмно-серый
+// фон (НЕ --panel — тот зелёный, тон панелей всего остального HQ; здесь
+// намеренно другой, нейтральный «терминальный» цвет, см. layout.js). Пустое
+// состояние — короткая спокойная фраза, без декоративных нулей (задание,
+// раздел 7).
+function renderEventCenter({ events, now, linkBasePath, csrfToken }) {
+  const rows = events.length
+    ? events.map((e) => renderEventRow(e, now)).join('')
+    : `<div class="event-empty">Проблем нет.</div>`;
+  const lastId = events.length ? events[events.length - 1].id : 0;
+  return `
+    <div class="event-center" id="hq-event-center" data-endpoint="${linkBasePath}/events/feed" data-last-id="${lastId}">
+      <div class="event-center-head">
+        <span>Центр событий</span>
+        <button type="button" class="event-expand-btn" aria-expanded="false">Раскрыть</button>
+      </div>
+      <div class="event-center-scroll">${rows}</div>
+      <div class="event-center-footer">
+        <a href="${linkBasePath}/events/history">История</a>
+        <form method="post" action="${linkBasePath}/events/clear" style="margin:0">
+          <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
+          <button type="submit" class="event-clear-btn">Очистить</button>
+        </form>
+      </div>
+    </div>`;
+}
+
+function renderOverview({ period, metrics, events, now, csrfToken, linkBasePath }) {
   return `
     <h1>Обзор</h1>
-    <div class="metric-grid">
-      <div class="metric"><div class="value">${top.ordersToday}</div><div class="label">Заказов сегодня</div></div>
-      <div class="metric"><div class="value">${top.turnoverToday} ₽</div><div class="label">Оборот сегодня</div></div>
-      <div class="metric"><div class="value">${top.commissionToday} ₽</div><div class="label">Комиссия YAAM сегодня</div></div>
-      <div class="metric"><div class="value">${top.activeRestaurants}</div><div class="label">Активные рестораны</div></div>
-      <div class="metric"><div class="value">${top.attentionCount}</div><div class="label">Требуют внимания</div></div>
-    </div>
+    ${renderPeriodSwitch(period, linkBasePath)}
+    ${renderOverviewMetrics(metrics)}
+    ${renderEventCenter({ events, now, linkBasePath, csrfToken })}
+  `;
+}
 
-    <div class="panel">
-      <div style="font-weight:700;margin-bottom:14px">Активные заказы</div>
-      <div class="metric-grid">${activeOrdersRows}</div>
+// «История» (задание, раздел 6) — полный архив, курсор очистки не
+// применяется. Тот же терминальный стиль/renderEventRow, что и основная
+// лента — простая постраничная навигация (тот же PAGE_SIZE-паттерн, что и
+// остальной HQ), не бесконечный скролл.
+function renderEventHistory({ archive, now, linkBasePath }) {
+  const rows = archive.events.length
+    ? archive.events.map((e) => renderEventRow(e, now)).join('')
+    : `<div class="event-empty">История пуста.</div>`;
+  const pager = archive.totalPages > 1 ? `
+    <div class="pagination">
+      ${archive.page > 1 ? `<a href="${linkBasePath}/events/history?page=${archive.page - 1}">← Раньше</a>` : ''}
+      <span class="current">${archive.page} / ${archive.totalPages}</span>
+      ${archive.page < archive.totalPages ? `<a href="${linkBasePath}/events/history?page=${archive.page + 1}">Позже →</a>` : ''}
+    </div>` : '';
+  return `
+    <h1>История событий</h1>
+    <a class="btn ghost" style="margin-bottom:16px;display:inline-block" href="${linkBasePath}/">← К обзору</a>
+    <div class="event-center event-center-full">
+      <div class="event-center-scroll">${rows}</div>
     </div>
-
-    <div class="panel">
-      <div style="font-weight:700;margin-bottom:14px">Рестораны</div>
-      <table>
-        <thead><tr><th>Название</th><th>Статус</th><th>Активных заказов</th><th>Telegram</th></tr></thead>
-        <tbody>${restaurantsRows}</tbody>
-      </table>
-    </div>
-
-    <div class="panel">
-      <div style="font-weight:700;margin-bottom:14px">Финансовая сводка (сегодня)</div>
-      <table>
-        <tr><td>Оборот доставленных заказов</td><td style="text-align:right">${finance.turnover} ₽</td></tr>
-        <tr><td>Комиссия YAAM</td><td style="text-align:right">${finance.commission} ₽</td></tr>
-        <tr><td>Доля ресторанов</td><td style="text-align:right">${finance.restaurantsShare} ₽</td></tr>
-        <tr><td>Возвращено клиентам</td><td style="text-align:right">${finance.refundedOrders} шт · ${finance.refundedAmount} ₽</td></tr>
-      </table>
-      <div class="empty-state" style="margin-top:10px">Возвраты показаны отдельно и не вычитаются повторно из заработка ресторана, если отменённый заказ не входил в доставленный оборот. Банковские выплаты будут доступны после подключения финансового модуля.</div>
-    </div>
-
-    <div class="panel">
-      <div style="font-weight:700;margin-bottom:14px">Выплаты</div>
-      <table>
-        <tr><td>Подготовлено (ждут попытки)</td><td style="text-align:right">${payoutStats.preparedCount}</td></tr>
-        <tr><td>В обработке</td><td style="text-align:right">${payoutStats.processingCount}</td></tr>
-        <tr><td>Результат неизвестен</td><td style="text-align:right">${payoutStats.unknownCount}</td></tr>
-        <tr><td>Заблокировано (требуют решения)</td><td style="text-align:right">${payoutStats.blockedCount}</td></tr>
-        <tr><td>Успешных выплат</td><td style="text-align:right">${payoutStats.succeededCount}</td></tr>
-        <tr><td>Сумма успешных</td><td style="text-align:right">${payoutStats.succeededAmount} ₽</td></tr>
-        <tr><td>Сумма к выплате (ещё не оплачено)</td><td style="text-align:right">${payoutStats.owedAmount} ₽</td></tr>
-      </table>
-      <a class="btn ghost" style="margin-top:14px;display:inline-block" href="${linkBasePath}/payouts">Открыть «Выплаты»</a>
-    </div>
-
-    <div class="panel">
-      <div style="font-weight:700;margin-bottom:14px">Требует внимания</div>
-      ${attentionBlock}
-    </div>
+    ${pager}
   `;
 }
 
@@ -139,74 +159,128 @@ function renderOverview({ top, active, restaurants, finance, payoutStats, attent
 // ВСЕГДА за всё время (не зависит от выбранного периода отчёта — это
 // остаток задолженности, а не поток за период, см. services/hq/
 // restaurantFinanceService.js за полным обоснованием) — подписано явно.
-function renderFinancePage({ overall, positions, periodOptions, linkBasePath, error, settlementPeriods }) {
+// docs/HQ-PRODUCT-SPEC.md, раздел «Финансы»: единственный главный денежный
+// раздел HQ. Владелец за несколько секунд видит: сколько прошло денег,
+// сколько заработал YAAM, сколько принадлежит ресторанам, какие выплаты
+// готовы, какие периоды закрыты.
+//
+// Что убрано по спецификации: таблица ресторанов с оборотом/комиссией/
+// заказами (дублировала «Обзор» и карточку ресторана), длинные служебные
+// пояснения, «Остаток к будущим выплатам» (та же сумма другими словами).
+const FINANCE_PERIODS = [
+  ['today', 'Сегодня'],
+  ['7d', 'Неделя'],
+  ['30d', 'Месяц'],
+  ['custom', 'Свой период'],
+];
+
+function renderPeriodTabs(period, baseUrl) {
+  return `<div class="period-switch">${FINANCE_PERIODS.map(([key, label]) => {
+    const isOn = key === period;
+    return `<a href="${baseUrl}?period=${key}" class="${isOn ? 'on' : ''}">${esc(label)}</a>`;
+  }).join('')}</div>`;
+}
+
+// Календарь: значения дат применяются ТОЛЬКО после явной отправки формы
+// (кнопка «Применить»). Ни одного onchange="submit()" — открыть и закрыть
+// системный date-picker без подтверждения безопасно, выбранная дата не
+// применяется сама (спецификация, раздел 2).
+function renderCustomPeriodForm({ periodOptions, baseUrl }) {
+  return `
+    <form class="date-filter panel" method="get" action="${baseUrl}">
+      <input type="hidden" name="period" value="custom">
+      <div class="field"><label for="ff-from">С даты</label><input id="ff-from" type="date" name="from" value="${esc(periodOptions.from || '')}"></div>
+      <div class="field"><label for="ff-to">По дату</label><input id="ff-to" type="date" name="to" value="${esc(periodOptions.to || '')}"></div>
+      <button type="submit" class="compact">Применить</button>
+    </form>`;
+}
+
+// Сводка (спецификация, раздел 3): только нужные показатели, без технических
+// пояснений. Возвраты — строка появляется, только если они были.
+function renderFinanceSummary(overall) {
+  const cards = [
+    [`${overall.deliveredPaidOrders}`, 'Выполненные заказы'],
+    [`${overall.turnover} ₽`, 'Оборот'],
+    [`${overall.commission} ₽`, 'Доход YAAM'],
+    [`${overall.restaurantEarnings} ₽`, 'Сумма ресторанов'],
+  ];
+  if (overall.successfulRefundsCount > 0) {
+    cards.push([`${overall.successfulRefunds} ₽`, `Возвраты · ${overall.successfulRefundsCount} шт`]);
+  }
+  return `<div class="metric-grid compact">${cards.map(([value, label]) => `
+    <div class="metric"><div class="value">${esc(value)}</div><div class="label">${esc(label)}</div></div>`).join('')}</div>`;
+}
+
+// «Статус выплат» (спецификация, раздел 4) — главный рабочий экран владельца.
+// Только название, сумма, статус и кнопка подробностей; аналитика намеренно
+// не дублируется. Кнопка «Подготовить выплату» рендерится ТОЛЬКО когда backend сказал
+// canPay — сам факт её отсутствия не является защитой, backend проверяет
+// повторно (services/hq/payoutStatusService.js: payRestaurant).
+function renderPayoutStatusSection({ statuses, csrfToken, linkBasePath }) {
+  const readyCount = statuses.filter((s) => s.canPay).length;
+  const rows = statuses.length
+    ? statuses.map((s) => {
+        const detailHref = s.payoutId
+          ? `${linkBasePath}/payouts/${s.payoutId}`
+          : `${linkBasePath}/restaurants/${s.restaurantId}`;
+        const payButton = s.canPay
+          ? `<form method="post" action="${linkBasePath}/finance/payouts/${s.restaurantId}/pay" onsubmit="return confirm('${esc(`Подготовить выплату «${s.name}» на ${s.amount} ₽?`)}')" style="margin:0">
+               <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
+               <button type="submit" class="compact">Подготовить выплату</button>
+             </form>`
+          : '';
+        return `
+          <li class="payout-row">
+            <div class="payout-row-main">
+              <div class="payout-row-name">${esc(s.name)}</div>
+              <div class="payout-row-meta">
+                <span class="status-badge ${s.statusTone}">${esc(s.statusLabel)}</span>
+                ${s.amount > 0 ? `<span class="payout-row-amount">${s.amount} ₽</span>` : ''}
+              </div>
+            </div>
+            <div class="payout-row-actions">
+              ${payButton}
+              <a class="btn ghost compact" href="${detailHref}">Открыть</a>
+            </div>
+          </li>`;
+      }).join('')
+    : '<li class="empty-state">Ресторанов пока нет.</li>';
+
+  const payAllForm = readyCount > 0
+    ? `<form method="post" action="${linkBasePath}/finance/payouts/pay-all" onsubmit="return confirm('${esc(`Подготовить выплаты всем готовым ресторанам (${readyCount})?`)}')" style="margin:0">
+         <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
+         <button type="submit" class="compact">Подготовить все</button>
+       </form>`
+    : '';
+
+  return `
+    <div class="panel">
+      <div class="panel-head">
+        <div class="panel-title" style="margin:0">Статус выплат</div>
+        <div class="panel-head-actions">
+          ${payAllForm}
+          <a class="btn ghost compact" href="${linkBasePath}/payouts">Все выплаты</a>
+        </div>
+      </div>
+      <ul class="payout-list">${rows}</ul>
+    </div>`;
+}
+
+function renderFinancePage({
+  overall, periodOptions, linkBasePath, error, notice, settlementPeriods, payoutStatuses, csrfToken,
+}) {
   const baseUrl = `${linkBasePath}/finance`;
   const period = periodOptions.period || 'today';
 
-  const positionRows = positions.length
-    ? positions.map((r) => {
-        const contractLabel = r.contractStatus ? CONTRACT_STATUS_LABELS[r.contractStatus] || r.contractStatus : 'Не оформлен';
-        const readinessLabel = payoutService.READINESS_LABELS[r.payoutReadiness] || r.payoutReadiness;
-        const readinessBadgeClass = r.payoutReadiness === 'ready' ? 'open' : 'closed';
-        return `<tr>
-          <td data-label="Ресторан">${esc(r.name)}</td>
-          <td data-label="Договор">${esc(contractLabel)}</td>
-          <td data-label="Готовность"><span class="badge ${readinessBadgeClass}">${esc(readinessLabel)}</span></td>
-          <td data-label="Заказов" style="text-align:right">${r.deliveredPaidOrders}</td>
-          <td data-label="Оборот" style="text-align:right">${r.turnover} ₽</td>
-          <td data-label="Комиссия" style="text-align:right">${r.commission} ₽</td>
-          <td data-label="Сумма ресторана" style="text-align:right">${r.restaurantEarnings} ₽</td>
-          <td data-label="Остаток" style="text-align:right">${r.payableBalance} ₽</td>
-          <td data-label=""><a href="${linkBasePath}/restaurants/${r.restaurantId}">Открыть</a></td>
-        </tr>`;
-      }).join('')
-    : `<tr><td colspan="9" class="empty-state">Ресторанов пока нет.</td></tr>`;
-
   return `
     <h1>Финансы</h1>
-    <form class="filters panel" method="get" action="${baseUrl}">
-      <div class="field">
-        <label for="ff-period">Период</label>
-        <select id="ff-period" name="period" onchange="this.form.submit()">
-          <option value="today" ${period === 'today' ? 'selected' : ''}>Сегодня</option>
-          <option value="7d" ${period === '7d' ? 'selected' : ''}>7 дней</option>
-          <option value="30d" ${period === '30d' ? 'selected' : ''}>30 дней</option>
-          <option value="custom" ${period === 'custom' ? 'selected' : ''}>Произвольный период</option>
-        </select>
-      </div>
-      ${period === 'custom' ? `
-      <div class="field"><label for="ff-from">С даты</label><input id="ff-from" type="date" name="from" value="${esc(periodOptions.from || '')}"></div>
-      <div class="field"><label for="ff-to">По дату</label><input id="ff-to" type="date" name="to" value="${esc(periodOptions.to || '')}"></div>
-      ` : ''}
-      <button type="submit">Показать</button>
-    </form>
-    ${error ? `<div class="panel"><div class="error" style="margin-top:0">${esc(error)} Показан период «Сегодня».</div></div>` : ''}
+    ${renderPeriodTabs(period, baseUrl)}
+    ${period === 'custom' ? renderCustomPeriodForm({ periodOptions, baseUrl }) : ''}
+    ${error ? `<div class="error" style="margin-bottom:14px">${esc(error)}</div>` : ''}
+    ${notice ? `<div class="notice" style="margin-bottom:14px">${esc(notice)}</div>` : ''}
 
-    <div class="panel">
-      <div style="font-weight:700;margin-bottom:14px">Сводка за период (только чтение)</div>
-      <table>
-        <tr><td>Доставленных оплаченных заказов</td><td style="text-align:right">${overall.deliveredPaidOrders}</td></tr>
-        <tr><td>Оборот</td><td style="text-align:right">${overall.turnover} ₽</td></tr>
-        <tr><td>Комиссия YAAM</td><td style="text-align:right">${overall.commission} ₽</td></tr>
-        <tr><td>Сумма ресторанов</td><td style="text-align:right">${overall.restaurantEarnings} ₽</td></tr>
-        <tr><td>Возвращено клиентам</td><td style="text-align:right">${overall.successfulRefundsCount} шт · ${overall.successfulRefunds} ₽</td></tr>
-        <tr><td>Остаток к будущим выплатам (за всё время)</td><td style="text-align:right">${overall.payableBalance} ₽</td></tr>
-      </table>
-      <div class="empty-state" style="margin-top:10px">Возвраты показаны отдельно и не вычитаются повторно из заработка ресторана, если отменённый заказ не входил в доставленный оборот. «Остаток к будущим выплатам» — временная формула (= сумма ресторанов за всё время, выплат ещё не было) до отдельного этапа подключения реальных выплат.</div>
-    </div>
-
-    <div class="panel">
-      <div style="font-weight:700;margin-bottom:14px">Рестораны</div>
-      <table class="responsive">
-        <thead><tr>
-          <th>Ресторан</th><th>Договор</th><th>Готовность</th><th>Заказов</th>
-          <th style="text-align:right">Оборот</th><th style="text-align:right">Комиссия</th>
-          <th style="text-align:right">Сумма ресторана</th><th style="text-align:right">Остаток</th><th></th>
-        </tr></thead>
-        <tbody>${positionRows}</tbody>
-      </table>
-    </div>
-
+    ${renderFinanceSummary(overall)}
+    ${renderPayoutStatusSection({ statuses: payoutStatuses, csrfToken, linkBasePath })}
     ${settlementViews.renderSettlementPeriodsSection({ periods: settlementPeriods, linkBasePath })}
   `;
 }
@@ -288,64 +362,6 @@ function renderYaamBankDetailsEditForm({ details, linkBasePath, csrfToken, error
   `;
 }
 
-function renderSettings({ hqUser, linkBasePath, csrfToken, loginError, passwordError, mediaDiskUsage, yaamBankDetails }) {
-  const changeLoginAction = `${linkBasePath}/settings/change-login`;
-  const changePasswordAction = `${linkBasePath}/settings/change-password`;
-  const mediaPanel = mediaDiskUsage ? `
-    <div class="panel">
-      <div style="font-weight:700;margin-bottom:14px">Хранилище фотографий</div>
-      <table>
-        <tr><td>Занято фотографиями</td><td style="text-align:right">${formatBytesMb(mediaDiskUsage.usedByMediaBytes)}</td></tr>
-        <tr><td>Свободно на диске</td><td style="text-align:right">${formatBytesGb(mediaDiskUsage.freeBytes)}</td></tr>
-      </table>
-    </div>` : '';
-  return `
-    <h1>Настройки</h1>
-    <div class="panel">
-      <div style="font-weight:700;margin-bottom:14px">Текущий вход</div>
-      <table>
-        <tr><td>Логин</td><td style="text-align:right">${esc(hqUser)}</td></tr>
-        <tr><td>Статус сессии</td><td style="text-align:right">Активна</td></tr>
-      </table>
-    </div>
-    ${mediaPanel}
-    ${renderYaamBankDetailsSection({ details: yaamBankDetails, linkBasePath })}
-
-    <div class="panel">
-      <div style="font-weight:700;margin-bottom:10px">Безопасность</div>
-      <div class="empty-state">Сессия защищена HttpOnly-cookie, действует ограниченное время и автоматически завершается при выходе. Смена логина или пароля ниже сразу завершает текущую сессию — потребуется войти заново.</div>
-    </div>
-
-    <div class="panel">
-      <div style="font-weight:700;margin-bottom:14px">Смена логина</div>
-      <form method="post" action="${esc(changeLoginAction)}">
-        <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
-        <label for="change-login-current-password">Текущий пароль</label>
-        <input id="change-login-current-password" name="currentPassword" type="password" autocomplete="current-password" required>
-        <label for="change-login-new-login">Новый логин</label>
-        <input id="change-login-new-login" name="newLogin" type="text" autocomplete="username" required>
-        <button type="submit">Сменить логин</button>
-        ${loginError ? `<div class="error">${esc(loginError)}</div>` : ''}
-      </form>
-    </div>
-
-    <div class="panel">
-      <div style="font-weight:700;margin-bottom:14px">Смена пароля</div>
-      <form method="post" action="${esc(changePasswordAction)}">
-        <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
-        <label for="change-password-current-password">Текущий пароль</label>
-        <input id="change-password-current-password" name="currentPassword" type="password" autocomplete="current-password" required>
-        <label for="change-password-new-password">Новый пароль</label>
-        <input id="change-password-new-password" name="newPassword" type="password" autocomplete="new-password" required minlength="${MIN_PASSWORD_LENGTH}">
-        <label for="change-password-confirm-password">Повторить пароль</label>
-        <input id="change-password-confirm-password" name="confirmPassword" type="password" autocomplete="new-password" required minlength="${MIN_PASSWORD_LENGTH}">
-        <button type="submit">Сменить пароль</button>
-        ${passwordError ? `<div class="error">${esc(passwordError)}</div>` : ''}
-      </form>
-    </div>
-  `;
-}
-
 function createPagesRouter({ linkBasePath, mediaProvider = null }) {
   const router = express.Router();
   const rootPath = hqRootPath(linkBasePath);
@@ -355,13 +371,11 @@ function createPagesRouter({ linkBasePath, mediaProvider = null }) {
 
   router.get('/', async (req, res, next) => {
     try {
-      const [top, active, restaurants, finance, payoutStats, attentionItems] = await Promise.all([
-        dashboardMetrics.getTopSummary(db),
-        dashboardMetrics.getActiveOrdersBreakdown(db),
-        dashboardMetrics.getRestaurantsStatus(db),
-        dashboardMetrics.getFinanceSummary(db),
-        payoutRecordService.getPayoutDashboardStats(),
-        dashboardMetrics.getAttentionItems(db),
+      const period = OVERVIEW_PERIODS.some(([key]) => key === req.query.period) ? req.query.period : 'today';
+      const now = new Date();
+      const [metrics, events] = await Promise.all([
+        dashboardMetrics.getOverviewMetrics({ period, now }),
+        eventLogService.listActiveEvents(),
       ]);
       const csrfToken = ensureCsrfToken(req);
       res.send(layout({
@@ -369,8 +383,64 @@ function createPagesRouter({ linkBasePath, mediaProvider = null }) {
         active: 'overview',
         csrfToken,
         linkBasePath,
-        body: renderOverview({ top, active, restaurants, finance, payoutStats, attentionItems, csrfToken, linkBasePath }),
+        body: renderOverview({ period, metrics, events, now, csrfToken, linkBasePath }),
       }));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // «Центр событий» — живое дополнение уже открытой ленты (задание, раздел
+  // 7: новое событие не должно резко перебрасывать читающего вниз — клиент
+  // сам решает, добавлять ли автоскролл, см. hq/static/hq.js) — тот же
+  // JSON-poll паттерн, что уже используется для «Обзора» ресторана
+  // (hq-live-overview), но здесь возвращается уже отрендеренный HTML КАЖДОГО
+  // нового события (renderEventRow) — не сырой JSON для клиентского
+  // шаблонизатора, которого в этом проекте нет и не должно появиться ради
+  // одного списка (задание CLAUDE.md: "статический HTML/CSS/JS без
+  // сборщиков").
+  router.get('/events/feed', async (req, res, next) => {
+    try {
+      const afterId = Number.parseInt(req.query.afterId, 10);
+      if (!Number.isInteger(afterId) || afterId < 0) {
+        return res.status(400).json({ error: 'afterId обязателен и должен быть целым числом' });
+      }
+      const now = new Date();
+      const events = await eventLogService.listActiveEventsAfter(afterId);
+      res.json({
+        items: events.map((e) => ({ id: e.id, html: renderEventRow(e, now) })),
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get('/events/history', async (req, res, next) => {
+    try {
+      const page = Number.parseInt(req.query.page, 10) || 1;
+      const now = new Date();
+      const archive = await eventLogService.listArchive({ page });
+      const csrfToken = ensureCsrfToken(req);
+      res.send(layout({
+        title: 'История событий',
+        active: 'overview',
+        csrfToken,
+        linkBasePath,
+        body: renderEventHistory({ archive, now, linkBasePath }),
+      }));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // «Очистить» (задание, раздел 6) — двигает курсор, ничего не удаляет (см.
+  // eventLogService.clearActiveFeed). Обычный form POST + redirect, тем же
+  // стилем, что и остальные мутации HQ (settings/change-password и т.д.) —
+  // не AJAX, страница просто перезагружается с уже пустой основной лентой.
+  router.post('/events/clear', requireCsrf, async (req, res, next) => {
+    try {
+      await eventLogService.clearActiveFeed();
+      res.redirect(`${linkBasePath}/`);
     } catch (err) {
       next(err);
     }
@@ -385,8 +455,17 @@ function createPagesRouter({ linkBasePath, mediaProvider = null }) {
     try {
       let positions;
       let periodError = null;
+      // «Свой период» БЕЗ выбранных дат — это не ошибка ввода, а первый шаг:
+      // владелец только что открыл вкладку и ещё ничего не подтвердил. Форма
+      // дат показывается, а цифры под ней — за «сегодня», без красной ошибки
+      // (спецификация, раздел 2: дата применяется только после явного
+      // подтверждения).
+      const customWithoutDates = periodOptions.period === 'custom'
+        && (!periodOptions.from || !periodOptions.to);
       try {
-        positions = await financeService.listRestaurantsFinancialPositions(periodOptions);
+        positions = customWithoutDates
+          ? await financeService.listRestaurantsFinancialPositions({ period: 'today' })
+          : await financeService.listRestaurantsFinancialPositions(periodOptions);
       } catch (err) {
         if (!(err instanceof ValidationError)) throw err;
         periodError = err.message;
@@ -394,42 +473,191 @@ function createPagesRouter({ linkBasePath, mediaProvider = null }) {
         positions = await financeService.listRestaurantsFinancialPositions({ period: 'today' });
       }
       const overall = financeService.summarizeOverall(positions);
-      const settlementPeriods = await settlementService.listSettlementPeriods();
+      const [settlementPeriods, payoutStatuses] = await Promise.all([
+        settlementService.listSettlementPeriods(),
+        payoutStatusService.listPayoutStatuses(),
+      ]);
       const csrfToken = ensureCsrfToken(req);
       res.send(layout({
         title: 'Финансы',
         active: 'finance',
         csrfToken,
         linkBasePath,
-        body: renderFinancePage({ overall, positions, periodOptions, linkBasePath, error: periodError, settlementPeriods }),
+        body: renderFinancePage({
+          overall, periodOptions, linkBasePath,
+          error: periodError || req.query.error, notice: req.query.notice,
+          settlementPeriods, payoutStatuses, csrfToken,
+        }),
       }));
     } catch (err) {
       next(err);
     }
   });
 
-  router.get('/settings', async (req, res) => {
-    const csrfToken = ensureCsrfToken(req);
-    // Stage 5B.2 (задание, раздел 11) — best-effort: если провайдер не
-    // поддерживает getDiskUsage() или проверка сама не удалась (например,
-    // statfs временно недоступен), панель просто не показывается — не
-    // ошибка страницы "Настройки" целиком.
-    let mediaDiskUsage = null;
-    if (mediaProvider && typeof mediaProvider.getDiskUsage === 'function') {
-      try {
-        mediaDiskUsage = await mediaProvider.getDiskUsage();
-      } catch (err) {
-        console.error('[hq/settings] Не удалось получить статистику диска медиа-хранилища:', err.message);
+  // Выплата одному ресторану (спецификация, раздел 10). ВСЕ проверки готовности
+  // выполняет backend (payoutStatusService.payRestaurant) — отсутствие кнопки
+  // в UI не является защитой.
+  router.post('/finance/payouts/:restaurantId/pay', requireCsrf, async (req, res, next) => {
+    const base = `${linkBasePath}/finance`;
+    try {
+      const restaurantId = Number.parseInt(req.params.restaurantId, 10);
+      if (!Number.isInteger(restaurantId)) {
+        return res.redirect(`${base}?error=${encodeURIComponent('Некорректный ресторан.')}`);
       }
+      const payout = await payoutStatusService.payRestaurant(restaurantId, { ip: req.ip });
+      res.redirect(`${base}?notice=${encodeURIComponent(`Выплата подготовлена: ${payout.amount} ₽. Деньги будут отправлены после подключения банка.`)}`);
+    } catch (err) {
+      if (err instanceof payoutRecordService.ValidationError) {
+        return res.redirect(`${base}?error=${encodeURIComponent(err.message)}`);
+      }
+      next(err);
     }
-    const yaamBankDetails = await yaamBankDetailsService.getYaamBankDetails();
-    res.send(layout({
-      title: 'Настройки',
-      active: 'settings',
-      csrfToken,
-      linkBasePath,
-      body: renderSettings({ hqUser: req.session.hqUser || '', linkBasePath, csrfToken, mediaDiskUsage, yaamBankDetails }),
-    }));
+  });
+
+  // Массовая выплата (спецификация, раздел 11): не готовые пропускаются,
+  // ошибка одного ресторана не отменяет остальных, операция идемпотентна
+  // (UNIQUE(settlement_period_id, restaurant_id) на уровне схемы).
+  router.post('/finance/payouts/pay-all', requireCsrf, async (req, res, next) => {
+    const base = `${linkBasePath}/finance`;
+    try {
+      const result = await payoutStatusService.payAllReady({ ip: req.ip });
+      const parts = [`Подготовлено: ${result.paid.length}`];
+      if (result.skipped > 0) parts.push(`пропущено: ${result.skipped}`);
+      if (result.failed.length > 0) parts.push(`с ошибкой: ${result.failed.length}`);
+      const message = `${parts.join(', ')}.`;
+      const key = result.failed.length > 0 ? 'error' : 'notice';
+      res.redirect(`${base}?${key}=${encodeURIComponent(message)}`);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Сводка платежей и кассы. Честные статусы, без обещаний: боевой режим
+  // намеренно недоступен (см. services/postgresql/app.js — YOOKASSA_ENV
+  // обязан быть sandbox), онлайн-касса не подключена.
+  //
+  // Секретов здесь нет и быть не может: ни ключа, ни его части, ни поля для
+  // ввода. Ключи задаются только в защищённом окружении сервера.
+  function buildPaymentsSummary() {
+    const provider = process.env.PAYMENT_PROVIDER === 'yookassa' ? 'yookassa' : 'mock';
+    const mode = provider === 'yookassa'
+      ? (process.env.YOOKASSA_ENV === 'sandbox' ? 'sandbox' : 'live')
+      : 'mock';
+
+    const blockers = [];
+    if (provider !== 'yookassa') {
+      blockers.push('Провайдер оплаты работает в тестовом режиме');
+    }
+    blockers.push('Боевые ключи YooKassa не подключены — код принимает только песочницу');
+    blockers.push('Онлайн-касса не подключена, фискальные чеки не отправляются');
+    blockers.push('Частичный возврат не поддерживается');
+
+    return {
+      provider,
+      mode,
+      webhookConfigured: true,
+      refundsSupported: true,
+      blockers,
+    };
+  }
+
+  router.get('/settings', async (req, res, next) => {
+    try {
+      const csrfToken = ensureCsrfToken(req);
+      const [yaamBankDetails, yaamLegal, receiptSummary] = await Promise.all([
+        yaamBankDetailsService.getYaamBankDetails(),
+        // Юр.данные и сводка чеков — best-effort: раздел настроек не должен
+        // падать целиком из-за одной недоступной таблицы на legacy-БД.
+        safeCall(() => yaamLegalDetailsService.getYaamLegalDetails(), null),
+        safeCall(() => fiscalReceiptService.getReceiptSummary(),
+          { queued: 0, processing: 0, succeeded: 0, failed: 0 }),
+      ]);
+      const receipts = {
+        ...receiptSummary,
+        total: receiptSummary.queued + receiptSummary.processing
+          + receiptSummary.succeeded + receiptSummary.failed,
+      };
+
+      const notice = req.query.changed === 'password' ? 'Пароль изменён.' : null;
+
+      res.send(layout({
+        title: 'Настройки',
+        active: 'settings',
+        csrfToken,
+        linkBasePath,
+        body: settingsViews.renderSettings({
+          hqUser: req.session.hqUser || '',
+          linkBasePath,
+          csrfToken,
+          minPasswordLength: MIN_PASSWORD_LENGTH,
+          yaamLegal,
+          yaamBankDetails,
+          payments: buildPaymentsSummary(),
+          receipts,
+          notice,
+        }),
+      }));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  async function safeCall(fn, fallback) {
+    try {
+      return await fn();
+    } catch (err) {
+      console.error('[hq/settings] раздел недоступен:', err.message);
+      return fallback;
+    }
+  }
+
+  // --- Данные YAAM ---------------------------------------------------------
+  router.get('/settings/yaam-legal/edit', async (req, res, next) => {
+    try {
+      const legal = await yaamLegalDetailsService.getYaamLegalDetails();
+      const csrfToken = ensureCsrfToken(req);
+      res.send(layout({
+        title: 'Данные YAAM', active: 'settings', csrfToken, linkBasePath,
+        body: settingsViews.renderYaamLegalEditForm({ legal, linkBasePath, csrfToken }),
+      }));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post('/settings/yaam-legal', requireCsrf, async (req, res, next) => {
+    try {
+      // Явный whitelist полей: req.body целиком в сервис не передаётся, иначе
+      // лишний ключ из формы мог бы попасть в запрос (mass assignment).
+      await yaamLegalDetailsService.saveYaamLegalDetails({
+        legalName: req.body.legalName,
+        entrepreneurName: req.body.entrepreneurName,
+        inn: req.body.inn,
+        ogrnip: req.body.ogrnip,
+        registrationAddress: req.body.registrationAddress,
+        contactEmail: req.body.contactEmail,
+        contactPhone: req.body.contactPhone,
+        registrationDate: req.body.registrationDate,
+      }, { ip: req.ip });
+      res.redirect(`${linkBasePath}/settings`);
+    } catch (err) {
+      const csrfToken = ensureCsrfToken(req);
+      // Форма перерисовывается с ВВЕДЁННЫМИ значениями, чтобы не заставлять
+      // заполнять всё заново из-за одной опечатки.
+      return res.status(400).send(layout({
+        title: 'Данные YAAM', active: 'settings', csrfToken, linkBasePath,
+        body: settingsViews.renderYaamLegalEditForm({
+          legal: {
+            legal_name: req.body.legalName, entrepreneur_name: req.body.entrepreneurName,
+            inn: req.body.inn, ogrnip: req.body.ogrnip,
+            registration_address: req.body.registrationAddress,
+            contact_email: req.body.contactEmail, contact_phone: req.body.contactPhone,
+            registration_date: req.body.registrationDate,
+          },
+          linkBasePath, csrfToken, error: err.message,
+        }),
+      }));
+    }
   });
 
   router.get('/settings/yaam-bank-details/edit', async (req, res, next) => {
@@ -464,91 +692,120 @@ function createPagesRouter({ linkBasePath, mediaProvider = null }) {
     }
   });
 
-  // После УСПЕШНОЙ смены логина/пароля сессия, из которой сделана смена,
-  // тоже завершается (задание Stage 3, раздел 5 — "завершить ВСЕ
-  // существующие сессии", без исключения для текущей) — .destroy() здесь, а
-  // не просто редирект, иначе credentials_version-проверка в middleware.js
-  // сработала бы только на СЛЕДУЮЩЕМ запросе, оставляя короткое окно, где
-  // текущая вкладка формально ещё выглядит залогиненной.
-  function endSessionAndRedirectToLogin(req, res, next, changedWhat) {
-    req.session.destroy((err) => {
-      if (err) return next(err);
-      res.clearCookie(SESSION_COOKIE_NAME, { path: cookiePath });
-      res.redirect(`${loginPath}?changed=${changedWhat}`);
-    });
+  // ПОВЕДЕНИЕ СЕССИИ ПОСЛЕ СМЕНЫ ПАРОЛЯ — определено явно.
+  //
+  // Раньше смена завершала ВСЕ сессии, включая текущую, и владельца
+  // выбрасывало на форму входа. Это безопасно, но противоречит компактному
+  // sheet'у: закрыть форму и показать подтверждение невозможно, если
+  // страница тут же превращается в логин.
+  //
+  // Теперь: credentials_version увеличивается (все ОСТАЛЬНЫЕ сессии, включая
+  // вторую вкладку и чужое устройство, признают себя недействительными на
+  // ближайшем же запросе — см. routes/hq/middleware.js), а ТЕКУЩАЯ сессия
+  // получает новую версию и продолжает работать. Это стандартное поведение
+  // «сменил пароль — разлогинило везде, кроме здесь», и оно строго не слабее
+  // прежнего: злоумышленник со старой сессией теряет доступ в обоих вариантах.
+  function adoptNewCredentialsVersion(req, newVersion) {
+    req.session.hqCredentialsVersion = newVersion;
   }
 
-  router.post('/settings/change-login', requireCsrf, async (req, res, next) => {
-    const currentPassword = typeof req.body.currentPassword === 'string' ? req.body.currentPassword : '';
-    const newLogin = typeof req.body.newLogin === 'string' ? req.body.newLogin.trim() : '';
-    try {
-      const owner = await ownerService.getOwner();
-      const currentPasswordOk = owner && await verifyPassword(currentPassword, owner.password_hash);
-      if (!owner || !currentPasswordOk) {
-        const csrfToken = ensureCsrfToken(req);
-        const yaamBankDetails = await yaamBankDetailsService.getYaamBankDetails();
-        return res.status(401).send(layout({
-          title: 'Настройки', active: 'settings', csrfToken, linkBasePath,
-          body: renderSettings({ hqUser: req.session.hqUser || '', linkBasePath, csrfToken, loginError: 'Неверный текущий пароль.', yaamBankDetails }),
-        }));
-      }
-      if (!newLogin) {
-        const csrfToken = ensureCsrfToken(req);
-        const yaamBankDetails = await yaamBankDetailsService.getYaamBankDetails();
-        return res.status(400).send(layout({
-          title: 'Настройки', active: 'settings', csrfToken, linkBasePath,
-          body: renderSettings({ hqUser: req.session.hqUser || '', linkBasePath, csrfToken, loginError: 'Новый логин не может быть пустым.', yaamBankDetails }),
-        }));
-      }
-      await ownerService.changeOwnerLogin(newLogin);
-      await logSecurityEvent({ eventType: 'login_change', ip: req.ip });
-      endSessionAndRedirectToLogin(req, res, next, 'login');
-    } catch (err) {
-      next(err);
-    }
+  // Отдельный лимит на смену пароля: это операция с проверкой текущего
+  // пароля, то есть точка, где перебор имеет смысл. Общий login-лимитер сюда
+  // не применяется — маршрут другой.
+  const changePasswordLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: Number.isInteger(Number(process.env.HQ_PASSWORD_RATE_LIMIT_MAX))
+      && Number(process.env.HQ_PASSWORD_RATE_LIMIT_MAX) > 0
+      ? Number(process.env.HQ_PASSWORD_RATE_LIMIT_MAX)
+      : 10,
+    standardHeaders: true,
+    legacyHeaders: false,
+    handler: (req, res) => {
+      // Ни пароля, ни его длины в логе — только факт и IP.
+      console.warn(`[hq] password-change rate-limit ip=${req.ip} time=${new Date().toISOString()}`);
+      logSecurityEvent({ eventType: 'login_rate_limited', ip: req.ip });
+      res.status(429).send('Слишком много попыток смены пароля — попробуйте позже.');
+    },
   });
 
-  router.post('/settings/change-password', requireCsrf, async (req, res, next) => {
+  // Перерисовка настроек с открытым sheet'ом и текстом ошибки.
+  async function renderSettingsWithPasswordError(req, res, status, message) {
+    const csrfToken = ensureCsrfToken(req);
+    const [yaamBankDetails, yaamLegal, receiptSummary] = await Promise.all([
+      safeCall(() => yaamBankDetailsService.getYaamBankDetails(), null),
+      safeCall(() => yaamLegalDetailsService.getYaamLegalDetails(), null),
+      safeCall(() => fiscalReceiptService.getReceiptSummary(),
+        { queued: 0, processing: 0, succeeded: 0, failed: 0 }),
+    ]);
+    const receipts = {
+      ...receiptSummary,
+      total: receiptSummary.queued + receiptSummary.processing
+        + receiptSummary.succeeded + receiptSummary.failed,
+    };
+    return res.status(status).send(layout({
+      title: 'Настройки', active: 'settings', csrfToken, linkBasePath,
+      body: settingsViews.renderSettings({
+        hqUser: req.session.hqUser || '',
+        linkBasePath, csrfToken, minPasswordLength: MIN_PASSWORD_LENGTH,
+        yaamLegal, yaamBankDetails,
+        payments: buildPaymentsSummary(), receipts,
+        passwordError: message,
+      }),
+    }));
+  }
+
+  // Смена логина УДАЛЕНА (Stage 14): HQ существует только для владельца
+  // YAAM, менять логин не у кого и незачем. Маршрут не скрыт, а удалён —
+  // тест проверяет, что POST на него отдаёт 404.
+  router.post('/settings/change-password', changePasswordLimiter, requireCsrf, async (req, res, next) => {
     const currentPassword = typeof req.body.currentPassword === 'string' ? req.body.currentPassword : '';
     const newPassword = typeof req.body.newPassword === 'string' ? req.body.newPassword : '';
     const confirmPassword = typeof req.body.confirmPassword === 'string' ? req.body.confirmPassword : '';
+
     try {
       const owner = await ownerService.getOwner();
       const currentPasswordOk = owner && await verifyPassword(currentPassword, owner.password_hash);
+
+      // Аудит-события НИКОГДА не содержат пароль, его длину или фрагмент.
       if (!owner || !currentPasswordOk) {
-        const csrfToken = ensureCsrfToken(req);
-        const yaamBankDetails = await yaamBankDetailsService.getYaamBankDetails();
-        return res.status(401).send(layout({
-          title: 'Настройки', active: 'settings', csrfToken, linkBasePath,
-          body: renderSettings({ hqUser: req.session.hqUser || '', linkBasePath, csrfToken, passwordError: 'Неверный текущий пароль.', yaamBankDetails }),
-        }));
+        await logAuditEvent({
+          action: 'owner_password_change_rejected', restaurantId: null,
+          details: 'неверный текущий пароль', ip: req.ip,
+        });
+        return renderSettingsWithPasswordError(req, res, 401, 'Неверный текущий пароль.');
       }
       if (newPassword.length < MIN_PASSWORD_LENGTH) {
-        const csrfToken = ensureCsrfToken(req);
-        const yaamBankDetails = await yaamBankDetailsService.getYaamBankDetails();
-        return res.status(400).send(layout({
-          title: 'Настройки', active: 'settings', csrfToken, linkBasePath,
-          body: renderSettings({ hqUser: req.session.hqUser || '', linkBasePath, csrfToken, passwordError: `Новый пароль должен быть не короче ${MIN_PASSWORD_LENGTH} символов.`, yaamBankDetails }),
-        }));
+        return renderSettingsWithPasswordError(
+          req, res, 400, `Новый пароль должен быть не короче ${MIN_PASSWORD_LENGTH} символов.`,
+        );
       }
       if (newPassword !== confirmPassword) {
-        const csrfToken = ensureCsrfToken(req);
-        const yaamBankDetails = await yaamBankDetailsService.getYaamBankDetails();
-        return res.status(400).send(layout({
-          title: 'Настройки', active: 'settings', csrfToken, linkBasePath,
-          body: renderSettings({ hqUser: req.session.hqUser || '', linkBasePath, csrfToken, passwordError: 'Пароли не совпадают.', yaamBankDetails }),
-        }));
+        return renderSettingsWithPasswordError(req, res, 400, 'Пароли не совпадают.');
       }
+      // Смысла менять пароль на тот же самый нет, а владелец решит, что
+      // операция прошла, и успокоится.
+      if (newPassword === currentPassword) {
+        return renderSettingsWithPasswordError(req, res, 400, 'Новый пароль совпадает с текущим.');
+      }
+
       const newPasswordHash = await hashPassword(newPassword);
-      await ownerService.changeOwnerPassword(newPasswordHash);
+      const newVersion = await ownerService.changeOwnerPassword(newPasswordHash);
+      adoptNewCredentialsVersion(req, newVersion);
+
       await logSecurityEvent({ eventType: 'password_change', ip: req.ip });
-      endSessionAndRedirectToLogin(req, res, next, 'password');
+      await logAuditEvent({
+        action: 'owner_password_changed', restaurantId: null,
+        details: 'пароль владельца изменён; остальные сессии завершены', ip: req.ip,
+      });
+
+      // PRG: перезагрузка страницы не отправит форму повторно.
+      return res.redirect(`${linkBasePath}/settings?changed=password`);
     } catch (err) {
-      next(err);
+      return next(err);
     }
   });
 
   return router;
 }
 
-module.exports = { createPagesRouter, STATUS_LABELS, renderSettings, MIN_PASSWORD_LENGTH };
+module.exports = { createPagesRouter, STATUS_LABELS, MIN_PASSWORD_LENGTH };

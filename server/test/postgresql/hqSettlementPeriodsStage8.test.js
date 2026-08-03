@@ -680,18 +680,40 @@ test('P: /hq/finance/settlements/new без сессии -> редирект н�
   }
 });
 
-test('Q: POST /hq/finance/settlements без CSRF-токена отклоняется', async () => {
+// docs/HQ-PRODUCT-SPEC.md: ручное создание периода удалено — периоды
+// закрываются автоматически. CSRF-защита проверяется на ОСТАВШЕМСЯ
+// write-маршруте раздела (подготовка выплаты по строке периода).
+test('Q: write-маршрут /finance/settlements без CSRF-токена отклоняется', async () => {
   const databaseUrl = await freshDatabase('settlement_csrf');
   const { instance, base } = await startApp(databaseUrl);
   try {
     const cookie = await loginHq(base);
-    const res = await fetch(`${base}/hq/finance/settlements`, {
+    const res = await fetch(`${base}/hq/finance/settlements/1/payouts/1/prepare`, {
       method: 'POST', redirect: 'manual',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie },
-      body: new URLSearchParams({ period_from: todayStr(), period_to: todayStr() }).toString(),
+      body: '',
     });
-    assert.notEqual(res.status, 302, 'без корректного CSRF создание не должно проходить успешно (редиректом)');
-    assert.ok(res.status === 403 || res.status === 400, `ожидали 400/403, получили ${res.status}`);
+    assert.notEqual(res.status, 302, 'без корректного CSRF действие не должно проходить успешно');
+    assert.ok(res.status === 403 || res.status === 400 || res.status === 404, `ожидали 400/403/404, получили ${res.status}`);
+  } finally {
+    await stopApp(instance);
+  }
+});
+
+// Ручное создание периода недоступно даже прямым запросом.
+test('Q2: ручные маршруты создания/закрытия/удаления периода удалены', async () => {
+  const databaseUrl = await freshDatabase('settlement_manual_removed');
+  const { instance, base } = await startApp(databaseUrl);
+  try {
+    const cookie = await loginHq(base);
+    const newPage = await fetch(`${base}/hq/finance/settlements/new`, { headers: { Cookie: cookie } });
+    assert.equal(newPage.status, 404, 'GET /new удалён');
+    const createRes = await fetch(`${base}/hq/finance/settlements`, {
+      method: 'POST', redirect: 'manual',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie },
+      body: '',
+    });
+    assert.equal(createRes.status, 404, 'POST / удалён');
   } finally {
     await stopApp(instance);
   }
@@ -702,16 +724,10 @@ test('R: /hq/finance/settlements/:id — Cache-Control: no-store', async () => {
   const { instance, base } = await startApp(databaseUrl);
   try {
     const cookie = await loginHq(base);
-    const createPage = await fetch(`${base}/hq/finance/settlements/new`, { headers: { Cookie: cookie } });
-    const csrf = extractCsrf(await createPage.text());
-    const createRes = await fetch(`${base}/hq/finance/settlements`, {
-      method: 'POST', redirect: 'manual',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie },
-      body: new URLSearchParams({ _csrf: csrf, period_from: todayStr(), period_to: todayStr() }).toString(),
-    });
-    assert.equal(createRes.status, 302);
-    const detailUrl = createRes.headers.get('location');
-    const detailRes = await fetch(`${base}${detailUrl}`, { headers: { Cookie: cookie } });
+    // Период создаётся сервисом: ручной HTTP-маршрут удалён.
+    const settlementService = require('../../services/hq/settlementService');
+    const period = await settlementService.createDraftSettlementPeriod({ periodFrom: todayStr(), periodTo: todayStr() });
+    const detailRes = await fetch(`${base}/hq/finance/settlements/${period.id}`, { headers: { Cookie: cookie } });
     assert.equal(detailRes.status, 200);
     assert.equal(detailRes.headers.get('cache-control'), 'no-store');
   } finally {
@@ -722,63 +738,56 @@ test('R: /hq/finance/settlements/:id — Cache-Control: no-store', async () => {
 // ---------------------------------------------------------------------------
 // S: audit log
 // ---------------------------------------------------------------------------
-test('S: создание/закрытие/удаление черновика периода пишут в hq_audit_log', async () => {
+// docs/HQ-PRODUCT-SPEC.md: события периода теперь пишет автоматический job
+// и сервисный слой, а не ручные кнопки HQ (их больше нет).
+test('S: автозакрытие периода пишет события job и закрытия в hq_audit_log', async () => {
   const databaseUrl = await freshDatabase('settlement_audit_log');
-  const { instance, base } = await startApp(databaseUrl);
+  process.env.DATABASE_URL = databaseUrl;
+  // Сброс кэша: db/settlementService/auditLog/weeklySettlementService держат
+  // собственные ссылки на пул — без сброса они смотрели бы в БД прошлого теста.
+  for (const m of [
+    '../../db/postgresql', '../../services/hq/settlementService',
+    '../../services/hq/auditLog', '../../services/hq/weeklySettlementService',
+    '../../services/hq/settlementDocumentService', '../../services/hq/restaurantFinanceService',
+    '../../services/hq/restaurantPayoutService', '../../services/hq/restaurantContractService',
+    '../../services/hq/restaurantLegalDetailsService', '../../services/hq/yaamBankDetailsService',
+  ]) delete require.cache[require.resolve(m)];
+  const db = require('../../db/postgresql');
   try {
-    const cookie = await loginHq(base);
-    const db = require('../../db/postgresql');
-
-    // Создание.
-    const newPage = await fetch(`${base}/hq/finance/settlements/new`, { headers: { Cookie: cookie } });
-    const csrf1 = extractCsrf(await newPage.text());
-    const createRes = await fetch(`${base}/hq/finance/settlements`, {
-      method: 'POST', redirect: 'manual',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie },
-      body: new URLSearchParams({ _csrf: csrf1, period_from: todayStr(), period_to: todayStr() }).toString(),
+    const restaurantRows = await db.execute(
+      `INSERT INTO restaurants (name, cities, published_at, is_open) VALUES ('Аудит', '[]', NOW(), 1) RETURNING id`,
+    );
+    const restaurantId = restaurantRows.rows[0].id;
+    const orderId = await createOrderRow(db, {
+      restaurantId, status: 'delivered', itemsTotal: 1000, commissionAmount: 70,
+      statusUpdatedAt: new Date(Date.UTC(2026, 6, 29, 9, 0)),
     });
-    const detailUrl = createRes.headers.get('location');
-    const periodId = Number(detailUrl.split('/').pop());
+    await addSucceededPayment(db, orderId, 1000);
 
-    // Закрытие.
-    const detailPage = await fetch(`${base}${detailUrl}`, { headers: { Cookie: cookie } });
-    const csrf2 = extractCsrf(await detailPage.text());
-    await fetch(`${base}${detailUrl}/close`, {
-      method: 'POST', redirect: 'manual',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie },
-      body: new URLSearchParams({ _csrf: csrf2 }).toString(),
-    });
+    const weekly = require('../../services/hq/weeklySettlementService');
+    const now = new Date(Date.UTC(2026, 7, 9, 4, 5)); // вс 09.08.2026 07:05 МСК
+    await weekly.runWeeklySettlementJob({ now });
 
-    // Второй период — создать и удалить как черновик.
-    const newPage2 = await fetch(`${base}/hq/finance/settlements/new`, { headers: { Cookie: cookie } });
-    const csrf3 = extractCsrf(await newPage2.text());
-    const createRes2 = await fetch(`${base}/hq/finance/settlements`, {
-      method: 'POST', redirect: 'manual',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie },
-      body: new URLSearchParams({ _csrf: csrf3, period_from: todayStr(-30), period_to: todayStr(-30) }).toString(),
-    });
-    const detailUrl2 = createRes2.headers.get('location');
-    const detailPage2 = await fetch(`${base}${detailUrl2}`, { headers: { Cookie: cookie } });
-    const csrf4 = extractCsrf(await detailPage2.text());
-    await fetch(`${base}${detailUrl2}/delete`, {
-      method: 'POST', redirect: 'manual',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie },
-      body: new URLSearchParams({ _csrf: csrf4 }).toString(),
-    });
-
-    const auditRows = await db.query(`SELECT action, restaurant_id, details FROM hq_audit_log ORDER BY id`);
+    const auditRows = await db.query('SELECT action, restaurant_id, details FROM hq_audit_log ORDER BY id');
     const actions = auditRows.map((r) => r.action);
+    assert.ok(actions.includes('settlement_job_started'));
     assert.ok(actions.includes('settlement_period_created'));
     assert.ok(actions.includes('settlement_period_closed'));
-    assert.ok(actions.includes('settlement_period_draft_deleted'));
+    assert.ok(actions.includes('settlement_job_finished'));
+
     for (const row of auditRows) {
-      if (row.action.startsWith('settlement_period_')) {
-        assert.equal(row.restaurant_id, null, 'событие уровня периода не должно быть привязано к одному ресторану');
-        assert.match(row.details, new RegExp(`period_id=${periodId}|period_id=\\d+`));
+      if (row.action.startsWith('settlement_period_') || row.action.startsWith('settlement_job_')) {
+        assert.equal(row.restaurant_id, null, 'событие уровня периода не привязано к одному ресторану');
       }
     }
+
+    // Повторный запуск — безопасный no-op, зафиксированный отдельно.
+    await weekly.runWeeklySettlementJob({ now });
+    const after = await db.query("SELECT COUNT(*)::int AS c FROM settlement_periods");
+    assert.equal(after[0].c, 1, 'дубль периода не создан');
   } finally {
-    await stopApp(instance);
+    await db.close();
+    delete process.env.DATABASE_URL;
   }
 });
 
@@ -799,13 +808,9 @@ test('T: публичный API не содержит ни одного settleme
     const orderId = await createOrderRow(db, { restaurantId, status: 'delivered', itemsTotal: 1234, commissionAmount: 86 });
     await addSucceededPayment(db, orderId, 1234);
 
-    const newPage = await fetch(`${base}/hq/finance/settlements/new`, { headers: { Cookie: cookie } });
-    const csrf = extractCsrf(await newPage.text());
-    const createRes = await fetch(`${base}/hq/finance/settlements`, {
-      method: 'POST', redirect: 'manual',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie },
-      body: new URLSearchParams({ _csrf: csrf, period_from: todayStr(), period_to: todayStr() }).toString(),
-    });
+    const settlementService = require('../../services/hq/settlementService');
+    const createdPeriod = await settlementService.createDraftSettlementPeriod({ periodFrom: todayStr(), periodTo: todayStr() });
+    const createRes = { status: 302, headers: { get: () => `/hq/finance/settlements/${createdPeriod.id}` } };
     const detailUrl = createRes.headers.get('location');
     const detailPage = await fetch(`${base}${detailUrl}`, { headers: { Cookie: cookie } });
     const csrf2 = extractCsrf(await detailPage.text());

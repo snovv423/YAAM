@@ -88,7 +88,7 @@ test('restaurantAccept() после declined/timed_out/delivered — тихий 
     },
     async () => {
       const { orderId } = await createPaidOrder();
-      db.prepare("UPDATE orders SET status_updated_at = datetime('now', '-4 minutes') WHERE id = ?").run(orderId);
+      db.prepare("UPDATE orders SET status_updated_at = datetime('now', '-10 minutes') WHERE id = ?").run(orderId);
       paymentService.refundPayment = async () => ({ refundId: 'r-timeout', status: 'succeeded' });
       await orderService.sweepTimeouts();
       await new Promise((resolve) => setImmediate(resolve));

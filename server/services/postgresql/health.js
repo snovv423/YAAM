@@ -20,6 +20,11 @@
 // зависимости (это и есть её смысл: "готов ли процесс реально обслуживать
 // трафик прямо сейчас").
 const db = require('../../db/postgresql');
+const migrator = require('./migrator');
+const { inspectEnv } = require('../config/env');
+const { createLogger } = require('../observability/logger');
+
+const defaultLogger = createLogger();
 
 // getSchedulers() — функция, а не массив, чтобы health-check всегда видел
 // АКТУАЛЬНый набор schedulers на момент вызова (на случай, если вызывающий
@@ -44,13 +49,19 @@ const db = require('../../db/postgresql');
 // (см. header-комментарий выше).
 function createHealthCheck({
   getSchedulers = () => [], getBotState = () => null, getCommitSha = () => 'unknown',
+  logger = defaultLogger,
 } = {}) {
   async function checkDatabase() {
     try {
       await db.query('SELECT 1');
       return { ok: true };
     } catch (err) {
-      return { ok: false, error: err.message };
+      // Stage 15: сообщение драйвера НЕ отдаётся наружу. Оно способно
+      // содержать строку подключения с паролем, имя пользователя и хост —
+      // readiness анонимен, и это была бы прямая утечка. Наружу — только
+      // факт недоступности; подробности уходят в лог с редактированием.
+      logger.error('readiness: база недоступна', { error: err });
+      return { ok: false, error: 'database unavailable' };
     }
   }
 
@@ -82,14 +93,46 @@ function createHealthCheck({
   // `bot` — наблюдаемое поле (см. комментарий у getBotState выше), не влияет
   // на `ok`: null, если вызывающий код не передал getBotState (Stage 6
   // поведение не меняется, bot ещё не существовал на момент Stage 6).
+  // Stage 15: миграции и конфигурация — часть готовности.
+  //
+  // ЧТО ДЕЛАЕТ not ready, а что только предупреждение:
+  //   not ready — недоступна БД, есть непринятые миграции, конфигурация
+  //     запрещает запуск. Во всех трёх случаях обслуживать трафик нельзя:
+  //     запрос либо упадёт, либо отработает по неполной схеме.
+  //   предупреждение — Telegram недоступен, планировщик временно не
+  //     запущен. Заказы при этом принимаются и оплачиваются, снимать
+  //     инстанс с трафика было бы вреднее.
+  async function checkMigrations() {
+    try {
+      return await migrator.getMigrationStatus();
+    } catch (err) {
+      return { ok: false, error: 'migration status unavailable' };
+    }
+  }
+
+  function checkConfig() {
+    try {
+      const { mode, errors } = inspectEnv();
+      // Наружу — только КОЛИЧЕСТВО проблем и режим. Тексты ошибок содержат
+      // имена переменных окружения и не должны быть доступны анонимно.
+      return { ok: errors.length === 0, mode, problems: errors.length };
+    } catch (err) {
+      return { ok: false, mode: 'unknown', problems: 1 };
+    }
+  }
+
   async function readiness() {
     const database = await checkDatabase();
     const pool = checkPool();
     const schedulers = checkSchedulers();
     const bot = getBotState();
     const commitSha = getCommitSha();
+    const migrations = await checkMigrations();
+    const config = checkConfig();
     return {
-      ok: database.ok,
+      ok: database.ok && migrations.ok && config.ok,
+      migrations: { ok: migrations.ok, applied: migrations.applied, total: migrations.total },
+      config,
       uptimeSec: Math.floor(process.uptime()),
       database,
       pool,
