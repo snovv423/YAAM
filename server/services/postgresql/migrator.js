@@ -119,10 +119,23 @@ function assertNoDuplicateVersions(migrations) {
 
 // Разрушающая миграция без явного маркера не выполняется — вместо этого
 // запуск приложения останавливается с внятным объяснением.
+// Комментарии вырезаются перед проверкой. Иначе пояснение вида «здесь нет
+// DROP TABLE» само выглядело бы как разрушающая операция, и автор миграции
+// был бы вынужден либо не объяснять свои решения, либо ставить маркер
+// разрешения там, где разрушать нечего.
+function stripSqlComments(sql) {
+  return sql
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')   // блочные
+    .split('\n')
+    .map((line) => line.replace(/--.*$/, ''))
+    .join('\n');
+}
+
 function assertNotSilentlyDestructive(migration) {
   if (migration.sql.includes(ALLOW_DESTRUCTIVE_MARKER)) return;
+  const code = stripSqlComments(migration.sql);
   for (const pattern of DESTRUCTIVE_PATTERNS) {
-    if (pattern.test(migration.sql)) {
+    if (pattern.test(code)) {
       throw new Error(
         `[migrator] миграция "${migration.file}" содержит разрушающую операцию `
         + `(${pattern}), но не помечена маркером "${ALLOW_DESTRUCTIVE_MARKER}". `
@@ -243,6 +256,134 @@ async function inspectSchemaFingerprint(client) {
   return { compatible: missing.length === 0, missing, tableCount: tables.size };
 }
 
+// --- Известные legacy-схемы --------------------------------------------------
+//
+// ЗАЧЕМ. Fingerprint выше отвечает на вопрос «совместима ли база с ТЕКУЩИМ
+// кодом». Для базы, отставшей на два этапа, ответ «нет» — и это правильно,
+// но бесполезно: обновить её всё равно нужно. Профиль отвечает на другой
+// вопрос: «является ли эта база ИЗВЕСТНЫМ прошлым состоянием проекта, для
+// которого у нас есть проверенный путь обновления».
+//
+// ЧЕГО ЗДЕСЬ НАМЕРЕННО НЕТ: режима «принять любую старую базу». Профиль
+// описывает ОДНО конкретное состояние и проверяет его точно. Похожая,
+// частично созданная или чужая база профилю не соответствует и обязана
+// приводить к остановке — молчаливое усыновление скрыло бы расхождение
+// навсегда.
+//
+// Состав профиля получен объективным сравнением schema-only dump реальной
+// базы с результатом цепочки миграций, а не по памяти.
+const LEGACY_PROFILES = [
+  {
+    name: 'hqtest_stage12',
+    description: 'HQ-база уровня Stage 12: расчётные периоды Stage 8 и выплаты Stage 9 есть, Stage 13-14 отсутствуют',
+    // Обязаны присутствовать — иначе это не Stage 12.
+    requireTables: [
+      'restaurants', 'menu_items', 'orders', 'order_items', 'payments', 'refunds',
+      'hq_owner', 'hq_audit_log', 'hq_security_log',
+      'settlement_periods', 'settlement_restaurant_lines', 'settlement_order_lines',
+      'settlement_refunds', 'restaurant_payouts', 'payout_attempts',
+      'payout_attempt_requisites', 'restaurant_legal_details', 'restaurant_bank_details',
+      'restaurant_contracts', 'yaam_bank_details',
+    ],
+    // Обязаны ОТСУТСТВОВАТЬ — иначе база уже не Stage 12, а что-то другое,
+    // и наш путь обновления к ней неприменим.
+    forbidTables: [
+      'settlement_adjustments', 'settlement_documents', 'settlement_document_access_tokens',
+      'restaurant_settlement_balances', 'restaurant_balance_entries',
+      'yaam_legal_details', 'fiscal_receipts', 'hq_events',
+    ],
+    // Тип критических колонок проверяется, а не только наличие: колонка
+    // нужного имени, но неверного типа сломала бы расчёт молча.
+    requireColumns: [
+      ['orders', 'items_total', 'integer'],
+      ['orders', 'commission_amount', 'integer'],
+      ['orders', 'status_updated_at', 'timestamp with time zone'],
+      ['refunds', 'completed_at', 'timestamp with time zone'],
+      ['settlement_restaurant_lines', 'payable_amount', 'integer'],
+      ['settlement_restaurant_lines', 'restaurant_earnings', 'integer'],
+      ['settlement_periods', 'period_from', 'date'],
+      ['settlement_periods', 'period_to', 'date'],
+    ],
+    forbidColumns: [
+      ['settlement_restaurant_lines', 'carry_forward_applied'],
+      ['settlement_restaurant_lines', 'refund_adjustment_restaurant_amount'],
+    ],
+    // Инварианты, без которых база не является исправной Stage 12.
+    requireConstraints: ['settlement_periods_no_overlap'],
+    requireFunctions: [
+      'fn_settlement_snapshot_row_immutable',
+      'fn_refunds_amount_matches_payment',
+    ],
+    requireTriggers: [
+      'trg_settlement_restaurant_lines_immutable',
+      'trg_settlement_order_lines_immutable',
+    ],
+    // Какие миграции доказанно уже отражены в этой схеме.
+    // ТОЛЬКО baseline: hq_sessions (0002) в Stage 12 не существует, поэтому
+    // 0002 обязана быть ВЫПОЛНЕНА, а не отмечена.
+    adoptVersions: [BASELINE_VERSION],
+  },
+];
+
+// Сверяет базу с одним профилем. Возвращает список несоответствий.
+// Посторонние таблицы, которых нет ни в require-, ни в forbid-списке,
+// допускаются: ручное расширение базы не должно ломать распознавание.
+async function matchLegacyProfile(profile, client) {
+  const problems = [];
+
+  const tables = new Set((await db.query(
+    `SELECT tablename FROM pg_tables WHERE schemaname = 'public'`, [], client,
+  )).map((r) => r.tablename));
+  for (const t of profile.requireTables) if (!tables.has(t)) problems.push(`нет таблицы ${t}`);
+  for (const t of profile.forbidTables || []) {
+    if (tables.has(t)) problems.push(`присутствует таблица ${t}, которой в этом состоянии быть не должно`);
+  }
+
+  const columns = new Map((await db.query(
+    `SELECT table_name || '.' || column_name AS ref, data_type
+       FROM information_schema.columns WHERE table_schema = 'public'`, [], client,
+  )).map((r) => [r.ref, r.data_type]));
+  for (const [t, c, type] of profile.requireColumns || []) {
+    const actual = columns.get(`${t}.${c}`);
+    if (!actual) problems.push(`нет колонки ${t}.${c}`);
+    else if (actual !== type) problems.push(`колонка ${t}.${c} имеет тип ${actual}, ожидался ${type}`);
+  }
+  for (const [t, c] of profile.forbidColumns || []) {
+    if (columns.has(`${t}.${c}`)) problems.push(`присутствует колонка ${t}.${c}, которой в этом состоянии быть не должно`);
+  }
+
+  const constraints = new Set((await db.query('SELECT conname FROM pg_constraint', [], client)).map((r) => r.conname));
+  for (const c of profile.requireConstraints || []) if (!constraints.has(c)) problems.push(`нет ограничения ${c}`);
+
+  const functions = new Set((await db.query(
+    `SELECT p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public'`,
+    [], client,
+  )).map((r) => r.proname));
+  for (const f of profile.requireFunctions || []) if (!functions.has(f)) problems.push(`нет функции ${f}`);
+
+  const triggers = new Set((await db.query(
+    'SELECT tgname FROM pg_trigger WHERE NOT tgisinternal', [], client,
+  )).map((r) => r.tgname));
+  for (const t of profile.requireTriggers || []) if (!triggers.has(t)) problems.push(`нет триггера ${t}`);
+
+  return problems;
+}
+
+// Ищет ЕДИНСТВЕННЫЙ подходящий профиль. Совпадение с несколькими означало бы,
+// что профили описаны неточно, — такое состояние тоже отвергается.
+async function detectLegacyProfile(client) {
+  const matched = [];
+  const report = [];
+  for (const profile of LEGACY_PROFILES) {
+    // eslint-disable-next-line no-await-in-loop
+    const problems = await matchLegacyProfile(profile, client);
+    report.push({ name: profile.name, problems });
+    if (problems.length === 0) matched.push(profile);
+  }
+  if (matched.length === 1) return { profile: matched[0], report };
+  return { profile: null, report };
+}
+
 // Пустая ли база. Пустая — это ОТСУТСТВИЕ любых пользовательских таблиц, а не
 // отсутствие одной конкретной: база с половиной объектов пустой не является и
 // обязана разбираться отдельно, а не проскакивать как «уже существующая».
@@ -309,23 +450,54 @@ async function migrate({ logger = console } = {}) {
     // данных: частично созданная или отставшая база должна разбираться
     // человеком, а не «усыновляться» молча.
     const needsBaseline = !already.has(BASELINE_VERSION);
+    // Версии, которые доказанно уже отражены в схеме и потому только
+    // отмечаются. Заполняется либо адопцией совместимой базы, либо
+    // legacy-профилем.
+    let adoptable = new Set();
+
     if (needsBaseline && !empty) {
       const fingerprint = await inspectSchemaFingerprint(client);
-      if (!fingerprint.compatible) {
-        throw new Error(
-          '[migrator] база не пуста, но её схема несовместима с текущим кодом, '
-          + 'а таблицы schema_migrations в ней нет. Отметить baseline применённым нельзя — '
-          + 'это скрыло бы расхождение навсегда.\n'
-          + `Не хватает (${fingerprint.missing.length}):\n`
-          + fingerprint.missing.map((m) => `  - ${m}`).join('\n')
-          + '\nДанные не изменены. Приведите схему в соответствие вручную '
-          + 'или разворачивайте на чистой базе.',
+
+      if (fingerprint.compatible) {
+        // База уже соответствует текущему коду — обычная адопция baseline.
+        adoptable = new Set([BASELINE_VERSION]);
+        logger.log(
+          `[migrator] существующая база совместима (${fingerprint.tableCount} таблиц) — `
+          + 'baseline отмечается применённым без выполнения',
+        );
+      } else {
+        // Не совместима с ТЕКУЩИМ кодом — но, возможно, это известное прошлое
+        // состояние проекта, для которого есть проверенный путь обновления.
+        const { profile, report } = await detectLegacyProfile(client);
+
+        if (!profile) {
+          const detail = report
+            .map((r) => `  профиль ${r.name}: не подходит (${r.problems.length}) — ${r.problems.slice(0, 5).join('; ')}`)
+            .join('\n');
+          throw new Error(
+            '[migrator] база не пуста, её схема не совместима с текущим кодом и не соответствует '
+            + 'ни одному известному прошлому состоянию проекта. Отметить baseline применённым нельзя — '
+            + 'это скрыло бы расхождение навсегда.\n'
+            + `Не хватает для текущей схемы (${fingerprint.missing.length}):\n`
+            + fingerprint.missing.map((m) => `  - ${m}`).join('\n')
+            + '\nПроверка известных состояний:\n' + detail
+            + '\nДанные не изменены. Приведите схему в соответствие вручную '
+            + 'или разворачивайте на чистой базе.',
+          );
+        }
+
+        adoptable = new Set(profile.adoptVersions);
+        // Решение об adoption логируется явно: оператор должен видеть, ЧТО
+        // именно распознано и какие миграции будут пропущены. Секретов здесь
+        // нет — только имена профиля и версий.
+        logger.log(
+          `[migrator] распознано известное состояние схемы: ${profile.name} — ${profile.description}`,
+        );
+        logger.log(
+          `[migrator] отмечаются как уже применённые: ${[...adoptable].join(', ')}; `
+          + 'остальные миграции будут ВЫПОЛНЕНЫ',
         );
       }
-      logger.log(
-        `[migrator] существующая база совместима (${fingerprint.tableCount} таблиц) — `
-        + 'baseline отмечается применённым без выполнения',
-      );
     }
 
     for (const m of migrations) {
@@ -334,10 +506,11 @@ async function migrate({ logger = console } = {}) {
       const startedAt = Date.now();
       await client.query('BEGIN');
       try {
-        // Baseline на непустой совместимой базе только ОТМЕЧАЕТСЯ. Во всех
-        // остальных случаях — включая пустую базу — миграция выполняется как
-        // обычный SQL-файл. Никаких спецслучаев с чтением schema.sql больше нет.
-        const adoptOnly = m.version === BASELINE_VERSION && !empty;
+        // Отмечается только то, чьё состояние доказанно уже присутствует в
+        // базе (adoptable). Всё остальное — включая любую миграцию на пустой
+        // базе — ВЫПОЛНЯЕТСЯ как обычный SQL-файл. Спецслучаев с чтением
+        // schema.sql больше нет.
+        const adoptOnly = adoptable.has(m.version);
         if (!adoptOnly) {
           await client.query(m.sql);
         }
@@ -391,9 +564,13 @@ module.exports = {
   ALLOW_DESTRUCTIVE_MARKER,
   inspectSchemaFingerprint,
   isDatabaseEmpty,
+  LEGACY_PROFILES,
+  matchLegacyProfile,
+  detectLegacyProfile,
   listMigrationFiles,
   assertNoDuplicateVersions,
   assertNotSilentlyDestructive,
+  stripSqlComments,
   migrate,
   getMigrationStatus,
 };

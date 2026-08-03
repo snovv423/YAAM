@@ -106,9 +106,18 @@ function inspectEnv(env = process.env) {
   }
 
   // --- HQ session/auth ---
+  //
+  // HQ_SESSION_SECRET НЕ обязателен сам по себе. В фактической архитектуре
+  // проекта HQ обслуживает отдельный сервис (hqtest.yaam.su), а публичный
+  // API-бэкенд (api-pg.yaam.su) раздел HQ не монтирует вовсе — и это
+  // сознательное решение, а не недоделка. Требовать секрет там, где HQ не
+  // отдаётся, значит заставлять заводить credentials ради формальности.
+  //
+  // Правило: отсутствует — HQ выключен, это предупреждение. Задан — обязан
+  // быть настоящим секретом достаточной длины.
   if (isProdLike) {
     if (isBlank(env.HQ_SESSION_SECRET)) {
-      errors.push('HQ_SESSION_SECRET обязателен: без него HQ не поднимается, а подставлять дефолт нельзя.');
+      warnings.push('HQ_SESSION_SECRET не задан — раздел HQ на этом сервисе не будет доступен.');
     } else {
       if (String(env.HQ_SESSION_SECRET).length < 32) {
         errors.push('HQ_SESSION_SECRET короче 32 символов.');

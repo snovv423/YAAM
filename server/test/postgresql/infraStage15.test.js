@@ -101,10 +101,15 @@ test('E2: production не запускается с mock-провайдером 
   const short = inspectEnv(prodEnv({ HQ_SESSION_SECRET: 'short' }));
   assert.ok(short.errors.some((e) => /32 символ/.test(e)));
 
-  // Отсутствующий секрет — не подставляется дефолт, а запрещается запуск.
+  // Отсутствующий HQ_SESSION_SECRET — НЕ ошибка (обновлено в Stage 18).
+  // В фактической архитектуре публичный API-бэкенд раздел HQ не монтирует
+  // вовсе, и требовать секрет ради формальности значило бы выдумать
+  // требование. Но это состояние обязано быть ЗАМЕЧЕНО.
   const missing = prodEnv();
   delete missing.HQ_SESSION_SECRET;
-  assert.ok(inspectEnv(missing).errors.some((e) => /HQ_SESSION_SECRET обязателен/.test(e)));
+  const noHq = inspectEnv(missing);
+  assert.ok(!noHq.errors.some((e) => /HQ_SESSION_SECRET/.test(e)), 'отсутствие секрета не должно блокировать запуск');
+  assert.ok(noHq.warnings.some((w) => /HQ_SESSION_SECRET не задан/.test(w)), 'но обязано быть предупреждение');
 
   // Демо-данные.
   const seed = inspectEnv(prodEnv({ SEED_DEMO_DATA: 'true' }));
@@ -778,7 +783,7 @@ test('MB3: пустая база проходит строго 0001 -> 0002, о�
 
   const result = await migrator.migrate({ logger: quietLogger });
   const order = result.applied.map((a) => a.version);
-  assert.deepEqual(order, [1, 2], 'строгий порядок baseline -> 0002');
+  assert.deepEqual(order, [1, 2, 3], 'строгий порядок baseline -> 0002 -> 0003');
   // Ни одна миграция на пустой базе не «отмечается» — все выполняются.
   assert.ok(result.applied.every((a) => a.adopted === false));
 
@@ -825,7 +830,10 @@ test('MB5: частично созданная база НЕ усыновляе�
   await assert.rejects(
     () => migrator.migrate({ logger: quietLogger }),
     (err) => {
-      assert.match(err.message, /схема несовместима/);
+      // Stage 18: сообщение расширено — теперь оно также говорит, что база не
+      // соответствует ни одному известному прошлому состоянию проекта.
+      assert.match(err.message, /не совместима с текущим кодом/);
+      assert.match(err.message, /известному прошлому состоянию/);
       assert.match(err.message, /Не хватает/);
       assert.match(err.message, /Данные не изменены/);
       return true;
@@ -856,7 +864,7 @@ test('MB6: устаревшая база (нет поздних колонок �
   await assert.rejects(
     () => migrator.migrate({ logger: quietLogger }),
     (err) => {
-      assert.match(err.message, /схема несовместима/);
+      assert.match(err.message, /не совместима с текущим кодом/);
       assert.match(err.message, /carry_forward_applied/);
       assert.match(err.message, /fiscal_receipts/);
       return true;
@@ -909,11 +917,11 @@ test('MB8: будущая миграция после baseline применяе�
         path.join(dir, f.file),
       );
     }
-    fs.writeFileSync(path.join(dir, '0003_future_probe.sql'),
+    fs.writeFileSync(path.join(dir, '0004_future_probe.sql'),
       'CREATE TABLE mb8_future (id INTEGER PRIMARY KEY);\n');
 
     const listed = migrator.listMigrationFiles(dir);
-    assert.deepEqual(listed.map((m) => m.version), [1, 2, 3], 'порядок по номеру');
+    assert.deepEqual(listed.map((m) => m.version), [1, 2, 3, 4], 'порядок по номеру');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
