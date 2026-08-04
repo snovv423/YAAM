@@ -13,19 +13,21 @@
 // Полноценный серверный PDF-renderer — PENDING (см. итоговый отчёт).
 const { esc } = require('./layout');
 const { DOCUMENT_KIND_LABELS } = require('../services/hq/settlementDocumentService');
+const { toMskDate, MSK_SUFFIX } = require('./dateFormat');
 
 function money(n) {
   return `${Number(n) || 0} ₽`;
 }
 
+// Уже был корректно сдвинут на московское время (был единственным из четырёх
+// formatDateTime в HQ, где так) — Stage 27 переводит сдвиг на общий
+// toMskDate (та же константа, не вторая копия "180") и добавляет суффикс
+// "МСК", которого не хватало здесь так же, как и везде остальным.
 function formatDateTime(iso) {
-  if (!iso) return '';
-  const d = new Date(iso);
+  const local = toMskDate(iso);
+  if (!local) return '';
   const pad = (n) => String(n).padStart(2, '0');
-  // Время проекта (Europe/Moscow, фиксированное +180) — то же правило, что и
-  // везде в HQ; локальный TZ процесса не участвует.
-  const local = new Date(d.getTime() + 180 * 60 * 1000);
-  return `${pad(local.getUTCDate())}.${pad(local.getUTCMonth() + 1)}.${local.getUTCFullYear()} ${pad(local.getUTCHours())}:${pad(local.getUTCMinutes())}`;
+  return `${pad(local.getUTCDate())}.${pad(local.getUTCMonth() + 1)}.${local.getUTCFullYear()} ${pad(local.getUTCHours())}:${pad(local.getUTCMinutes())}${MSK_SUFFIX}`;
 }
 
 function formatDate(dateStr) {

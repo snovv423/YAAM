@@ -10,6 +10,7 @@ const financeViews = require('./restaurantFinanceViews');
 const { PROJECT_TIMEZONE_OFFSET_MINUTES } = require('../services/hq/dashboardMetrics');
 const { READINESS_LABELS: PAYOUT_READINESS_LABELS } = require('../services/hq/restaurantPayoutService');
 const { SUPPORTED_CITIES } = require('../services/hq/restaurantAdminService');
+const { toMskDate, MSK_SUFFIX } = require('./dateFormat');
 
 const ORDER_STATUS_LABELS = {
   awaiting_payment: 'Ожидает оплаты',
@@ -55,11 +56,14 @@ function statusBadge(r) {
   return '<span class="badge closed">Приостановлен</span>';
 }
 
+// Stage 27 — то же закрытие дефекта часового пояса, что и в остальных
+// *Views.js: раньше сырые getUTCHours() без сдвига (единственный вызов —
+// "Ресторан в архиве с ..."), теперь — московское время с суффиксом.
 function formatDateTime(date) {
-  if (!date) return '';
-  const d = date instanceof Date ? date : new Date(date);
+  const local = toMskDate(date);
+  if (!local) return '';
   const pad = (n) => String(n).padStart(2, '0');
-  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
+  return `${local.getUTCFullYear()}-${pad(local.getUTCMonth() + 1)}-${pad(local.getUTCDate())} ${pad(local.getUTCHours())}:${pad(local.getUTCMinutes())}${MSK_SUFFIX}`;
 }
 
 function formatDateOnly(date) {

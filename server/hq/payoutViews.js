@@ -13,6 +13,7 @@ const { esc } = require('./layout');
 const { STATUS_LABELS, ATTEMPT_STATUS_LABELS, ATTEMPT_METHOD_LABELS } = require('../services/hq/payoutService');
 const { READINESS_REASONS } = require('../services/hq/tbankPayoutReadiness');
 const { maskAccountForUi } = require('../services/hq/ruRequisites');
+const { toMskDate, MSK_SUFFIX } = require('./dateFormat');
 
 // Человекочитаемые причины неготовности (задание, раздел 8: "Возвращать
 // понятные machine-readable причины") — machine-readable коды остаются в
@@ -43,11 +44,15 @@ function formatDateOnly(date) {
   return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
 }
 
+// Stage 27 — закрытие возможного дефекта часового пояса (Stage 26, раздел
+// 2): раньше здесь были сырые getUTCHours() без какого-либо сдвига —
+// формально верно преобразованная дата платежа (20:00 МСК владельца)
+// показывалась как 17:00 без единой пометки, что это уже другой пояс.
 function formatDateTime(date) {
-  if (!date) return '—';
-  const d = date instanceof Date ? date : new Date(date);
+  const local = toMskDate(date);
+  if (!local) return '—';
   const pad = (n) => String(n).padStart(2, '0');
-  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
+  return `${local.getUTCFullYear()}-${pad(local.getUTCMonth() + 1)}-${pad(local.getUTCDate())} ${pad(local.getUTCHours())}:${pad(local.getUTCMinutes())}${MSK_SUFFIX}`;
 }
 
 // Статусы ПОПЫТКИ — своя, независимая от статуса обязательства раскраска.
@@ -179,7 +184,7 @@ function renderManualConfirmSection({ payout, pendingRequisitesPreview, linkBase
       <form method="post" action="${base}/confirm-manual"
             onsubmit="return confirm('Подтвердить, что перевод ${money(payout.amount)} ресторану «${esc(payout.restaurant_name)}» уже выполнен?')">
         <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
-        <label>Дата и время платежа
+        <label>Дата и время платежа (по московскому времени)
           <input type="datetime-local" name="paid_at" required>
         </label>
         <label>Номер платёжного поручения / банковской операции

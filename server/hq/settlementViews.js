@@ -7,6 +7,7 @@
 const { esc } = require('./layout');
 const { READINESS_LABELS } = require('../services/hq/restaurantPayoutService');
 const { STATUS_LABELS: PAYOUT_STATUS_LABELS } = require('../services/hq/payoutService');
+const { toMskDate, MSK_SUFFIX } = require('./dateFormat');
 
 const STATUS_LABELS = { draft: 'Черновик', closed: 'Закрыт' };
 const { PERIOD_PAYOUT_STATUS_LABELS } = require('../services/hq/settlementService');
@@ -23,11 +24,14 @@ function formatDateOnly(date) {
   return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
 }
 
+// Stage 27 — то же закрытие дефекта часового пояса, что и в
+// hq/payoutViews.js: раньше сырые getUTCHours() без сдвига, теперь — сдвиг
+// на московское время и явный суффикс "МСК".
 function formatDateTime(date) {
-  if (!date) return '—';
-  const d = date instanceof Date ? date : new Date(date);
+  const local = toMskDate(date);
+  if (!local) return '—';
   const pad = (n) => String(n).padStart(2, '0');
-  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
+  return `${local.getUTCFullYear()}-${pad(local.getUTCMonth() + 1)}-${pad(local.getUTCDate())} ${pad(local.getUTCHours())}:${pad(local.getUTCMinutes())}${MSK_SUFFIX}`;
 }
 
 // ---------------------------------------------------------------------------

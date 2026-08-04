@@ -448,13 +448,39 @@ function stopPrepTimer(){
   if(prepTimerId){clearInterval(prepTimerId);prepTimerId=null;}
 }
 
+// Stage 27 — единственное место, разбирающее timestamp с backend, кем бы он
+// ни был отправлен. Раньше в файле было ТРИ независимых попытки сделать это
+// (эта функция, parseServerDeadline, parseServerCreatedAt) и один прямой
+// Date.parse() без какой-либо защиты вообще (pollOrderOnce,
+// status_updated_at) — именно четвёртое место дало Stage 26 H-1: PostgreSQL
+// уже отдаёт полный ISO8601 со своим "Z" на конце ("...715Z"), а код
+// БЕЗУСЛОВНО дописывал ЕЩЁ ОДИН "Z" (наследие SQLite-формата "YYYY-MM-DD
+// HH:mm:ss" без пояса, где дописывание было необходимо) — результат
+// "...715ZZ" не является датой, Date.parse() молча возвращает NaN.
+//
+// Правило одно: строка УЖЕ содержит 'T' -> это уже ISO8601 (с 'Z' или с
+// числовым offset, с миллисекундами или без) -> передаём как есть, ничего
+// не дописываем. Строки без 'T' — только legacy SQLite-формат, всегда UTC по
+// соглашению этого проекта — дописываем 'T'/'Z' один раз. Также прозрачно
+// принимает уже готовый Date и число (мс с эпохи).
+function parseServerTimestamp(value){
+  if(value instanceof Date){
+    const t=value.getTime();
+    return Number.isFinite(t)?t:null;
+  }
+  if(typeof value==='number')return Number.isFinite(value)?value:null;
+  if(typeof value!=='string'||!value)return null;
+  const normalized=value.includes('T')?value:value.replace(' ','T')+'Z';
+  const parsed=Date.parse(normalized);
+  return Number.isFinite(parsed)?parsed:null;
+}
+
 // Применяет серверное значение к клиентскому состоянию. NULL с сервера
 // (заказ ещё не готовится либо уже передан курьеру) гасит таймер.
 function applyPreparationDeadline(order){
   const iso=order&&order.preparation_deadline;
   if(!iso){prepDeadlineMs=null;stopPrepTimer();return;}
-  const parsed=Date.parse(iso);
-  prepDeadlineMs=Number.isFinite(parsed)?parsed:null;
+  prepDeadlineMs=parseServerTimestamp(iso);
 }
 
 function renderStatus(){
@@ -681,18 +707,11 @@ function normalizeOrderSnapshotItems(items){
 // QR_TIMER_SEC остаётся в startQRTimer() ниже, только если дедлайна вообще
 // никогда не было.
 function parseServerDeadline(value){
-  if(typeof value!=='string'||!value)return null;
-  const parsed=Date.parse(value);
-  return Number.isFinite(parsed)?parsed:null;
+  return parseServerTimestamp(value);
 }
 function parseServerCreatedAt(value,fallback){
-  if(typeof value==='number'&&Number.isFinite(value))return value;
-  if(typeof value==='string'){
-    const normalized=value.includes('T')?value:value.replace(' ','T')+'Z';
-    const parsed=Date.parse(normalized);
-    if(Number.isFinite(parsed))return parsed;
-  }
-  return Number(fallback)||Date.now();
+  const parsed=parseServerTimestamp(value);
+  return parsed!==null?parsed:(Number(fallback)||Date.now());
 }
 function loadOrderRestaurant(restId){
   if(!restId)return;
@@ -1841,15 +1860,31 @@ async function pollOrderOnce(){
     setShareButtonVisible(false); // не даём делиться неоплаченным заказом (см. renderAwaitingPayment ниже — тот же #status экран)
     renderAwaitingPayment(order);
   }else if(order.status==='awaiting_restaurant'){
+    // Реальный статус подтверждён сервером — с этого момента #st-substate
+    // ведёт ТОЛЬКО этот блок (пересчитывается заново на каждом poll-тике из
+    // order.status_updated_at, серверной правды). До Stage 27 preTimer
+    // (клиентская догадка о дедлайне из renderWaitForRestaurant/
+    // restoreDemoOrder) не останавливался здесь и мог продолжать писать в
+    // тот же элемент раз в секунду поверх/вперемешку с этим блоком — второй
+    // независимый таймер на один и тот же экран, который и обнажил Stage 26
+    // H-1 сложнее, чем просто "одна невалидная дата".
+    clearInterval(preTimer);preTimer=null;clearTimeout(preAutoTimer);preDeadline=null;
+    inPreStatus=false;
     showOrderDot(true); // оплата подтверждена, заказ реально пошёл в работу
     setShareButtonVisible(true);
     showStatusSpinner(false);
     document.getElementById('st-progress').style.display='none';
     document.getElementById('st-state').textContent='Заказ отправлен, ждём ответа ресторана';
-    const updatedMs=Date.parse(order.status_updated_at.replace(' ','T')+'Z');
-    const left=Math.max(0,RESTAURANT_RESPONSE_WINDOW_SEC-Math.floor((Date.now()-updatedMs)/1000));
-    const m=Math.floor(left/60),s=left%60;
-    document.getElementById('st-substate').textContent=`Ответ ресторана в течение ${m}:${s<10?'0':''}${s}`;
+    const updatedMs=parseServerTimestamp(order.status_updated_at);
+    if(updatedMs===null){
+      // Невалидная/отсутствующая дата с backend — не выдумываем таймер и не
+      // показываем NaN:NaN, честно показываем состояние без обратного отсчёта.
+      document.getElementById('st-substate').textContent='Ждём ответа ресторана';
+    }else{
+      const left=Math.max(0,RESTAURANT_RESPONSE_WINDOW_SEC-Math.floor((Date.now()-updatedMs)/1000));
+      const m=Math.floor(left/60),s=left%60;
+      document.getElementById('st-substate').textContent=`Ответ ресторана в течение ${m}:${s<10?'0':''}${s}`;
+    }
     document.getElementById('st-substate').style.display='block';
     const ic=document.getElementById('st-icon');ic.innerHTML=uiIcon('clock');
     document.getElementById('st-next').style.display='none';
@@ -2123,6 +2158,19 @@ function go(id){document.querySelectorAll('.screen').forEach(s=>s.classList.remo
 function resetAll(){
   const orderCodeForClear=currentOrderCode,orderTokenForClear=currentOrderAccessToken;
   clearInterval(preTimer);clearTimeout(preAutoTimer);preDeadline=null;stopQRTimer();qrDeadline=null;stopOrderPolling();showRestaurantPhone(null);showOrderDot(false);cart={};curRest=null;currentOrderCode=null;currentOrderAccessToken=null;currentCreateIdempotencyKey=null;currentRetryIdempotencyKey=null;currentPaymentUrl=null;currentOrderAmount=null;currentOrderRestaurantId=null;currentOrderItems=[];orderCreatedAtMs=null;initialRecoveryBlocked=false;demoStage='qr';
+  // Stage 27 (L-1) — cart={} выше уже верно сбрасывает СОСТОЯНИЕ, но штора
+  // корзины (#sheet/#sheet-overlay) — независимый оверлей, а не .screen:
+  // go('home') ниже прячет только нижнюю сумму-кнопку (updateBar() внутри
+  // go()), но НЕ трогает уже открытую штору. Если пользователь отменял заказ
+  // прямо с открытой шторой корзины (например, только что вернулся с экрана
+  // оформления), она оставалась видимой со старыми позициями и активной
+  // кнопкой «Оформить заказ» до следующего открытия — притом что диалог
+  // отмены прямо обещает "корзина будет очищена". closeSheet() + очистка её
+  // innerHTML устраняют оба симптома сразу: штора не просто скрыта классом,
+  // старых позиций/суммы не остаётся и в самом DOM.
+  closeSheet();
+  const si=document.getElementById('sheet-items');if(si)si.innerHTML='';
+  const stw=document.getElementById('sheet-total-wrap');if(stw)stw.innerHTML='';
   if(orderCodeForClear)void clearStoredOrderStateSafely(orderCodeForClear,orderTokenForClear);
   saveCartState();document.getElementById('statusbg').style.display='none';go('home');renderList();
 }
