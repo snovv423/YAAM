@@ -1893,6 +1893,16 @@ async function pollOrderOnce(){
   }else if(stepSet().statusToStep[order.status]!==undefined){
     inPreStatus=false;
     statusStep=stepSet().statusToStep[order.status];
+    // Stage 28 HIGH-1: восстановление заказа (refresh/переоткрытие вкладки),
+    // чей ПЕРВЫЙ реальный poll после initStatusScreen()'s showStatusSpinner(true)
+    // уже не awaiting_restaurant (тот единственный сосед по if/else явно снимал
+    // спиннер, эта ветка — нет), оставляло спиннер крутиться навсегда поверх
+    // корректно отрисованных ниже данных (accepted/preparing/courier/delivered),
+    // включая форму оценки на уже доставленном заказе. showStatusSpinner(false)
+    // должен быть здесь безусловно — по тому же принципу, что и в соседней
+    // ветке awaiting_restaurant, а не только когда статус впервые дошёл сюда
+    // через живой poll в открытой вкладке.
+    showStatusSpinner(false);
     document.getElementById('st-progress').style.display='flex';
     document.getElementById('st-next').style.display='none'; // статус двигает ресторан по-настоящему, не демо-кнопка
     document.getElementById('st-demowrap').style.display='none';
@@ -2338,30 +2348,109 @@ window.addEventListener('popstate',e=>{try{
   window.scrollTo(0,0);updateBar();
 }catch(err){}});
 
-// Голосование за рестораны, которых ещё нет в YAAM (данные — CANDIDATE_RESTAURANTS в data.js)
-let myVote=null;
+// Голосование за рестораны, которых ещё нет в YAAM. Источник данных (после
+// Stage 28, раздел 2): USE_API=true -> HQ-управляемый список через
+// api.getRestaurantCandidates() (единственный источник истины — HQ "Кого
+// ждём"); USE_API=false (demo-режим, backend не задеплоен) -> локальный
+// CANDIDATE_RESTAURANTS из data.js, как и раньше. voteCandidates — рабочая
+// копия (не мутируем сам CANDIDATE_RESTAURANTS/ответ сервера напрямую).
+//
+// Stage 29.1, п.3 — реальный, персистентный голос в USE_API-режиме:
+// api.voteRestaurantCandidate() пишет в PostgreSQL (один голос с устройства
+// на кандидата — сервер идемпотентен сам по себе, см.
+// services/hq/restaurantCandidateService.js), а не только в памяти вкладки.
+// deviceId — случайный localStorage-идентификатор, НЕ персональные данные
+// (не логин, не имя, не телефон — просто "тот же браузер уже голосовал").
+// demo-режим (USE_API=false) сохраняет прежнее клиент-локальное поведение —
+// backend в demo нет физически, писать голос некуда.
+let myVote=null; // только demo-режим
+let voteCandidates=null;
+const VOTER_DEVICE_ID_KEY='yaam_voter_device_id';
+const VOTED_CANDIDATES_KEY='yaam_voted_candidate_ids';
+function getVoterDeviceId(){
+  try{
+    let id=localStorage.getItem(VOTER_DEVICE_ID_KEY);
+    if(!id){
+      id=(window.crypto&&crypto.randomUUID)?crypto.randomUUID():('dev_'+Date.now()+'_'+Math.random().toString(36).slice(2));
+      localStorage.setItem(VOTER_DEVICE_ID_KEY,id);
+    }
+    return id;
+  }catch(e){return 'dev_fallback_'+Math.random().toString(36).slice(2);} // приватный режим браузера без localStorage — голос всё равно уйдёт, просто не запомнится локально
+}
+function getVotedCandidateIds(){
+  try{return new Set(JSON.parse(localStorage.getItem(VOTED_CANDIDATES_KEY)||'[]'));}catch(e){return new Set();}
+}
+function markCandidateVoted(id){
+  try{
+    const ids=getVotedCandidateIds();ids.add(id);
+    localStorage.setItem(VOTED_CANDIDATES_KEY,JSON.stringify([...ids]));
+  }catch(e){/* не критично — сервер всё равно не даст переголосовать этим же deviceId */}
+}
 function renderVote(){
-  const max=Math.max(...CANDIDATE_RESTAURANTS.map(v=>v.votes));
-  CANDIDATE_RESTAURANTS.sort((a,b)=>b.votes-a.votes);
-  document.getElementById('vote-list').innerHTML=CANDIDATE_RESTAURANTS.map(v=>`
+  const list=voteCandidates||[];
+  if(!list.length){
+    document.getElementById('vote-list').innerHTML='<div class="empty">Пока нет кандидатов на голосование.</div>';
+    return;
+  }
+  list.sort((a,b)=>b.votes-a.votes);
+  const max=Math.max(...list.map(v=>v.votes),1);
+  const votedIds=USE_API?getVotedCandidateIds():null;
+  document.getElementById('vote-list').innerHTML=list.map(v=>{
+    const key=USE_API?v.id:v.name;
+    const voted=USE_API?votedIds.has(v.id):myVote===v.name;
+    return `
     <div class="vote-item">
       <div class="vote-row">
-        <span class="vote-name">${v.name}</span>
+        <span class="vote-name">${esc(v.name)}</span>
         <span class="vote-count">${v.votes} голосов</span>
-        <button class="vbtn ${myVote===v.name?'voted':''}" onclick="castVote('${v.name}')">${myVote===v.name?'✓':'+'}</button>
+        <button class="vbtn ${voted?'voted':''}"${voted?' disabled':''} onclick="castVote(${JSON.stringify(key)})">${voted?'✓':'+'}</button>
       </div>
       <div class="vbar"><i style="width:${Math.round(v.votes/max*100)}%"></i></div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 }
-function castVote(name){
-  if(myVote===name)return;
-  if(myVote){const prev=CANDIDATE_RESTAURANTS.find(v=>v.name===myVote);if(prev)prev.votes--;}
-  const chosen=CANDIDATE_RESTAURANTS.find(v=>v.name===name);if(chosen)chosen.votes++;
-  myVote=name;
-  try{if(navigator.vibrate)navigator.vibrate(40);}catch(e){}
+async function castVote(key){
+  if(!voteCandidates)return;
+  if(!USE_API){
+    // demo-режим — прежнее клиент-локальное single-choice поведение
+    // (переключение голоса между кандидатами), backend не существует.
+    if(myVote===key)return;
+    if(myVote){const prev=voteCandidates.find(v=>v.name===myVote);if(prev)prev.votes--;}
+    const chosen=voteCandidates.find(v=>v.name===key);if(chosen)chosen.votes++;
+    myVote=key;
+    try{if(navigator.vibrate)navigator.vibrate(40);}catch(e){}
+    renderVote();
+    return;
+  }
+  const candidate=voteCandidates.find(v=>v.id===key);
+  if(!candidate||getVotedCandidateIds().has(key))return; // защита от двойного клика до ответа сервера — сам сервер тоже идемпотентен
+  markCandidateVoted(key); // оптимистично — блокирует повторный клик немедленно, сервер ниже подтвердит/поправит счётчик
+  renderVote();
+  try{
+    const result=await api.voteRestaurantCandidate(key,getVoterDeviceId());
+    candidate.votes=result.votes; // источник истины — ответ сервера, не локальный инкремент
+    try{if(navigator.vibrate)navigator.vibrate(40);}catch(e){}
+  }catch(err){
+    if(err.status===404){
+      // Кандидат удалён владельцем, пока лист был открыт — честно убираем.
+      voteCandidates=voteCandidates.filter(v=>v.id!==key);
+      showToast('Этот кандидат больше не участвует в голосовании');
+    }else{
+      showToast(err.message||'Не удалось отправить голос — проверьте соединение');
+    }
+  }
   renderVote();
 }
-function openVote(){renderVote();document.getElementById('vote-overlay').classList.add('on');document.getElementById('vote-sheet').classList.add('on');document.getElementById('vote-chip').classList.add('lit');document.body.style.overflow='hidden';}
+async function openVote(){
+  document.getElementById('vote-overlay').classList.add('on');document.getElementById('vote-sheet').classList.add('on');document.getElementById('vote-chip').classList.add('lit');document.body.style.overflow='hidden';
+  if(USE_API){
+    try{voteCandidates=await api.getRestaurantCandidates();}
+    catch(err){voteCandidates=voteCandidates||[];showToast('Не удалось загрузить список — проверьте соединение');}
+  }else if(!voteCandidates){
+    voteCandidates=CANDIDATE_RESTAURANTS.map(v=>({...v}));
+  }
+  renderVote();
+}
 function closeVote(){document.getElementById('vote-overlay').classList.remove('on');document.getElementById('vote-sheet').classList.remove('on');document.getElementById('vote-chip').classList.remove('lit');document.body.style.overflow='';}
 let voteStartY=0,voteCurY=0,voteDragging=false;
 function voteTouchStart(e){voteStartY=e.touches[0].clientY;voteCurY=0;voteDragging=true;document.getElementById('vote-sheet').style.transition='none';}

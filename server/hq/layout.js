@@ -192,6 +192,7 @@ function layout({ title, active, body, csrfToken, linkBasePath = '/hq' }) {
   .btn.compact,button.compact{padding:8px 14px;font-size:13px}
   a.btn.compact{padding:8px 14px;font-size:13px}
   .add-restaurant-row{display:flex;justify-content:center;margin-bottom:18px}
+  .candidates-link-row{display:flex;justify-content:flex-end;margin-bottom:8px}
   .rest-list{display:flex;flex-direction:column;gap:10px}
   .rest-card{background:var(--panel);border:1px solid var(--bord);border-radius:14px;padding:14px 16px;display:flex;align-items:center;justify-content:space-between;gap:12px}
   .rest-card-main{min-width:0;flex:1}

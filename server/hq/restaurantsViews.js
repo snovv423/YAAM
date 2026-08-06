@@ -148,6 +148,9 @@ function renderRestaurantCard(r, linkBasePath) {
 function renderRestaurantsList({ restaurants, linkBasePath }) {
   return `
     <h1>Рестораны</h1>
+    <div class="candidates-link-row">
+      <a class="btn compact ghost" href="${linkBasePath}/restaurants/candidates">Кого ждём</a>
+    </div>
     <div class="add-restaurant-row">
       <a class="btn compact" href="${linkBasePath}/restaurants/new">+ Добавить ресторан</a>
     </div>

@@ -99,6 +99,18 @@ function orderAccessHeaders(orderAccessToken, createIdempotencyKey) {
 const api = {
   getRestaurants: (city) => apiRequest(`/api/restaurants?city=${encodeURIComponent(city)}`),
   getRestaurant: (id) => apiRequest(`/api/restaurants/${id}`),
+  // "Кого ждём" — список кандидатов для голосования, управляемый из HQ
+  // (после Stage 28, раздел 2). В demo-режиме (USE_API=false) не
+  // вызывается вовсе — см. renderVote() в app.js, fallback на
+  // CANDIDATE_RESTAURANTS из data.js.
+  getRestaurantCandidates: () => apiRequest('/api/restaurant-candidates'),
+  // Stage 29.1, п.3 — реальный приём голоса. deviceId — анонимный
+  // localStorage-идентификатор устройства (см. getVoterDeviceId() в
+  // app.js), НЕ персональные данные.
+  voteRestaurantCandidate: (candidateId, deviceId) => apiRequest(`/api/restaurant-candidates/${candidateId}/vote`, {
+    method: 'POST',
+    body: JSON.stringify({ deviceId }),
+  }),
   createOrder: (payload, orderAccessToken, createIdempotencyKey) => apiRequest('/api/orders', {
     method: 'POST',
     headers: orderAccessHeaders(orderAccessToken, createIdempotencyKey),

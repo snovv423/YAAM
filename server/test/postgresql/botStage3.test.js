@@ -107,18 +107,26 @@ async function fullyPaidOrder({ fulfillmentType = 'delivery', restaurant } = {})
   return { restaurant: r, order, payment };
 }
 
-// SQLite bot/index.js, строки 69-75 — дословная копия expression'а, которым
-// оригинал строит текст уведомления. bot/index.js менять нельзя, а
-// сконструировать реальный SQLite TelegramBot без сети/токена невозможно
-// (конструктор сам стартует polling) — поэтому parity текста проверяется
-// сравнением с этим верным, дословно скопированным эталоном, а не запуском
-// самого SQLite-бота.
-function sqliteRenderOrderNewText(order) {
+// Независимый эталон формата (UX fix-stage после Stage 28, раздел 1.2:
+// структура по секциям, без emoji, с именем клиента) — дословная копия
+// expression'а, которым renderOrderNewText() в bot/postgresql/index.js
+// строит текст, чтобы ловить случайные расхождения так же, как это раньше
+// делал parity-тест с SQLite-оригиналом (с этого fix-stage тексты двух
+// ботов намеренно расходятся — см. header-комментарий модуля).
+function pgRenderOrderNewText(order) {
   const itemsList = order.items.map((i) => `${i.qty} × ${i.name} — ${i.price * i.qty} ₽`).join('\n');
-  const fulfillmentLine = order.fulfillment_type === 'pickup'
-    ? '🏃 Самовывоз (курьер не нужен)'
-    : `🛵 Доставка\nАдрес: ${order.address}`;
-  return `🆕 Новый заказ ${order.public_code}\n\n${itemsList}\n\nИтого: ${order.items_total} ₽\n${fulfillmentLine}\nТелефон: ${order.customer_phone}\nКомментарий: ${order.comment || '—'}\n\nОтветьте в течение 5 минут, иначе заказ отменится автоматически.`;
+  const fulfillmentBlock = order.fulfillment_type === 'pickup'
+    ? 'Самовывоз (курьер не нужен)'
+    : `Доставка\nАдрес: ${order.address}`;
+  return [
+    `Новый заказ ${order.public_code}`,
+    `Состав:\n${itemsList}`,
+    `Сумма: ${order.items_total} ₽`,
+    `Клиент: ${order.customer_name}\nТелефон: ${order.customer_phone}`,
+    fulfillmentBlock,
+    `Комментарий: ${order.comment || '—'}`,
+    'Ответьте в течение 5 минут, иначе заказ отменится автоматически.',
+  ].join('\n\n');
 }
 
 // ===========================================================================
@@ -196,8 +204,14 @@ test('B2: /start ВАЛИДНЫЙКОД — привязывает рестор�
     await fakeBot.triggerText('chat-b2', `/start ${code}`);
     const rows = await db.query('SELECT telegram_chat_id FROM restaurants WHERE id = $1', [restaurant.id]);
     assert.equal(rows[0].telegram_chat_id, 'chat-b2');
-    assert.equal(fakeBot.sentMessages.length, 1);
+    // Stage 29.1, п.4: подтверждение подключения + сразу панель статуса
+    // (не нужно отдельно вспоминать bare /start, чтобы увидеть кнопки).
+    assert.equal(fakeBot.sentMessages.length, 2);
     assert.match(fakeBot.sentMessages[0].text, /Кафе Весна.*подключён/s);
+    assert.match(fakeBot.sentMessages[1].text, /Кафе Весна.*открыт/s);
+    assert.deepEqual(fakeBot.sentMessages[1].opts.reply_markup.inline_keyboard, [[
+      { text: 'Закрыть ресторан', callback_data: 'close_menu' },
+    ]]);
   } finally {
     handlers.stop();
   }
@@ -229,9 +243,11 @@ test('B4: повторный /start тем же кодом — код уже п�
     const rows = await db.query('SELECT telegram_chat_id, connect_code FROM restaurants WHERE id = $1', [restaurant.id]);
     assert.equal(rows[0].telegram_chat_id, 'chat-b4');
     assert.equal(rows[0].connect_code, null, 'код должен быть погашен сразу после привязки');
-    assert.equal(fakeBot.sentMessages.length, 2);
+    // Stage 29.1, п.4: первый /start шлёт 2 сообщения (подключено + панель
+    // статуса), второй (код уже погашен) — ещё одно сообщение об ошибке.
+    assert.equal(fakeBot.sentMessages.length, 3);
     assert.match(fakeBot.sentMessages[0].text, /подключён/);
-    assert.match(fakeBot.sentMessages[1].text, /не найден или уже использован/);
+    assert.match(fakeBot.sentMessages[2].text, /не найден или уже использован/);
   } finally {
     handlers.stop();
   }
@@ -256,7 +272,9 @@ test('B5: /start другим кодом из УЖЕ привязанного ч
     assert.equal(rowsA[0].telegram_chat_id, 'chat-b5', 'первая (легитимная) привязка сохраняется');
     assert.equal(rowsB[0].telegram_chat_id, null, 'второй ресторан НЕ привязывается к уже занятой группе');
     assert.equal(rowsB[0].connect_code, codeB, 'код второго ресторана не погашен — привязки не было');
-    assert.match(fakeBot.sentMessages[1].text, /уже привязана к другому ресторану/);
+    // Stage 29.1, п.4: первый /start (codeA) шлёт 2 сообщения (подключено +
+    // панель статуса) — отказ второй привязки идёт третьим сообщением.
+    assert.match(fakeBot.sentMessages[2].text, /уже привязана к другому ресторану/);
   } finally {
     handlers.stop();
   }
@@ -266,7 +284,7 @@ test('B5: /start другим кодом из УЖЕ привязанного ч
 // C. order:new
 // ===========================================================================
 
-test('C1: markPaid -> ровно одно сообщение, корректный chat, корректный текст (byte-for-byte с SQLite-рендером)', async () => {
+test('C1: markPaid -> ровно одно сообщение, корректный chat, корректный текст (byte-for-byte с независимым эталоном), имя клиента включено, без emoji', async () => {
   const { restaurant, order, payment } = await fullyPaidOrder();
   const fakeBot = new FakeTelegramBot();
   const handlers = botModule.createBotHandlers(fakeBot);
@@ -277,10 +295,12 @@ test('C1: markPaid -> ровно одно сообщение, корректны
     assert.equal(fakeBot.sentMessages.length, 1);
     const sent = fakeBot.sentMessages[0];
     assert.equal(sent.chatId, restaurant.telegram_chat_id);
-    assert.equal(sent.text, sqliteRenderOrderNewText(result));
+    assert.equal(sent.text, pgRenderOrderNewText(result));
+    assert.match(sent.text, /Клиент: Test Customer/, 'Stage 28 находка MEDIUM-1 — имя клиента теперь в тексте');
+    assert.doesNotMatch(sent.text, /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u, 'CLAUDE.md "без emoji в UI" — в тексте заказа не должно быть emoji');
     assert.deepEqual(sent.opts.reply_markup.inline_keyboard, [[
-      { text: '✅ Принять', callback_data: `accept:${order.id}` },
-      { text: '❌ Отклонить', callback_data: `decline:${order.id}` },
+      { text: 'Принять', callback_data: `accept:${order.id}` },
+      { text: 'Отклонить', callback_data: `decline:${order.id}` },
     ]]);
   } finally {
     handlers.stop();
@@ -435,7 +455,7 @@ test('D2: Отказаться — заказ declined, деньги возвр�
 
     const rows = await db.query('SELECT status FROM orders WHERE id = $1', [order.id]);
     assert.equal(rows[0].status, 'declined');
-    assert.equal(fakeBot.editedMessages[0].text, '❌ Заказ отклонён, деньги клиенту возвращены.');
+    assert.equal(fakeBot.editedMessages[0].text, 'Заказ отклонён, деньги клиенту возвращены.');
     const refunds = await db.query(
       `SELECT count(*)::int AS n FROM refunds rf JOIN payments p ON p.id = rf.payment_id WHERE p.order_id = $1`,
       [order.id]
@@ -490,7 +510,7 @@ test('D4: pickup-цикл — accepted -> cook_time(preparing) -> advance(delive
   }
 });
 
-test('D5: недопустимый переход — чистое сообщение об ошибке (без raw PostgreSQL деталей), заказ не меняется', async () => {
+test('D5: недопустимый переход advance — сообщение отредактировано ("Заказ уже обработан."), кнопка не остаётся кликабельной, заказ не меняется', async () => {
   const fakeBot = new FakeTelegramBot();
   const handlers = botModule.createBotHandlers(fakeBot);
   try {
@@ -498,14 +518,14 @@ test('D5: недопустимый переход — чистое сообще�
     // Заказ ещё awaiting_restaurant — advance:delivered недопустим без accept/cook_time.
     await fakeBot.triggerCallbackQuery({ id: 'x', data: `advance:delivered:${order.id}`, chatId: sent.chatId, messageId: sent.messageId });
 
+    // UX fix-stage после Stage 28 (раздел 1.1): устаревшая/недопустимая
+    // кнопка advance больше не оставляет живой алерт с кнопкой на месте —
+    // сообщение редактируется тем же принципом, что accept/decline.
+    assert.equal(fakeBot.editedMessages.length, 1);
+    assert.equal(fakeBot.editedMessages[0].text, 'Заказ уже обработан.');
+    assert.doesNotMatch(fakeBot.editedMessages[0].text, /SELECT|UPDATE|relation|column|SQLSTATE/i, 'не "сырая" ошибка PostgreSQL-драйвера');
     assert.equal(fakeBot.answeredCallbacks.length, 1);
-    const alert = fakeBot.answeredCallbacks[0];
-    assert.equal(alert.opts.show_alert, true);
-    // Плановая бизнес-ошибка (не проходит проверку ADVANCE_MAP) — дословно
-    // тот же читаемый текст, что и SQLite-оригинал бросает в этой ветке;
-    // не "сырая" ошибка PostgreSQL-драйвера в любом случае.
-    assert.equal(alert.opts.text, 'Ошибка: нельзя перейти из awaiting_restaurant в delivered');
-    assert.doesNotMatch(alert.opts.text, /SELECT|UPDATE|relation|column|SQLSTATE/i);
+    assert.notEqual(fakeBot.answeredCallbacks[0].opts?.show_alert, true, 'не пугающий алерт — тихий callback answer');
 
     const rows = await db.query('SELECT status FROM orders WHERE id = $1', [order.id]);
     assert.equal(rows[0].status, 'awaiting_restaurant');
@@ -621,7 +641,7 @@ test('E1: /stoplist — список блюд с текущим состояни
     await fakeBot.triggerText('chat-e1', '/stoplist');
     assert.equal(fakeBot.sentMessages.length, 1);
     assert.deepEqual(fakeBot.sentMessages[0].opts.reply_markup.inline_keyboard, [[
-      { text: '✅ Плов', callback_data: `toggle_item:${item.id}` },
+      { text: '✓ Плов', callback_data: `toggle_item:${item.id}` },
     ]]);
   } finally {
     handlers.stop();
@@ -721,12 +741,267 @@ test('/pause -> кнопка short -> is_open=0, paused_until в будущем;
     let rows = await db.query('SELECT is_open, paused_until FROM restaurants WHERE id = $1', [restaurant.id]);
     assert.equal(rows[0].is_open, 0);
     assert.ok(new Date(rows[0].paused_until).getTime() > Date.now());
-    assert.equal(fakeBot.editedMessages[0].text, 'Перерыв: 33 мин. /open — вернуться раньше срока.');
+    // Stage 29.1, п.4: подтверждение паузы теперь несёт кнопку "Открыть
+    // ресторан" — не нужно помнить /open (fallback остаётся рабочим).
+    assert.equal(fakeBot.editedMessages[0].text, 'Перерыв: 33 мин. Вернуться раньше срока — кнопкой ниже (или /open).');
+    assert.deepEqual(fakeBot.editedMessages[0].opts.reply_markup.inline_keyboard, [[
+      { text: 'Открыть ресторан', callback_data: 'reopen_now' },
+    ]]);
 
     await fakeBot.triggerText('chat-pause', '/open');
     rows = await db.query('SELECT is_open, paused_until FROM restaurants WHERE id = $1', [restaurant.id]);
     assert.equal(rows[0].is_open, 1);
     assert.equal(rows[0].paused_until, null);
+    // /open (команда, fallback) тоже теперь несёт кнопку "Закрыть ресторан".
+    const openConfirm = fakeBot.sentMessages[fakeBot.sentMessages.length - 1];
+    assert.match(openConfirm.text, /снова открыт/);
+    assert.deepEqual(openConfirm.opts.reply_markup.inline_keyboard, [[
+      { text: 'Закрыть ресторан', callback_data: 'close_menu' },
+    ]]);
+  } finally {
+    handlers.stop();
+  }
+});
+
+// ===========================================================================
+// F. UX fix-stage после Stage 28 (панель статуса, устаревшие кнопки)
+// ===========================================================================
+
+test('F1: bare /start у подключённого ОТКРЫТОГО ресторана — панель статуса с кнопкой "Закрыть ресторан"', async () => {
+  await pgCreateRestaurant({ telegramChatId: 'chat-f1', name: 'Кафе Статус' });
+  const fakeBot = new FakeTelegramBot();
+  const handlers = botModule.createBotHandlers(fakeBot);
+  try {
+    await fakeBot.triggerText('chat-f1', '/start');
+    assert.equal(fakeBot.sentMessages.length, 1);
+    assert.match(fakeBot.sentMessages[0].text, /Кафе Статус.*открыт/s);
+    assert.doesNotMatch(fakeBot.sentMessages[0].text, /Код подключения/, 'уже подключён — инструкция по коду больше не нужна');
+    assert.deepEqual(fakeBot.sentMessages[0].opts.reply_markup.inline_keyboard, [[
+      { text: 'Закрыть ресторан', callback_data: 'close_menu' },
+    ]]);
+  } finally {
+    handlers.stop();
+  }
+});
+
+test('F2: bare /start у подключённого ЗАКРЫТОГО (на паузе) ресторана — панель статуса с кнопкой "Открыть ресторан"', async () => {
+  const restaurant = await pgCreateRestaurant({ telegramChatId: 'chat-f2', name: 'Кафе Пауза' });
+  await db.execute(`UPDATE restaurants SET is_open = 0, paused_until = NOW() + interval '1 hour' WHERE id = $1`, [restaurant.id]);
+  const fakeBot = new FakeTelegramBot();
+  const handlers = botModule.createBotHandlers(fakeBot);
+  try {
+    await fakeBot.triggerText('chat-f2', '/start');
+    assert.equal(fakeBot.sentMessages.length, 1);
+    assert.match(fakeBot.sentMessages[0].text, /Кафе Пауза.*закрыт/s);
+    assert.deepEqual(fakeBot.sentMessages[0].opts.reply_markup.inline_keyboard, [[
+      { text: 'Открыть ресторан', callback_data: 'reopen_now' },
+    ]]);
+  } finally {
+    handlers.stop();
+  }
+});
+
+test('F3: close_menu -> тот же выбор длительности, что и /pause; pause:key из этого пути работает штатно', async () => {
+  const restaurant = await pgCreateRestaurant({ telegramChatId: 'chat-f3' });
+  const fakeBot = new FakeTelegramBot();
+  const handlers = botModule.createBotHandlers(fakeBot);
+  try {
+    await fakeBot.triggerCallbackQuery({ id: '1', data: 'close_menu', chatId: 'chat-f3', messageId: 1 });
+    assert.equal(fakeBot.editedMessages.length, 1);
+    assert.match(fakeBot.editedMessages[0].text, /На сколько закрыть ресторан/);
+    assert.deepEqual(fakeBot.editedMessages[0].opts.reply_markup.inline_keyboard[0].map((b) => b.callback_data), [
+      'pause:short', 'pause:medium', 'pause:long',
+    ]);
+
+    await fakeBot.triggerCallbackQuery({ id: '2', data: 'pause:short', chatId: 'chat-f3', messageId: 1 });
+    const rows = await db.query('SELECT is_open FROM restaurants WHERE id = $1', [restaurant.id]);
+    assert.equal(rows[0].is_open, 0);
+  } finally {
+    handlers.stop();
+  }
+});
+
+test('F4: reopen_now -> ресторан открыт (то же действие, что /open)', async () => {
+  const restaurant = await pgCreateRestaurant({ telegramChatId: 'chat-f4' });
+  await db.execute(`UPDATE restaurants SET is_open = 0, paused_until = NOW() + interval '1 hour' WHERE id = $1`, [restaurant.id]);
+  const fakeBot = new FakeTelegramBot();
+  const handlers = botModule.createBotHandlers(fakeBot);
+  try {
+    await fakeBot.triggerCallbackQuery({ id: '1', data: 'reopen_now', chatId: 'chat-f4', messageId: 1 });
+    const rows = await db.query('SELECT is_open, paused_until FROM restaurants WHERE id = $1', [restaurant.id]);
+    assert.equal(rows[0].is_open, 1);
+    assert.equal(rows[0].paused_until, null);
+    assert.match(fakeBot.editedMessages[0].text, /снова открыт/);
+  } finally {
+    handlers.stop();
+  }
+});
+
+test('F5: автоматический таймаут — кнопки на ИСХОДНОМ сообщении убраны, отдельное "пропустили заказ" отправлено (Stage 28, находка MEDIUM-2)', async () => {
+  const fakeBot = new FakeTelegramBot();
+  const handlers = botModule.createBotHandlers(fakeBot);
+  try {
+    const { order } = await notifyAndGetAcceptDeclineData(fakeBot, handlers);
+    await db.execute(`UPDATE orders SET status_updated_at = NOW() - interval '10 minutes' WHERE id = $1`, [order.id]);
+
+    await pgOrderService.sweepTimeouts();
+    await handlers.waitForIdle();
+
+    // Первое edit — исходное "Новый заказ" сообщение теряет кнопки.
+    assert.equal(fakeBot.editedMessages.length, 1);
+    assert.match(fakeBot.editedMessages[0].text, /не принят вовремя/);
+    assert.equal(fakeBot.editedMessages[0].opts.message_id, 1, 'редактируется именно исходное сообщение заказа');
+    // Плюс отдельный пинг группе — как и раньше.
+    const pingMsg = fakeBot.sentMessages[fakeBot.sentMessages.length - 1];
+    assert.match(pingMsg.text, /Вы пропустили заказ/);
+
+    const rows = await db.query('SELECT status FROM orders WHERE id = $1', [order.id]);
+    assert.equal(rows[0].status, 'timed_out');
+  } finally {
+    handlers.stop();
+  }
+});
+
+test('F6: ресторан нажал "Принять", но не выбрал время, — таймаут убирает кнопки С СООБЩЕНИЯ ВЫБОРА ВРЕМЕНИ, а не с уже отредактированного исходного', async () => {
+  const fakeBot = new FakeTelegramBot();
+  const handlers = botModule.createBotHandlers(fakeBot);
+  try {
+    const { order, sent } = await notifyAndGetAcceptDeclineData(fakeBot, handlers);
+    await fakeBot.triggerCallbackQuery({ id: 'a', data: `accept:${order.id}`, chatId: sent.chatId, messageId: sent.messageId });
+    // К этому моменту исходное сообщение уже отредактировано ("выберите
+    // время"), и разослано новое с кнопками 30/45/60 — именно оно теперь
+    // "текущее кликабельное".
+    const cookTimeMessageId = fakeBot.sentMessages[fakeBot.sentMessages.length - 1].messageId;
+    assert.notEqual(cookTimeMessageId, sent.messageId);
+
+    await db.execute(`UPDATE orders SET status_updated_at = NOW() - interval '10 minutes' WHERE id = $1`, [order.id]);
+    await pgOrderService.sweepTimeouts();
+    await handlers.waitForIdle();
+
+    const lastEdit = fakeBot.editedMessages[fakeBot.editedMessages.length - 1];
+    assert.equal(lastEdit.opts.message_id, cookTimeMessageId, 'таймаут почистил сообщение с выбором времени, а не исходное');
+    assert.match(lastEdit.text, /не принят вовремя/);
+  } finally {
+    handlers.stop();
+  }
+});
+
+test('F7: клиент сам отменил заказ (cancelByCustomer) до ответа ресторана — кнопки убраны, "пропустили заказ" НЕ отправлялось', async () => {
+  const fakeBot = new FakeTelegramBot();
+  const handlers = botModule.createBotHandlers(fakeBot);
+  try {
+    const { order } = await notifyAndGetAcceptDeclineData(fakeBot, handlers);
+    await pgOrderService.cancelByCustomer(order.id);
+    await handlers.waitForIdle();
+
+    assert.equal(fakeBot.editedMessages.length, 1);
+    assert.match(fakeBot.editedMessages[0].text, /отменён клиентом/);
+    const missedOrderPing = fakeBot.sentMessages.find((m) => /пропустили заказ/.test(m.text));
+    assert.equal(missedOrderPing, undefined, 'отмена клиентом — не таймаут, "пропустили заказ" не по адресу');
+  } finally {
+    handlers.stop();
+  }
+});
+
+test('F8: двойной клик advance (Передал курьеру дважды) — второй клик "Заказ уже обработан.", не второй переход', async () => {
+  const fakeBot = new FakeTelegramBot();
+  const handlers = botModule.createBotHandlers(fakeBot);
+  try {
+    const { order, sent } = await notifyAndGetAcceptDeclineData(fakeBot, handlers, { fulfillmentType: 'delivery' });
+    await fakeBot.triggerCallbackQuery({ id: 'a', data: `accept:${order.id}`, chatId: sent.chatId, messageId: sent.messageId });
+    await fakeBot.triggerCallbackQuery({ id: 'b', data: `cook_time:${order.id}:30`, chatId: sent.chatId, messageId: sent.messageId });
+    await fakeBot.triggerCallbackQuery({ id: 'c', data: `advance:courier:${order.id}`, chatId: sent.chatId, messageId: sent.messageId });
+    const editsAfterFirstAdvance = fakeBot.editedMessages.length;
+
+    // Тот же клик повторно — например, второй сотрудник группы или двойной тап.
+    await fakeBot.triggerCallbackQuery({ id: 'c2', data: `advance:courier:${order.id}`, chatId: sent.chatId, messageId: sent.messageId });
+
+    assert.equal(fakeBot.editedMessages.length, editsAfterFirstAdvance + 1);
+    assert.equal(fakeBot.editedMessages[fakeBot.editedMessages.length - 1].text, 'Заказ уже обработан.');
+    const rows = await db.query('SELECT status FROM orders WHERE id = $1', [order.id]);
+    assert.equal(rows[0].status, 'courier', 'повторный клик не откатил и не продвинул статус дальше');
+  } finally {
+    handlers.stop();
+  }
+});
+
+// Stage 29.1, п.2 — orderMessages переехал из in-memory Map в bot_order_messages
+// (PostgreSQL): очистка кнопок обязана работать, даже если событие таймаута
+// произошло в ДРУГОМ процессе, чем тот, что отправил уведомление (рестарт
+// backend между "заказ пришёл" и "заказ просрочен").
+test('F9: устойчивость к рестарту — новый процесс (новый createBotHandlers/новый bot-клиент) чистит кнопки заказа, отправленного СТАРЫМ процессом', async () => {
+  const oldFakeBot = new FakeTelegramBot();
+  const oldHandlers = botModule.createBotHandlers(oldFakeBot);
+  let order;
+  let sent;
+  try {
+    ({ order, sent } = await notifyAndGetAcceptDeclineData(oldFakeBot, oldHandlers));
+    // Запись messageId в БД — часть handleOrderNew, дожидаемся её так же,
+    // как и самой отправки (оба await'ятся внутри одного handler'а).
+  } finally {
+    // "Рестарт backend": старый процесс останавливается ПОЛНОСТЬЮ — снимает
+    // listeners, останавливает polling. bot_order_messages в БД остаётся —
+    // в этом и весь смысл переноса из Map в таблицу.
+    await oldHandlers.stop();
+  }
+
+  const newFakeBot = new FakeTelegramBot(); // "новый процесс" — с нуля, ничего не помнит
+  const newHandlers = botModule.createBotHandlers(newFakeBot);
+  try {
+    await db.execute(`UPDATE orders SET status_updated_at = NOW() - interval '10 minutes' WHERE id = $1`, [order.id]);
+    await pgOrderService.sweepTimeouts();
+    await newHandlers.waitForIdle();
+
+    // Кнопки убраны через НОВЫЙ bot-клиент, но с messageId/chatId СТАРОГО
+    // сообщения — доказательство, что данные пришли из БД, а не из памяти
+    // (у newFakeBot не было ни одного отправленного сообщения до этого момента).
+    assert.equal(newFakeBot.editedMessages.length, 1);
+    assert.equal(newFakeBot.editedMessages[0].opts.chat_id, sent.chatId);
+    assert.equal(newFakeBot.editedMessages[0].opts.message_id, sent.messageId);
+    assert.match(newFakeBot.editedMessages[0].text, /не принят вовремя/);
+
+    // Старый bot-клиент, разумеется, ничего нового не получил — он уже остановлен.
+    assert.equal(oldFakeBot.editedMessages.length, 0);
+  } finally {
+    await newHandlers.stop();
+  }
+});
+
+// Stage 29.1, п.4 — сквозная проверка: подключение -> пауза -> открытие
+// ЦЕЛИКОМ через кнопки, ни разу не набирая /pause или /open вручную (только
+// код подключения — единственное, что реально нужно ввести текстом).
+test('F10: полный цикл подключение -> закрыть -> открыть ИСКЛЮЧИТЕЛЬНО кнопками, без единой ручной команды /pause или /open', async () => {
+  const code = `CODE${uniqueSuffix().toUpperCase()}`;
+  const restaurant = await pgCreateRestaurant({ connectCode: code, name: 'Кнопочный ресторан' });
+  const fakeBot = new FakeTelegramBot();
+  const handlers = botModule.createBotHandlers(fakeBot);
+  try {
+    // 1. Единственный текст за весь тест — сам код подключения (его в любом
+    // случае некому продиктовать кнопкой, это одноразовый секрет из HQ).
+    await fakeBot.triggerText('chat-f10', `/start ${code}`);
+    const statusMsg = fakeBot.sentMessages[fakeBot.sentMessages.length - 1];
+    assert.match(statusMsg.text, /Кнопочный ресторан.*открыт/s);
+    const closeBtn = statusMsg.opts.reply_markup.inline_keyboard[0][0];
+    assert.equal(closeBtn.callback_data, 'close_menu');
+
+    // 2. "Закрыть ресторан" (панель) -> выбор длительности -> "Открыть
+    // ресторан" (прямо из подтверждения паузы) — ни одного /pause, /open.
+    await fakeBot.triggerCallbackQuery({ id: '1', data: closeBtn.callback_data, chatId: 'chat-f10', messageId: statusMsg.messageId });
+    const durationMsg = fakeBot.editedMessages[fakeBot.editedMessages.length - 1];
+    assert.match(durationMsg.text, /На сколько закрыть ресторан/);
+    const shortBtn = durationMsg.opts.reply_markup.inline_keyboard[0][0];
+    assert.equal(shortBtn.callback_data, 'pause:short');
+
+    await fakeBot.triggerCallbackQuery({ id: '2', data: shortBtn.callback_data, chatId: 'chat-f10', messageId: statusMsg.messageId });
+    let rows = await db.query('SELECT is_open FROM restaurants WHERE id = $1', [restaurant.id]);
+    assert.equal(rows[0].is_open, 0);
+    const pausedMsg = fakeBot.editedMessages[fakeBot.editedMessages.length - 1];
+    const reopenBtn = pausedMsg.opts.reply_markup.inline_keyboard[0][0];
+    assert.equal(reopenBtn.callback_data, 'reopen_now');
+
+    await fakeBot.triggerCallbackQuery({ id: '3', data: reopenBtn.callback_data, chatId: 'chat-f10', messageId: statusMsg.messageId });
+    rows = await db.query('SELECT is_open FROM restaurants WHERE id = $1', [restaurant.id]);
+    assert.equal(rows[0].is_open, 1, 'ресторан снова открыт — весь цикл пройден без единой ручной команды');
   } finally {
     handlers.stop();
   }

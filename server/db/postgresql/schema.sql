@@ -2655,3 +2655,50 @@ ALTER TABLE payout_attempts ADD COLUMN IF NOT EXISTS confirmed_by TEXT;
 -- и никогда не восстанавливается автоматически вместе с ней.
 ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS archived_with_category_id INTEGER
   REFERENCES categories(id);
+
+-- =========================================================================
+-- HQ "Кого ждём" — restaurant_candidates (0007)
+-- =========================================================================
+--
+-- Новая, полностью независимая сущность — НЕ ресторан. Единственный
+-- источник истины для клиентского голосования "Какой ресторан вы ждёте в
+-- YAAM?" (раньше — захардкоженный CANDIDATE_RESTAURANTS в client/js/data.js).
+-- Осознанно НЕ подтаблица restaurants: только название, кухня, счётчик
+-- голосов — без фото/меню/адреса/часов работы/статуса активен-неактивен.
+CREATE TABLE IF NOT EXISTS restaurant_candidates (
+  id SERIAL PRIMARY KEY,
+  name TEXT NOT NULL,
+  cuisine TEXT NOT NULL DEFAULT '',
+  votes INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- =========================================================================
+-- bot_order_messages — устойчивая к рестарту очистка Telegram-кнопок (0008)
+-- =========================================================================
+--
+-- Заменяет in-memory Map в bot/postgresql/index.js: "текущее кликабельное
+-- сообщение" заказа обязано пережить рестарт backend, иначе таймаут/отмена
+-- клиентом после рестарта не могут убрать устаревшие кнопки со старого
+-- сообщения (Stage 29.1, п.2).
+CREATE TABLE IF NOT EXISTS bot_order_messages (
+  order_id INTEGER PRIMARY KEY REFERENCES orders(id) ON DELETE CASCADE,
+  chat_id TEXT NOT NULL,
+  message_id BIGINT NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- =========================================================================
+-- restaurant_candidate_votes — реальное персистентное голосование (0009)
+-- =========================================================================
+--
+-- UNIQUE(candidate_id, device_id) — один голос с устройства на кандидата,
+-- гонки/двойной клик защищены на уровне БД, не только проверкой в коде
+-- (Stage 29.1, п.3).
+CREATE TABLE IF NOT EXISTS restaurant_candidate_votes (
+  id SERIAL PRIMARY KEY,
+  candidate_id INTEGER NOT NULL REFERENCES restaurant_candidates(id) ON DELETE CASCADE,
+  device_id TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (candidate_id, device_id)
+);

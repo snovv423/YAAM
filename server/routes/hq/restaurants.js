@@ -22,6 +22,8 @@ const payoutRecordService = require('../../services/hq/payoutService');
 const payoutStateService = require('../../services/hq/restaurantPayoutStateService');
 const telegramLinkService = require('../../services/hq/telegramLinkService');
 const financeService = require('../../services/hq/restaurantFinanceService');
+const candidateService = require('../../services/hq/restaurantCandidateService');
+const candidatesViews = require('../../hq/restaurantCandidatesViews');
 const {
   logAuditEvent, summarizeRestaurantDiff, summarizeMenuItemDiff, summarizeCategoryDiff, summarizePhotoDetails,
   summarizeLegalDetailsDiff, summarizeBankDetailsDiff, summarizeContractDiff, summarizeContractStatusChange,
@@ -110,6 +112,52 @@ function createRestaurantsRouter({ linkBasePath, mediaProvider = null }) {
           body: views.renderCreateForm({ values: req.body, error: err.message, linkBasePath, csrfToken }),
         }));
       }
+      next(err);
+    }
+  });
+
+  // ---------------------------------------------------------------------
+  // «Кого ждём» — отдельный список кандидатов для клиентского голосования
+  // (задание, раздел 2). ДО router.param('id', ...) / '/:id' ниже: иначе
+  // GET/POST '/candidates' совпали бы с шаблоном '/:id' (id='candidates')
+  // и упали бы на несуществующем ресторане вместо этой страницы.
+  // ---------------------------------------------------------------------
+
+  router.get('/candidates', async (req, res, next) => {
+    try {
+      const candidates = await candidateService.listCandidates();
+      const csrfToken = ensureCsrfToken(req);
+      res.send(layout({
+        title: 'Кого ждём',
+        active: 'restaurants',
+        csrfToken,
+        linkBasePath,
+        body: candidatesViews.renderCandidatesPage({
+          candidates, error: req.query.error, notice: req.query.notice, linkBasePath, csrfToken,
+        }),
+      }));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post('/candidates', requireCsrf, async (req, res, next) => {
+    try {
+      await candidateService.createCandidate(req.body);
+      res.redirect(`${linkBasePath}/restaurants/candidates`);
+    } catch (err) {
+      if (err instanceof candidateService.ValidationError) {
+        return res.redirect(`${linkBasePath}/restaurants/candidates?error=${encodeURIComponent(err.message)}`);
+      }
+      next(err);
+    }
+  });
+
+  router.post('/candidates/:candidateId/delete', requireCsrf, async (req, res, next) => {
+    try {
+      await candidateService.deleteCandidate(req.params.candidateId);
+      res.redirect(`${linkBasePath}/restaurants/candidates`);
+    } catch (err) {
       next(err);
     }
   });

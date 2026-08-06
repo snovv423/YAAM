@@ -47,6 +47,11 @@ const paymentService = require('../../services/paymentService');
 const { createMediaProviderFromEnv } = require('../../services/hq/media/provider');
 const { attachPhotoFields } = require('../../services/hq/media/publicPhotoDTO');
 const mediaProvider = createMediaProviderFromEnv(process.env);
+// «Кого ждём» (задание после Stage 28, раздел 2) — тот же общий сервис, что
+// использует HQ (routes/hq/restaurants.js); тем же принципом, что и
+// media-провайдер выше, публичный routes/postgresql/api.js уже импортирует
+// services/hq/* для сущностей, которые ОБА контура читают/пишут.
+const candidateService = require('../../services/hq/restaurantCandidateService');
 
 const router = express.Router();
 
@@ -87,6 +92,19 @@ const orderMutationLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   handler: rateLimitHandler('Слишком много запросов — попробуйте чуть позже'),
+});
+
+// «Кого ждём» — публичный приём голоса (Stage 29.1, п.3). Основная защита
+// от повторного/накрученного голоса — UNIQUE(candidate_id, device_id) в БД
+// (restaurantCandidateService.castVote), этот rate-limit — вторая, грубая
+// линия против явного злоупотребления с одного IP (не заменяет device-id
+// проверку, дополняет её).
+const candidateVoteLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: rateLimitHandler('Слишком много голосов — попробуйте чуть позже'),
 });
 
 function bearerToken(req) {
@@ -409,6 +427,48 @@ router.get('/restaurants/:id', setNoCacheHeader, async (req, res) => {
     res.json(await restaurantWithMenu(r));
   } catch (err) {
     console.error('[api-postgresql] GET /restaurants/:id failed:', err.message);
+    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
+  }
+});
+
+// «Кого ждём» — публичное чтение для клиентского голосования (после Stage
+// 28, задание раздел 2). Только то, что нужно карточке: название/кухня/
+// голоса — restaurant_candidates НЕ ресторан, поэтому не проходит через
+// toPublicRestaurantDTO/фото-пайплайн выше. Единственный источник данных
+// для client/js/app.js вместо ранее захардкоженного CANDIDATE_RESTAURANTS
+// в client/js/data.js (задание, общие требования: "не создавай дублирующий
+// функционал").
+router.get('/restaurant-candidates', setNoCacheHeader, async (req, res) => {
+  try {
+    // id нужен клиенту, чтобы адресовать голос конкретному кандидату (POST
+    // .../vote ниже, Stage 29.1) — не внутренний секрет, ID уже виден в HQ.
+    const rows = await db.query('SELECT id, name, cuisine, votes FROM restaurant_candidates ORDER BY votes DESC, id ASC');
+    res.json(rows);
+  } catch (err) {
+    console.error('[api-postgresql] GET /restaurant-candidates failed:', err.message);
+    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
+  }
+});
+
+// Приём голоса — Stage 29.1, п.3. deviceId приходит от клиента (см.
+// client/js/app.js: случайный localStorage-идентификатор, НЕ персональные
+// данные). Идемпотентно: повторный голос тем же deviceId за того же
+// кандидата не увеличивает счётчик (см. restaurantCandidateService.castVote —
+// UNIQUE(candidate_id, device_id) в БД, не только эта проверка).
+router.post('/restaurant-candidates/:id/vote', candidateVoteLimiter, async (req, res) => {
+  try {
+    const deviceId = String(req.body?.deviceId || '').trim();
+    const result = await candidateService.castVote(req.params.id, deviceId);
+    res.json(result);
+  } catch (err) {
+    if (err instanceof candidateService.ValidationError) {
+      // "Кандидат не найден" (удалён/несуществующий id) — то же 404, что и
+      // GET /restaurants/:id выше для отсутствующего ресторана; "некорректный
+      // идентификатор устройства" — 400, обычная валидация ввода.
+      const status = /не найден/.test(err.message) ? 404 : 400;
+      return res.status(status).json({ error: err.message });
+    }
+    console.error('[api-postgresql] POST /restaurant-candidates/:id/vote failed:', err.message);
     res.status(500).json({ error: 'Внутренняя ошибка сервера' });
   }
 });
