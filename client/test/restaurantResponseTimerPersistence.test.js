@@ -24,12 +24,12 @@ function readStoredOrder(sandbox) {
   return raw ? JSON.parse(raw) : null;
 }
 
-test('1. новый pre-status получает один дедлайн (~300 секунд)', (t) => {
+test('1. новый pre-status получает один дедлайн (~420 секунд, Stage 31 раздел 4 — было 300)', (t) => {
   const sandbox = freshApp();
   evalInContext(sandbox, `currentOrderCode='YAAM-RT1';renderWaitForRestaurant();`);
   const deadline = evalInContext(sandbox, 'preDeadline');
   const remaining = Math.round((deadline - Date.now()) / 1000);
-  assert.ok(remaining >= 298 && remaining <= 300, `remaining=${remaining}, ожидали ~300`);
+  assert.ok(remaining >= 418 && remaining <= 420, `remaining=${remaining}, ожидали ~420`);
   teardown(sandbox);
 });
 
@@ -138,7 +138,7 @@ test('9. restore после истечения не создаёт новые 3 
   }));
   await evalInContext(sandbox, `tryRestoreSession();`);
   // Если бы дедлайн пересоздавался, здесь остался бы активный заказ с новым
-  // ~300-секундным окном. Вместо этого просроченное ожидание корректно
+  // ~420-секундным окном. Вместо этого просроченное ожидание корректно
   // завершает заказ (openRejected('timeout')), и активный заказ пропадает.
   assert.equal(sandbox.localStorage.getItem('yaam_active_order'), null);
   assert.equal(evalInContext(sandbox, 'preDeadline'), null);
@@ -195,7 +195,7 @@ test('14-15. новый заказ после отмены получает но
   const newDeadline = evalInContext(sandbox, 'preDeadline');
   assert.ok(newDeadline > oldDeadline, 'новый заказ должен получить собственный, более поздний дедлайн, а не унаследованный старый');
   const remaining = Math.round((newDeadline - Date.now()) / 1000);
-  assert.ok(remaining >= 298 && remaining <= 300, 'новый дедлайн должен быть полными ~300 секундами, не унаследованным остатком');
+  assert.ok(remaining >= 418 && remaining <= 420, 'новый дедлайн должен быть полными ~420 секундами, не унаследованным остатком');
   teardown(sandbox);
 });
 
@@ -241,9 +241,9 @@ test('18. persist preDeadline не зависит от USE_API — но реал
   teardown(sandbox);
 });
 
-test('19-20. длительности таймеров зафиксированы (RESTAURANT_RESPONSE_WINDOW_SEC=300, QR_TIMER_SEC=600)', (t) => {
+test('19-20. длительности таймеров зафиксированы (RESTAURANT_RESPONSE_WINDOW_SEC=420, Stage 31 раздел 4; QR_TIMER_SEC=600)', (t) => {
   const sandbox = freshApp();
-  assert.equal(evalInContext(sandbox, 'RESTAURANT_RESPONSE_WINDOW_SEC'), 300);
+  assert.equal(evalInContext(sandbox, 'RESTAURANT_RESPONSE_WINDOW_SEC'), 420);
   assert.equal(evalInContext(sandbox, 'QR_TIMER_SEC'), 600);
   teardown(sandbox);
 });

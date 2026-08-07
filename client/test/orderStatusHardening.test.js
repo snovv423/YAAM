@@ -247,7 +247,16 @@ test('FIX4: refundStatusMessage — все четыре публичных со�
   assert.equal(evalInContext(sandbox, `refundStatusMessage('none', 300)`), null);
   assert.match(evalInContext(sandbox, `refundStatusMessage('processing', 300)`), /обрабатывается/);
   assert.match(evalInContext(sandbox, `refundStatusMessage('done', 300)`), /подтверждён/);
-  assert.match(evalInContext(sandbox, `refundStatusMessage('failed', 300)`), /Обратитесь в поддержку YAAM/);
+  assert.match(evalInContext(sandbox, `refundStatusMessage('failed', 300)`), /Обратитесь в .*поддержку YAAM/);
+  teardown(sandbox);
+});
+
+// Stage 31, раздел 7 — раньше "Обратитесь в поддержку YAAM" был просто
+// текстом без ссылки; теперь ведёт на настоящий https://t.me/YAAMHELP.
+test('Stage31/раздел7: refundStatusMessage(\'failed\') содержит рабочую ссылку на https://t.me/YAAMHELP', () => {
+  const sandbox = freshApp();
+  const msg = evalInContext(sandbox, `refundStatusMessage('failed', 300)`);
+  assert.match(msg, /<a href="https:\/\/t\.me\/YAAMHELP" target="_blank" rel="noopener">поддержку YAAM<\/a>/);
   teardown(sandbox);
 });
 
@@ -373,7 +382,8 @@ test('FIX4: order.refund_status="failed" — явно сообщаем об об
   `);
   await evalInContext(sandbox, `pollOrderOnce()`);
   const html = sandbox.document.getElementById('rej-refund-line').innerHTML;
-  assert.match(html, /Обратитесь в поддержку YAAM/);
+  assert.match(html, /Обратитесь в .*поддержку YAAM/);
+  assert.match(html, /href="https:\/\/t\.me\/YAAMHELP"/, 'Stage 31 раздел 7 — ссылка поддержки должна реально вести на t.me/YAAMHELP');
   assert.equal(html.includes('уже отправлена'), false, 'при failed нельзя утверждать, что деньги уже отправлены');
   assert.equal(evalInContext(sandbox, `orderPollTimer`), null, 'failed — терминальное состояние возврата, polling останавливается');
   teardown(sandbox);

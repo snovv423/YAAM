@@ -248,10 +248,20 @@ const ADVANCE_MAP = {
   pickup: { accepted: 'preparing', preparing: 'delivered' },
 };
 
-// Дословная копия RESTAURANT_RESPONSE_WINDOW_SEC из orderService.js — окно
-// ожидания ответа ресторана (секунды), после которого sweepTimeouts()
-// просрочивает заказ. Нужен только sweepTimeouts() (Wave 3).
-const RESTAURANT_RESPONSE_WINDOW_SEC = 300;
+// РАНЬШЕ была дословной копией RESTAURANT_RESPONSE_WINDOW_SEC из SQLite
+// orderService.js (300с = 5 минут). Stage 31, раздел 4 — увеличено до 420с
+// (7 минут) ТОЛЬКО на PostgreSQL-стороне (единственный путь, реально
+// используемый ресторанами — CLAUDE.md, "SQLite — legacy/local
+// compatibility path"). SQLite-оригинал сознательно НЕ тронут (задание,
+// раздел 2: "SQLite legacy-бот не менять без необходимости") — его
+// собственная константа (server/services/orderService.js) остаётся 300с;
+// это единственное намеренное расхождение между копиями, см. STAGE31
+// отчёт. Единственный источник истины для PostgreSQL-стороны — эта
+// константа: sweepTimeouts() ниже, bot/postgresql/index.js (текст
+// сообщения, БЕЗ собственного хардкода — берёт значение отсюда) и
+// client/js/app.js (RESTAURANT_RESPONSE_WINDOW_SEC=420, синхронизировано
+// вручную, т.к. клиент — статический файл без доступа к этому модулю).
+const RESTAURANT_RESPONSE_WINDOW_SEC = 420;
 
 // Дословная копия PAUSE_PRESETS_MIN из orderService.js — три пресета
 // перерыва в минутах, показываются ботом как кнопки "33 мин"/"3 часа"/
@@ -837,6 +847,36 @@ const LATEST_PAYMENT_EXPIRES_AT_SUBQUERY = `(
   ORDER BY p.id DESC LIMIT 1
 ) AS payment_expires_at`;
 
+// Stage 31.1, Issue 3 — авторитетный, неизменяемый (в рамках одного
+// awaiting_restaurant-цикла) серверный дедлайн ответа ресторана, тем же
+// принципом, что уже доказан для preparation_deadline/payment_expires_at
+// выше: backend вычисляет ОДНО абсолютное время, клиент только считает от
+// него остаток, никогда не создаёт собственную независимую формулу.
+//
+// ДО этого поля клиент (client/js/app.js) считал remaining time как
+// RESTAURANT_RESPONSE_WINDOW_SEC - (now - status_updated_at) — ТОЙ ЖЕ
+// формулой, что sweepTimeouts() использовал ДО Stage 31 раздела 1.3. После
+// честного sweepTimeouts (COALESCE(bot_notifications.sent_at,
+// status_updated_at) — задержанная Telegram-доставка не отнимает у
+// ресторана обещанные 7 минут) клиент остался единственным местом, всё ещё
+// считающим по старой, менее честной формуле — при задержанной доставке
+// клиент показывал бы "0:00" на 2 (или сколько угодно) минуты раньше, чем
+// backend реально просрочит заказ. Эта колонка — та же формула, что и в
+// sweepTimeouts, вычисленная один раз здесь, а не продублированная в
+// JS-коде sweepTimeouts и снова в SQL этого подзапроса по отдельности.
+//
+// NULL вне awaiting_restaurant — тот же принцип, что и preparation_deadline
+// ("NULL, пока заказ не готовится") — клиенту нечего отсчитывать, когда
+// окно неприменимо.
+const RESTAURANT_RESPONSE_DEADLINE_SUBQUERY = `(
+  CASE WHEN o.status = 'awaiting_restaurant' THEN
+    COALESCE(
+      (SELECT bn.sent_at FROM bot_notifications bn WHERE bn.dedup_key = 'order:' || o.id || ':new'),
+      o.status_updated_at
+    ) + INTERVAL '${RESTAURANT_RESPONSE_WINDOW_SEC} seconds'
+  ELSE NULL END
+) AS restaurant_response_deadline_at`;
+
 // Асинхронный аналог getOrder(idOrCode) из SQLite-версии — только числовой id
 // (единственная форма, нужная трём функциям этой волны; getOrder() в
 // оригинале также принимает public_code, но ни markPaymentFailed, ни
@@ -845,7 +885,8 @@ const LATEST_PAYMENT_EXPIRES_AT_SUBQUERY = `(
 async function getOrder(orderId, client = null) {
   const rows = await db.query(
     `SELECT o.*, r.name AS restaurant_name, r.phone AS restaurant_phone,
-       ${LATEST_REFUND_STATUS_SUBQUERY}, ${LATEST_PAYMENT_EXPIRES_AT_SUBQUERY}
+       ${LATEST_REFUND_STATUS_SUBQUERY}, ${LATEST_PAYMENT_EXPIRES_AT_SUBQUERY},
+       ${RESTAURANT_RESPONSE_DEADLINE_SUBQUERY}
      FROM orders o JOIN restaurants r ON r.id = o.restaurant_id WHERE o.id = $1`,
     [orderId],
     client
@@ -1766,11 +1807,27 @@ async function logRefundFailedEvent(refund) {
 // в Wave 1 (нет предварительного getOrder-чтения внутри транзакции), здесь
 // нет отдельного "race после подтверждённой проверки" throw-пути, который
 // был у оригинала (тот путь SQLite тоже никогда не должен был исполняться).
+// Stage 31, раздел 1.3 — "честное" окно: если order:new был доставлен НЕ
+// мгновенно (retry в bot_notifications, Stage 31 раздел 1.2, из-за
+// временного сетевого сбоя), ресторан обязан получить полные
+// RESTAURANT_RESPONSE_WINDOW_SEC ОТ ФАКТИЧЕСКОЙ доставки, а не от момента
+// оплаты заказа (status_updated_at) — иначе retry молча отъедал бы часть
+// обещанного окна прямо из текста уведомления ("ответьте в течение 7
+// минут"), который ресторан видит только ПОСЛЕ доставки.
+// COALESCE(bn.sent_at, o.status_updated_at) — если уведомление ещё не
+// доставлено (retry в процессе) ИЛИ доставка окончательно провалилась
+// (bot_notifications.status='failed' после исчерпания попыток), откат на
+// status_updated_at не даёт заказу зависнуть бесконечно (задание: "если
+// уведомление вообще не удалось доставить... заказ должен завершиться
+// безопасно и наблюдаемо, а не ждать бесконечно") — просрочка всё равно
+// наступит, просто отсчитанная от создания заказа, а не от недостижимой
+// доставки.
 async function sweepTimeouts() {
   const stale = await db.query(
-    `SELECT id FROM orders
-     WHERE status = 'awaiting_restaurant'
-       AND NOW() - status_updated_at > ($1 || ' seconds')::interval`,
+    `SELECT o.id FROM orders o
+     LEFT JOIN bot_notifications bn ON bn.dedup_key = 'order:' || o.id || ':new'
+     WHERE o.status = 'awaiting_restaurant'
+       AND NOW() - COALESCE(bn.sent_at, o.status_updated_at) > ($1 || ' seconds')::interval`,
     [RESTAURANT_RESPONSE_WINDOW_SEC]
   );
 
@@ -1831,8 +1888,8 @@ async function sweepTimeouts() {
   }
 }
 
-// Минуты — округлены вверх до целого (RESTAURANT_RESPONSE_WINDOW_SEC = 300 =
-// ровно 5 минут, docs/HQ-PRODUCT-SPEC.md; Math.round здесь на случай, если константа когда-
+// Минуты — округлены вверх до целого (RESTAURANT_RESPONSE_WINDOW_SEC = 420 =
+// ровно 7 минут, Stage 31 раздел 4; Math.round здесь на случай, если константа когда-
 // либо станет не кратной 60 секундам — текст события не должен показывать
 // дробные минуты).
 function logOrderMissedEvent(order) {
@@ -2251,6 +2308,7 @@ function toPublicOrderDTO(order) {
     public_code, status, status_updated_at, items_total,
     estimated_ready_minutes, restaurant_phone, fulfillment_type, rating,
     latest_refund_status, payment_expires_at, preparation_deadline,
+    restaurant_response_deadline_at,
   } = order;
   return {
     public_code, status, status_updated_at, items_total,
@@ -2270,6 +2328,15 @@ function toPublicOrderDTO(order) {
     // frontend вычисляет обратный отсчёт от него, не создаёт свой заново.
     payment_expires_at: payment_expires_at
       ? new Date(payment_expires_at).toISOString()
+      : null,
+    // Stage 31.1, Issue 3 — тот же принцип, что и два поля выше: ОДИН
+    // авторитетный ISO-timestamp (RESTAURANT_RESPONSE_DEADLINE_SUBQUERY,
+    // COALESCE(bot_notifications.sent_at, status_updated_at) + окно) —
+    // ровно то же значение, которым в этот же момент руководствуется
+    // sweepTimeouts(). Клиент считает остаток от него, не пересчитывает
+    // из status_updated_at + локальной константы окна заново.
+    restaurant_response_deadline_at: restaurant_response_deadline_at
+      ? new Date(restaurant_response_deadline_at).toISOString()
       : null,
   };
 }

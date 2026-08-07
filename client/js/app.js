@@ -1390,8 +1390,14 @@ function drawQR(){
 let statusStep=0;
 
 // После оплаты — короткий спиннер (банк/PSP подтверждает платёж, доли секунды-пара секунд
-// на проде), затем единственный реальный шаг ожидания: ответ ресторана (окно 3 мин).
-const RESTAURANT_RESPONSE_WINDOW_SEC=300;
+// на проде), затем единственный реальный шаг ожидания: ответ ресторана (окно 7 мин).
+// Stage 31, раздел 4 — было 300 (5 мин), синхронизировано с PostgreSQL-стороной
+// (RESTAURANT_RESPONSE_WINDOW_SEC в server/services/postgresql/orderService.js).
+// Клиент — статический файл без доступа к серверному модулю, поэтому
+// значение здесь ручное, а не импортированное; при демо (USE_API=false) это
+// единственный источник истины (нет backend вовсе), при реальном API —
+// только для отображения (сервер проверяет независимо, sweepTimeouts).
+const RESTAURANT_RESPONSE_WINDOW_SEC=420;
 const BANK_CONFIRM_DELAY_MS=1400;
 let inPreStatus=true,preTimer=null,preAutoTimer=null,preDeadline=null;
 // Общий расчёт остатка секунд от абсолютного дедлайна, а не декрементом счётчика —
@@ -1743,7 +1749,13 @@ function refundStatusMessage(refundStatus,amount){
   const sumHtml=amount?`<b>${amount.toLocaleString('ru-RU')} ₽</b> `:'';
   if(refundStatus==='processing')return `Возврат ${sumHtml}обрабатывается. Деньги будут возвращены после подтверждения платёжного сервиса.`;
   if(refundStatus==='done')return `Возврат ${sumHtml}подтверждён. Срок зачисления зависит от банка.`;
-  if(refundStatus==='failed')return 'Возврат не завершён автоматически. Обратитесь в поддержку YAAM.';
+  // Stage 31, раздел 7 — ссылка на поддержку была текстовой ("Обратитесь в
+  // поддержку YAAM"), без реальной ссылки: пользователю в ошибке возврата
+  // нечего было нажать. renderRefundLine() пишет через innerHTML — здесь
+  // безопасно вставить <a>, разметка постоянная (без пользовательского
+  // ввода внутри), тот же href, что уже используется в футере/юридических
+  // страницах (client/index.html).
+  if(refundStatus==='failed')return 'Возврат не завершён автоматически. Обратитесь в <a href="https://t.me/YAAMHELP" target="_blank" rel="noopener">поддержку YAAM</a>.';
   return null; // 'none' — возврата не было и не будет (неоплаченная отмена) — молчим, как и раньше
 }
 function renderRefundLine(refundStatus,amount){
@@ -1875,13 +1887,25 @@ async function pollOrderOnce(){
     showStatusSpinner(false);
     document.getElementById('st-progress').style.display='none';
     document.getElementById('st-state').textContent='Заказ отправлен, ждём ответа ресторана';
-    const updatedMs=parseServerTimestamp(order.status_updated_at);
-    if(updatedMs===null){
+    // Stage 31.1, Issue 3 — раньше здесь пересчитывался НЕЗАВИСИМЫЙ дедлайн
+    // (status_updated_at + локальная RESTAURANT_RESPONSE_WINDOW_SEC), той
+    // же формулой, которой sweepTimeouts() пользовался ДО Stage 31, раздела
+    // 1.3. После того как backend стал честно считать окно от факта
+    // ДОСТАВКИ Telegram-уведомления (COALESCE(bot_notifications.sent_at,
+    // status_updated_at)), клиент с этой независимой формулой начал
+    // расходиться с backend при задержанной доставке — показывал бы "0:00"
+    // раньше, чем заказ реально просрочится на сервере. order.
+    // restaurant_response_deadline_at — тот же авторитетный ISO-timestamp,
+    // вычисленный СЕРВЕРОМ той же формулой, что и sweepTimeouts (см.
+    // orderService.js RESTAURANT_RESPONSE_DEADLINE_SUBQUERY) — тот же
+    // принцип, что уже доказан для preparation_deadline/payment_expires_at.
+    const deadlineMs=parseServerTimestamp(order.restaurant_response_deadline_at);
+    if(deadlineMs===null){
       // Невалидная/отсутствующая дата с backend — не выдумываем таймер и не
       // показываем NaN:NaN, честно показываем состояние без обратного отсчёта.
       document.getElementById('st-substate').textContent='Ждём ответа ресторана';
     }else{
-      const left=Math.max(0,RESTAURANT_RESPONSE_WINDOW_SEC-Math.floor((Date.now()-updatedMs)/1000));
+      const left=Math.max(0,Math.floor((deadlineMs-Date.now())/1000));
       const m=Math.floor(left/60),s=left%60;
       document.getElementById('st-substate').textContent=`Ответ ресторана в течение ${m}:${s<10?'0':''}${s}`;
     }

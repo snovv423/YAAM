@@ -543,9 +543,17 @@ function normalizeForParity(order) {
   // что created_at/status_updated_at выше: SQLite хранит дату TEXT-ом
   // (datetime('now', ...)), PostgreSQL — TIMESTAMPTZ, и драйвер отдаёт Date.
   // Сравнивается сам ФАКТ наличия дедлайна, а не его представление.
+  //
+  // restaurant_response_deadline_at (Stage 31.1, Issue 3) исключён
+  // ПОЛНОСТЬЮ, без presence-флага — в отличие от preparation_deadline это
+  // не "то же поле в другом формате", а поле, которого у SQLite-версии
+  // orderService.getOrder() структурно нет вовсе (вычисляется из
+  // bot_notifications — persistent Telegram outbox, которого у SQLite-пути
+  // не существует, см. bot/postgresql/index.js header-комментарий про
+  // намеренное расхождение PostgreSQL/SQLite после Stage 31).
   const {
     id, restaurant_id, order_id, created_at, status_updated_at, public_code,
-    preparation_deadline, ...rest
+    preparation_deadline, restaurant_response_deadline_at, ...rest
   } = order;
   return {
     ...rest,

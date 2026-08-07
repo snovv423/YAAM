@@ -64,6 +64,9 @@ const EXPECTED_TABLES = [
   // Stage 29.1, п.3 — реальное персистентное голосование
   // (см. db/postgresql/migrations/0009).
   'restaurant_candidate_votes',
+  // Stage 31, раздел 1.2 — persistent outbox для критичных Telegram-
+  // уведомлений (см. db/postgresql/migrations/0010).
+  'bot_notifications',
 ];
 
 const EXPECTED_INDEXES = {
@@ -118,6 +121,8 @@ const TABLES_WITH_CREATED_AT = [
   'restaurant_candidates',
   // Stage 29.1, п.3 — голоса кандидатов.
   'restaurant_candidate_votes',
+  // Stage 31, раздел 1.2 — persistent outbox.
+  'bot_notifications',
 ];
 
 const EXPECTED_FUNCTIONS = [
@@ -227,7 +232,7 @@ async function runSchemaAndInspect(t, databaseName) {
       await client.query(SCHEMA_SQL);
     });
 
-    await t.test('создаются все 43 таблицы', async () => {
+    await t.test('создаются все 44 таблицы', async () => {
       const { rows } = await client.query(
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename`
       );
@@ -235,19 +240,21 @@ async function runSchemaAndInspect(t, databaseName) {
       assert.deepEqual(names, [...EXPECTED_TABLES].sort());
     });
 
-    await t.test('создаются все 55 внешних ключа', async () => {
+    await t.test('создаются все 56 внешних ключей', async () => {
       // Stage 25 добавила один новый FK: menu_items.archived_with_category_id
       // -> categories(id) (миграция 0006) — было 52, стало 53. Stage 29.1
       // добавила bot_order_messages.order_id -> orders(id) (миграция 0008,
       // restaurant_candidates из 0007 своих FK не имеет) — стало 54, и
       // restaurant_candidate_votes.candidate_id -> restaurant_candidates(id)
-      // (миграция 0009) — стало 55.
+      // (миграция 0009) — стало 55. Stage 31 добавила
+      // bot_notifications.order_id -> orders(id) (миграция 0010,
+      // payments.receipt_url из 0011 — это колонка, не FK) — стало 56.
       const { rows } = await client.query(`
         SELECT count(*)::int AS n
         FROM information_schema.table_constraints
         WHERE constraint_schema = 'public' AND constraint_type = 'FOREIGN KEY'
       `);
-      assert.equal(rows[0].n, 55);
+      assert.equal(rows[0].n, 56);
     });
 
     await t.test('CHECK-ограничения присутствуют (>=12, включая новый на payments.status)', async () => {
@@ -388,7 +395,7 @@ async function runSchemaAndInspect(t, databaseName) {
       assert.equal(rows[0].data_type, 'bytea');
     });
 
-    await t.test('DEFAULT NOW() присутствует на всех 34 датовых колонках created_at', async () => {
+    await t.test('DEFAULT NOW() присутствует на всех 35 датовых колонках created_at', async () => {
       const { rows } = await client.query(`
         SELECT table_name, column_default
         FROM information_schema.columns

@@ -95,10 +95,27 @@ function apiSandbox(orderResponses) {
   return sandbox;
 }
 
+// Stage 31.1, Issue 3 — pollOrderOnce()#awaiting_restaurant теперь считает
+// остаток от order.restaurant_response_deadline_at (авторитетный серверный
+// дедлайн), а не пересчитывает его сам из status_updated_at. Фикстура
+// поэтому вычисляет то же самое значение, которое реальный backend отдал
+// бы для заказа БЕЗ доставленного order:new (запасной источник —
+// status_updated_at + 420с, см. orderService.js
+// RESTAURANT_RESPONSE_DEADLINE_SUBQUERY) — тесты этого файла сами не
+// моделируют bot_notifications.sent_at, поэтому запасной источник и есть
+// корректный сценарий по умолчанию. null status_updated_at даёт null
+// дедлайн, как и на реальном backend.
 function baseOrder(overrides) {
+  const statusUpdatedAt = overrides && Object.prototype.hasOwnProperty.call(overrides, 'status_updated_at')
+    ? overrides.status_updated_at
+    : '2026-08-03T23:36:50.715Z';
+  const defaultDeadline = statusUpdatedAt
+    ? new Date(new Date(statusUpdatedAt).getTime() + 420_000).toISOString()
+    : null;
   return {
     status: 'awaiting_restaurant',
-    status_updated_at: '2026-08-03T23:36:50.715Z',
+    status_updated_at: statusUpdatedAt,
+    restaurant_response_deadline_at: defaultDeadline,
     items_total: 400,
     rating: null,
     fulfillment_type: 'delivery',
@@ -124,12 +141,53 @@ test('5. pollOrderOnce: PostgreSQL-дата даёт настоящий обра
   teardown(sandbox);
 });
 
+test('5b (Stage 31.1, Issue 3-B): задержанная Telegram-доставка — клиент считает от restaurant_response_deadline_at, НЕ от status_updated_at заново', async (t) => {
+  // Заказ "создан" 2 минуты назад, но реально доставлен (sent_at) только
+  // что — сервер в этом случае отдаёт дедлайн ~7:00 вперёд от СЕЙЧАС, а не
+  // ~5:00 (7 минут минус уже прошедшие 2), как дал бы неправильный расчёт
+  // от status_updated_at.
+  const statusUpdatedAt = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+  const honestDeadline = new Date(Date.now() + 420_000).toISOString(); // "от sent_at"
+  const sandbox = apiSandbox([baseOrder({ status_updated_at: statusUpdatedAt, restaurant_response_deadline_at: honestDeadline })]);
+  await evalInContext(sandbox, `(async()=>{currentOrderCode='YAAM-SRV1B';currentOrderAccessToken='tkn';await pollOrderOnce();})()`);
+  const text = evalInContext(sandbox, `document.getElementById('st-substate').textContent`);
+  const m = /Ответ ресторана в течение (\d+):(\d{2})/.exec(text);
+  assert.ok(m, `ожидали обратный отсчёт, получили "${text}"`);
+  const shownSec = Number(m[1]) * 60 + Number(m[2]);
+  // Честный расчёт (от sent_at) должен быть близко к полным 7:00 (420с), НЕ
+  // к ~5:00 (300с), которые дал бы старый расчёт от status_updated_at.
+  assert.ok(shownSec > 400, `клиент обязан показать ПОЛНЫЕ ~7 минут от факта доставки, показал ${shownSec}с (похоже на расчёт от status_updated_at)`);
+  teardown(sandbox);
+});
+
 test('6. pollOrderOnce: истёкшее окно (10 минут назад) даёт 0:00, не отрицательное значение', async (t) => {
   const oldIso = new Date(Date.now() - 10 * 60 * 1000).toISOString();
   const sandbox = apiSandbox([baseOrder({ status_updated_at: oldIso })]);
   await evalInContext(sandbox, `(async()=>{currentOrderCode='YAAM-SRV2';currentOrderAccessToken='tkn';await pollOrderOnce();})()`);
   const text = evalInContext(sandbox, `document.getElementById('st-substate').textContent`);
   assert.equal(text, 'Ответ ресторана в течение 0:00');
+  teardown(sandbox);
+});
+
+test('6b (Stage 31.1, Issue 3-E): граница дедлайна — за секунду до истечения показывает 0:0x, не 0:00', async (t) => {
+  const almostDeadline = new Date(Date.now() + 3000).toISOString(); // 3с до дедлайна
+  const sandbox = apiSandbox([baseOrder({ restaurant_response_deadline_at: almostDeadline })]);
+  await evalInContext(sandbox, `(async()=>{currentOrderCode='YAAM-SRV2B';currentOrderAccessToken='tkn';await pollOrderOnce();})()`);
+  const text = evalInContext(sandbox, `document.getElementById('st-substate').textContent`);
+  assert.match(text, /Ответ ресторана в течение 0:0[0-3]/, `ожидали единицы секунд у самого дедлайна, получили "${text}"`);
+  teardown(sandbox);
+});
+
+test('6c (Stage 31.1, Issue 3-D): notification никогда не доставлен, но сервер всё равно даёт запасной (не бессрочный) дедлайн', async (t) => {
+  // "Никогда не доставлен" на сервере означает bot_notifications.sent_at
+  // отсутствует -> запасной источник status_updated_at + 420с (см.
+  // orderService.js). Клиенту важно НЕ показать бессрочное ожидание —
+  // здесь дедлайн уже истёк (создан 8 минут назад, окна не было).
+  const oldIso = new Date(Date.now() - 8 * 60 * 1000).toISOString();
+  const sandbox = apiSandbox([baseOrder({ status_updated_at: oldIso })]); // deadline вычислится автоматически как oldIso+420с (в прошлом)
+  await evalInContext(sandbox, `(async()=>{currentOrderCode='YAAM-SRV2C';currentOrderAccessToken='tkn';await pollOrderOnce();})()`);
+  const text = evalInContext(sandbox, `document.getElementById('st-substate').textContent`);
+  assert.equal(text, 'Ответ ресторана в течение 0:00', 'недоставленное уведомление не должно выглядеть как бессрочное ожидание');
   teardown(sandbox);
 });
 

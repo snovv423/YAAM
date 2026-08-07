@@ -84,12 +84,69 @@
 //      («Закрыть ресторан» / «Открыть ресторан») — заменяет ручной ввод
 //      команд как основной UX, без изменения самой модели паузы
 //      (PAUSE_LABELS/pauseRestaurant/resumeRestaurant не менялись).
+//
+// Stage 31 (надёжность доставки и финальная UX-доводка, после живого
+// Stage 30, дважды поймавшего "EFATAL: fetch failed") — пять дополнительных
+// изменений:
+//   5. order:new больше НЕ отправляется прямым bot.sendMessage() изнутри
+//      обработчика события — идёт через botOutboxService (persistent
+//      outbox, таблица bot_notifications, миграция 0010): переживает
+//      рестарт backend, ограниченный retry с backoff на транзиентных
+//      сетевых сбоях, диагностируемый hq_events-алерт после исчерпания
+//      попыток. См. header-комментарий botOutboxService.js для полного
+//      обоснования и классификации ошибок.
+//   6. Сообщение заказа переструктурировано по заданию (заголовок "Заказ:"
+//      вместо "Состав:", позиции без цены, единая сумма "Оплачено: N ₽"
+//      внизу, опциональная строка "Чек оплаты" — см. renderOrderNewText) и
+//      окно ответа увеличено с 5 до 7 минут — единственный источник
+//      значения теперь RESTAURANT_RESPONSE_WINDOW_SEC из orderService.js
+//      (импортируется, не дублируется).
+//   7. Шаг «Принять» стал ОДНИМ вызовом editMessageText (текст + кнопки
+//      выбора времени сразу в одном reply_markup) вместо двух раздельных
+//      вызовов (editMessageText без кнопок + отдельный sendMessage с
+//      кнопками) — раньше сбой второго вызова оставлял ресторан без единой
+//      кликабельной кнопки по заказу. Один вызов физически не может
+//      завершиться "наполовину".
+//   8. Таймаут (`timed_out`) теперь редактирует ИСХОДНОЕ сообщение заказа
+//      сразу в финальный текст «Вы пропустили заказ...» вместо двух
+//      артефактов (отредактированное "не принят вовремя" + отдельное новое
+//      "вы пропустили") — ровно один итоговый артефакт на одно событие.
+//   9. Постоянная reply-клавиатура (не inline) с одной кнопкой "Статус
+//      ресторана" — отправляется один раз при подключении (и разово при
+//      следующем bare /start уже подключённого ресторана, если он видит
+//      панель впервые после этого обновления); остаётся в интерфейсе
+//      Telegram-клиента независимо от рестартов backend (это свойство
+//      самого Telegram, не требует ничего от сервера) — решает
+//      "сотрудник не должен помнить /start" без создания второй модели
+//      состояния (нажатие ведёт в тот же sendRestaurantStatusPanel).
 
 const { TelegramBot } = require('node-telegram-bot-api');
 const db = require('../../db/postgresql');
 const pgOrderService = require('../../services/postgresql/orderService');
+const botOutboxService = require('../../services/postgresql/botOutboxService');
+const {
+  trackOrderMessage, untrackOrderMessage, getTrackedOrderMessage,
+} = require('../../services/postgresql/botOrderMessageTracker');
 
 const PAUSE_LABELS = { short: '33 мин', medium: '3 часа', long: '11 часов' };
+
+// Единственный источник истины для окна ответа ресторана — orderService.js
+// (Stage 31, раздел 4). Минуты вычисляются отсюда, а не хардкодятся, чтобы
+// текст сообщения не мог разойтись с фактическим sweepTimeouts().
+const RESPONSE_WINDOW_MINUTES = Math.round(pgOrderService.RESTAURANT_RESPONSE_WINDOW_SEC / 60);
+
+// Постоянная (не inline) reply-клавиатура — Telegram-native механизм,
+// который остаётся видимым в интерфейсе чата независимо от того, какое
+// сообщение сейчас последнее и пережил ли backend рестарт (задание, раздел
+// 6: "сотрудник не должен помнить и вводить /start"). Нажатие приходит как
+// обычное текстовое сообщение с этим же текстом — обрабатывается тем же
+// путём, что и bare /start у уже подключённого ресторана.
+const MENU_BUTTON_LABEL = 'Статус ресторана';
+const PERSISTENT_MENU_MARKUP = {
+  keyboard: [[{ text: MENU_BUTTON_LABEL }]],
+  resize_keyboard: true,
+  is_persistent: true,
+};
 
 // ---------------------------------------------------------------------------
 // Прямые PostgreSQL-запросы ресторанов/меню — тот же архитектурный контур,
@@ -135,101 +192,101 @@ async function menuItemById(id) {
 // внутри синхронного listener'а) — минимальная, документированная адаптация
 // под более сетевой (более failure-prone) PostgreSQL/async-путь, продуктовая
 // семантика (текст, кнопки, условия) не меняется.
-// Структура по секциям (номер / состав / сумма / клиент / телефон / адрес /
-// комментарий), без цветных emoji — UX fix-stage после Stage 28 (раздел 1.2
-// задания: "сообщение должно быстро читаться сотрудником ресторана"; имя
-// клиента добавлено тем же изменением — Stage 28, находка MEDIUM-1).
-function renderOrderNewText(order) {
-  const itemsList = order.items.map((i) => `${i.qty} × ${i.name} — ${i.price * i.qty} ₽`).join('\n');
+// Структура и порядок блоков — Stage 31, раздел 2 (заменяет предыдущую
+// UX fix-stage структуру после Stage 28): номер заказа / заказ (без цены
+// у каждой позиции) / комментарий / доставка-адрес / клиент-телефон /
+// оплачено (единая сумма) / чек оплаты (опционально) / срок ответа.
+// Заголовок состава — "Заказ:", НЕ "Состав:" (задание, раздел 2). Без
+// цветных emoji (CLAUDE.md).
+//
+// receiptUrl — Stage 31, раздел 3: показывается СТРОГО когда он реально
+// есть (payments.receipt_url, миграция 0011) — сейчас НИЧЕМ в коде не
+// заполняется (mock-провайдер и текущая YooKassa-интеграция не выдают
+// публичный URL чека, см. комментарий миграции), поэтому блок "Чек
+// оплаты" сегодня не появляется НИКОГДА — это осознанно, не "пока не
+// реализовано доделать". Появится сам, когда появится безопасный URL.
+function renderOrderNewText(order, { receiptUrl = null } = {}) {
+  const itemsList = order.items.map((i) => `${i.qty} × ${i.name}`).join('\n');
   const fulfillmentBlock = order.fulfillment_type === 'pickup'
     ? 'Самовывоз (курьер не нужен)'
     : `Доставка\nАдрес: ${order.address}`;
-  return [
-    `Новый заказ ${order.public_code}`,
-    `Состав:\n${itemsList}`,
-    `Сумма: ${order.items_total} ₽`,
-    `Клиент: ${order.customer_name}\nТелефон: ${order.customer_phone}`,
+  const blocks = [
+    `Заказ ${order.public_code}`,
+    `Заказ:\n${itemsList}`,
+    `Комментарий: ${order.comment || 'без комментария'}`,
     fulfillmentBlock,
-    `Комментарий: ${order.comment || '—'}`,
-    'Ответьте в течение 5 минут, иначе заказ отменится автоматически.',
-  ].join('\n\n');
+    `Клиент: ${order.customer_name}\nТелефон: ${order.customer_phone}`,
+    `Оплачено: ${order.items_total} ₽`,
+  ];
+  if (receiptUrl) blocks.push(`Чек оплаты: ${receiptUrl}`);
+  blocks.push(`Ответьте в течение ${RESPONSE_WINDOW_MINUTES} минут, иначе заказ отменится автоматически.`);
+  return blocks.join('\n\n');
 }
 
-// bot_order_messages (db/postgresql/migrations/0008) — "текущее кликабельное
-// сообщение" по заказу, пока он ждёт ресторан (awaiting_restaurant). Нужен
-// ТОЛЬКО для того, чтобы onOrderStatus(timed_out)/customer-cancel ниже могли
-// убрать кнопки с сообщения, на которое сам ресторан не кликал (иначе
-// событие извне — таймаут, отмена клиентом — не знает messageId вовсе).
-// Ручные accept/decline/cook_time сами убирают кнопки синхронно, в рамках
-// того же callback_query (messageId уже есть в query.message), и сами же
-// чистят свою запись — никакого пересечения путей нет.
-//
-// Stage 29.1, п.2 — БД, а НЕ in-memory Map (как было изначально): таймаут
-// может сработать в ДРУГОМ процессе, чем тот, что отправил уведомление
-// (рестарт backend между "заказ пришёл" и "заказ просрочен/отменён") — Map
-// нового процесса пуст, кнопки остались бы кликабельными навсегда.
-async function trackOrderMessage(orderId, chatId, messageId) {
-  await db.execute(
-    `INSERT INTO bot_order_messages (order_id, chat_id, message_id, updated_at)
-     VALUES ($1, $2, $3, NOW())
-     ON CONFLICT (order_id) DO UPDATE
-       SET chat_id = EXCLUDED.chat_id, message_id = EXCLUDED.message_id, updated_at = NOW()`,
-    [orderId, String(chatId), messageId],
-  );
-}
-
-async function untrackOrderMessage(orderId) {
-  await db.execute('DELETE FROM bot_order_messages WHERE order_id = $1', [orderId]);
-}
-
-async function getTrackedOrderMessage(orderId) {
-  const rows = await db.query('SELECT chat_id, message_id FROM bot_order_messages WHERE order_id = $1', [orderId]);
-  if (!rows[0]) return null;
-  return { chatId: rows[0].chat_id, messageId: Number(rows[0].message_id) };
-}
-
+// order:new — Stage 31, раздел 1.2: идёт через persistent outbox
+// (botOutboxService), а не прямым bot.sendMessage(). Сам вызов дешёвый и
+// НЕ бросает на сетевом сбое — botOutboxService.enqueueAndDispatch()
+// пробует доставить сразу (тот же UX-latency, что и раньше в штатном
+// случае), но при неудаче строка остаётся pending в bot_notifications и
+// её подхватит scheduler-тик, в том числе после рестарта процесса. См.
+// header-комментарий botOutboxService.js для полной архитектуры/retry/
+// классификации ошибок/остаточного риска.
 async function handleOrderNew(bot, order) {
   const restaurant = await restaurantById(order.restaurant_id);
   if (!restaurant || !restaurant.telegram_chat_id) {
     console.error(`[bot/postgresql] заказ ${order.public_code}: у ресторана "${restaurant?.name}" не подключён Telegram`);
     return;
   }
-  const sent = await bot.sendMessage(restaurant.telegram_chat_id, renderOrderNewText(order), {
-    reply_markup: {
+  // Чек оплаты (Stage 31, раздел 3) — сейчас всегда null (см. комментарий
+  // renderOrderNewText выше), запрос не бьёт по перформансу штатного пути:
+  // одна лёгкая выборка по индексированному order_id.
+  const paymentRows = await db.query(
+    `SELECT receipt_url FROM payments WHERE order_id = $1 AND status = 'succeeded' ORDER BY id DESC LIMIT 1`,
+    [order.id],
+  );
+  const receiptUrl = paymentRows[0] ? paymentRows[0].receipt_url : null;
+
+  await botOutboxService.enqueueAndDispatch(bot, {
+    dedupKey: `order:${order.id}:new`,
+    orderId: order.id,
+    chatId: restaurant.telegram_chat_id,
+    text: renderOrderNewText(order, { receiptUrl }),
+    replyMarkup: {
       inline_keyboard: [[
         { text: 'Принять', callback_data: `accept:${order.id}` },
         { text: 'Отклонить', callback_data: `decline:${order.id}` },
       ]],
     },
   });
-  if (sent && sent.message_id != null) {
-    try {
-      await trackOrderMessage(order.id, restaurant.telegram_chat_id, sent.message_id);
-    } catch (err) {
-      // Уведомление УЖЕ доставлено рестораном — сбой здесь означает только
-      // ухудшённую (best-effort) будущую очистку кнопок по таймауту, а не
-      // "уведомление не отправлено" (см. onOrderNew выше: он бы иначе создал
-      // ложное hq_events "не удалось отправить уведомление о заказе").
-      console.error(`[bot/postgresql] trackOrderMessage failed for order ${order.id}:`, err.message);
-    }
-  }
 }
 
-// Убирает кнопки с "текущего кликабельного сообщения" заказа (если оно
-// отслеживается) и заменяет его текст — используется событиями, которые
-// сами НЕ пришли как клик по кнопке (таймаут, отмена клиентом), поэтому не
-// имеют messageId из query.message. Запись в bot_order_messages удаляется в
-// любом случае (даже если сообщение не найдено/редактирование не удалось —
-// повторно чистить нечего).
+// Небольшой, ОГРАНИЧЕННЫЙ inline-retry (не полноценный persistent outbox —
+// заказ к этому моменту УЖЕ безопасно завершён в БД независимо от исхода
+// этого вызова, задание требует устойчивость именно для order:new
+// поимённо; см. STAGE31 отчёт, раздел "остаточные риски" за явным
+// обоснованием этого выбора масштаба). Убирает кнопки с "текущего
+// кликабельного сообщения" заказа и заменяет его текст — используется
+// событиями, которые сами НЕ пришли как клик по кнопке (таймаут, отмена
+// клиентом), поэтому не имеют messageId из query.message. Запись в
+// bot_order_messages удаляется в любом случае (даже если сообщение не
+// найдено/редактирование не удалось — повторно чистить нечего).
 async function clearOrderButtons(bot, orderId, text) {
   const tracked = await getTrackedOrderMessage(orderId);
   await untrackOrderMessage(orderId);
   if (!tracked) return;
-  try {
-    await bot.editMessageText(text, { chat_id: tracked.chatId, message_id: tracked.messageId });
-  } catch (err) {
-    console.error(`[bot/postgresql] clearOrderButtons failed for order ${orderId}:`, err.message);
+  const delays = [0, 2000, 6000];
+  let lastErr = null;
+  for (let i = 0; i < delays.length; i += 1) {
+    if (delays[i] > 0) await new Promise((resolve) => setTimeout(resolve, delays[i])); // eslint-disable-line no-await-in-loop
+    try {
+      await bot.editMessageText(text, { chat_id: tracked.chatId, message_id: tracked.messageId }); // eslint-disable-line no-await-in-loop
+      return;
+    } catch (err) {
+      lastErr = err;
+      if (botOutboxService.classifyTelegramError(err) === 'permanent') break; // не имеет смысла повторять
+    }
   }
+  console.error(`[bot/postgresql] clearOrderButtons failed for order ${orderId}:`, botOutboxService.describeError(lastErr));
 }
 
 // docs/HQ-PRODUCT-SPEC.md, раздел «Выбор времени приготовления»: ровно три
@@ -238,14 +295,6 @@ async function clearOrderButtons(bot, orderId, text) {
 // ресторана были свои). Без выбора времени заказ НЕ считается принятым —
 // см. двухшаговое «Принять» в handleCallbackQuery ниже.
 const COOK_TIME_OPTIONS_MIN = [30, 45, 60];
-
-async function sendCookTimeButtons(bot, chatId, orderId, publicCode) {
-  return bot.sendMessage(chatId, `Заказ ${publicCode}: за сколько приготовите?`, {
-    reply_markup: {
-      inline_keyboard: [COOK_TIME_OPTIONS_MIN.map((m) => ({ text: `${m} мин`, callback_data: `cook_time:${orderId}:${m}` }))],
-    },
-  });
-}
 
 // Панель статуса ресторана — основной путь управления паузой (задание,
 // раздел 1.3): показывается на bare /start у уже подключённого ресторана.
@@ -293,6 +342,17 @@ async function handleCallbackQuery(bot, query) {
       // только показывает выбор 30/45/60. Заказ переходит в accepted лишь
       // на шаге cook_time ниже, поэтому «без выбора времени заказ нельзя
       // принять» выполняется структурно, а не проверкой постфактум.
+      //
+      // Stage 31, раздел 1.4 — ОДИН editMessageText с reply_markup сразу
+      // (текст + кнопки выбора времени в одном вызове) вместо прежних двух
+      // раздельных вызовов (editMessageText без кнопок, затем отдельный
+      // sendMessage с кнопками времени). Раньше сбой ВТОРОГО вызова
+      // оставлял ресторан вовсе без кликабельных кнопок по заказу —
+      // диагностировано живым Stage 30. Один вызов либо целиком успевает,
+      // либо целиком падает — "наполовину" не бывает физически. message_id
+      // остаётся ТЕМ ЖЕ (это редактирование, не новое сообщение) —
+      // повторный trackOrderMessage() здесь не нужен, запись от
+      // handleOrderNew уже указывает на верное сообщение.
       const orderId = Number(parts[1]);
       const current = await pgOrderService.getOrder(orderId);
       if (!current) {
@@ -302,22 +362,13 @@ async function handleCallbackQuery(bot, query) {
         // событием — см. header-комментарий модуля, адаптация п.2.
         await bot.editMessageText('Заказ уже обработан.', { chat_id: chatId, message_id: messageId });
       } else {
-        await bot.editMessageText(`Заказ ${current.public_code}: выберите время приготовления.`, { chat_id: chatId, message_id: messageId });
-        const cookTimeMsg = await sendCookTimeButtons(bot, chatId, orderId, current.public_code);
-        // Кнопки времени — теперь ТЕКУЩЕЕ кликабельное сообщение заказа:
-        // именно его, а не уже отредактированное выше, должен чистить
-        // таймаут/отмена клиентом, если время так и не выберут (задание,
-        // раздел 1.1).
-        if (cookTimeMsg && cookTimeMsg.message_id != null) {
-          try {
-            await trackOrderMessage(orderId, chatId, cookTimeMsg.message_id);
-          } catch (err) {
-            // Кнопки выбора времени УЖЕ отправлены — та же логика, что и в
-            // handleOrderNew: сбой здесь не должен превратиться в "Ошибка: ..."
-            // ресторану, который на самом деле успешно нажал «Принять».
-            console.error(`[bot/postgresql] trackOrderMessage(accept) failed for order ${orderId}:`, err.message);
-          }
-        }
+        await bot.editMessageText(`Заказ ${current.public_code}: за сколько приготовите?`, {
+          chat_id: chatId,
+          message_id: messageId,
+          reply_markup: {
+            inline_keyboard: [COOK_TIME_OPTIONS_MIN.map((m) => ({ text: `${m} мин`, callback_data: `cook_time:${orderId}:${m}` }))],
+          },
+        });
       }
     } else if (action === 'decline') {
       const orderId = Number(parts[1]);
@@ -354,10 +405,10 @@ async function handleCallbackQuery(bot, query) {
         await pgOrderService.restaurantAdvance(orderId, 'preparing', { estimatedMinutes: minutes });
         await bot.editMessageText(`Заказ ${current.public_code} принят. Готовится — клиенту показано «${minutes} мин».`, { chat_id: chatId, message_id: messageId });
         await sendProgressButton(bot, chatId, orderId, 'preparing');
-        // Заказ покинул awaiting_restaurant окончательно — таймаут 5 минут
-        // больше не применим, дальше следит только advance ниже (у него свой
-        // pre-check через messageId из самого клика, bot_order_messages
-        // здесь больше не нужна).
+        // Заказ покинул awaiting_restaurant окончательно — окно ответа
+        // (RESTAURANT_RESPONSE_WINDOW_SEC) больше не применимо, дальше
+        // следит только advance ниже (у него свой pre-check через messageId
+        // из самого клика, bot_order_messages здесь больше не нужна).
         await untrackOrderMessage(orderId);
       }
     } else if (action === 'advance') {
@@ -486,27 +537,25 @@ function createBotHandlers(bot) {
   // сообщением) и на cancelled (клиент сам отменил заказ, пока ресторан ещё
   // не ответил). Отдельное событие в «Центре событий» HQ создаёт
   // sweepTimeouts() в orderService — здесь только уведомление самой группы,
-  // дублирования нет. Оба случая ДОПОЛНИТЕЛЬНО чистят кнопки на исходном
-  // сообщении заказа через bot_order_messages (Stage 28, живая находка
-  // MEDIUM-2: раньше слался только новый текст, а старые "Принять"/
-  // "Отклонить" оставались кликабельными — задание, раздел 1.1; Stage 29.1
-  // п.2 — устойчиво к рестарту backend между отправкой и таймаутом/отменой).
+  // дублирования нет.
+  //
+  // Stage 31, раздел 5 — РОВНО один итоговый артефакт на событие (живой
+  // Stage 30 нашёл два: отредактированное "не принят вовремя" сообщение +
+  // ОТДЕЛЬНОЕ новое "вы пропустили"). clearOrderButtons() сразу редактирует
+  // исходное сообщение заказа в финальный текст — кнопки убраны и текст
+  // окончателен ОДНИМ вызовом, второго sendMessage больше нет. Если
+  // исходное сообщение не отслеживается (order:new так и не был доставлен
+  // — см. botOutboxService), clearOrderButtons() ничего не отправляет:
+  // рассылать "вы пропустили" в чат, который ни разу не видел сам заказ,
+  // было бы вводящим в заблуждение, а не полезным (недоставленный
+  // order:new уже получил свой собственный hq_events-алерт — см.
+  // botOutboxService.raiseUndeliveredAlert).
   const onOrderStatus = (order) => {
     if (!order || (order.status !== 'timed_out' && order.status !== 'cancelled')) return;
-    const p = (async () => {
-      if (order.status === 'timed_out') {
-        await clearOrderButtons(bot, order.id, `Заказ ${order.public_code} не принят вовремя — автоматически отменён.`);
-      } else {
-        await clearOrderButtons(bot, order.id, `Заказ ${order.public_code} отменён клиентом.`);
-      }
-      if (order.status !== 'timed_out') return; // "пропустили заказ" — только для реального таймаута, не для отмены клиентом
-      const restaurant = await restaurantById(order.restaurant_id);
-      if (!restaurant || !restaurant.telegram_chat_id) return;
-      await bot.sendMessage(
-        restaurant.telegram_chat_id,
-        `Вы пропустили заказ ${order.public_code} — ответа не было 5 минут, заказ автоматически отменён.`,
-      );
-    })()
+    const text = order.status === 'timed_out'
+      ? `Вы пропустили заказ ${order.public_code} — ответа не было ${RESPONSE_WINDOW_MINUTES} минут, заказ автоматически отменён.`
+      : `Заказ ${order.public_code} отменён клиентом.`;
+    const p = clearOrderButtons(bot, order.id, text)
       .catch((err) => {
         console.error(`[bot/postgresql] order:status ${order.status} notify failed for ${order && order.public_code}:`, err.message);
       })
@@ -525,6 +574,18 @@ function createBotHandlers(bot) {
         // по коду, которая для уже подключённого чата бессмысленна.
         const existing = await restaurantByChat(msg.chat.id);
         if (existing) {
+          // Stage 31, раздел 6 — постоянная reply-клавиатура. Ресторан мог
+          // быть подключён ДО этого обновления и никогда её не получал —
+          // bare /start (пользовательская команда, НЕ технический рестарт
+          // backend — задание прямо разрешает это отличие: "не отправлять
+          // панель заново при каждом техническом рестарте, если это
+          // создаёт спам") безопасный момент довыдать её. Повторная отправка
+          // уже показанной reply-клавиатуры с тем же текстом кнопки
+          // визуально не создаёт "нового меню" в Telegram-клиенте — та же
+          // клавиатура просто остаётся на месте.
+          await bot.sendMessage(msg.chat.id, 'Быстрое управление рестораном закреплено ниже.', {
+            reply_markup: PERSISTENT_MENU_MARKUP,
+          });
           await sendRestaurantStatusPanel(bot, msg.chat.id, existing);
           return;
         }
@@ -548,7 +609,14 @@ function createBotHandlers(bot) {
         await bot.sendMessage(msg.chat.id, 'Код не найден или уже использован. Запросите новый код у YAAM.');
         return;
       }
-      await bot.sendMessage(msg.chat.id, `Готово! «${restaurant.name}» подключён. Сюда будут приходить новые заказы.`);
+      // Постоянная reply-клавиатура (Stage 31, раздел 6) — прикреплена
+      // сразу к первому же сообщению после подключения: единственный
+      // естественный момент её завести, дальше она остаётся в интерфейсе
+      // Telegram-клиента сама по себе (свойство самого Telegram, не
+      // требует ничего от backend — переживает и рестарт процесса).
+      await bot.sendMessage(msg.chat.id, `Готово! «${restaurant.name}» подключён. Сюда будут приходить новые заказы.`, {
+        reply_markup: PERSISTENT_MENU_MARKUP,
+      });
       // Панель статуса сразу после подключения — задание, раздел 4:
       // "показывать панель после подключения", чтобы сотруднику не нужно
       // было заранее знать, что для управления паузой нужно отправить
@@ -594,6 +662,32 @@ function createBotHandlers(bot) {
       });
     } catch (err) {
       console.error('[bot/postgresql] /open failed:', err.message);
+    }
+  });
+
+  // Нажатие постоянной reply-клавиатуры (Stage 31, раздел 6) приходит как
+  // обычное текстовое сообщение с текстом кнопки — тот же путь, что и bare
+  // /start у уже подключённого ресторана (переиспользует
+  // sendRestaurantStatusPanel, никакой второй модели состояния не заводит).
+  // Клавиатуру повторно не шлём — она уже закреплена в интерфейсе клиента,
+  // повторная отправка на каждое нажатие была бы тем самым "спамом",
+  // который задание прямо просит не создавать.
+  bot.onText(new RegExp(`^${MENU_BUTTON_LABEL}$`), async (msg) => {
+    try {
+      const r = await restaurantByChat(msg.chat.id);
+      if (!r) {
+        await bot.sendMessage(msg.chat.id, 'Сначала подключите ресторан: /start КОД');
+        return;
+      }
+      // Устаревшее нажатие (клавиатура была закреплена давно, состояние с
+      // тех пор могло поменяться НЕ через это сообщение — например, из HQ
+      // или другим сотрудником) отвечает АКТУАЛЬНЫМ состоянием: сам
+      // sendRestaurantStatusPanel всегда перечитывает ресторан заново
+      // (restaurantById fresh-запрос), а не полагается на что-то
+      // запомненное на момент показа клавиатуры.
+      await sendRestaurantStatusPanel(bot, msg.chat.id, r);
+    } catch (err) {
+      console.error('[bot/postgresql] menu button failed:', err.message);
     }
   });
 

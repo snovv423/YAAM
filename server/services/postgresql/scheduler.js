@@ -295,6 +295,62 @@ function createPaymentReconciliationScheduler({
 }
 
 // ---------------------------------------------------------------------------
+// Telegram-outbox dispatcher (Stage 31, раздел 1.2)
+// ---------------------------------------------------------------------------
+//
+// Тот же getBot()-паттерн, что и у createWeeklySettlementScheduler выше:
+// бот запускается/останавливается независимо от планировщика, поэтому
+// клиент спрашивается в момент тика, а не запоминается при создании.
+// Короткий интервал (5с по умолчанию) — критичные уведомления (order:new)
+// не должны ждать долго между попытками; backoff внутри самих строк
+// bot_notifications (botOutboxService.BACKOFF_SCHEDULE_MS) уже управляет
+// РЕАЛЬНЫМ интервалом между попытками одной строки, этот тик лишь "когда
+// посмотреть, не пора ли попробовать снова" — тот же принцип, что и у всех
+// остальных sweep-планировщиков в этом файле.
+const DEFAULT_BOT_OUTBOX_INTERVAL_MS = 5_000;
+
+function createBotOutboxScheduler({ intervalMs = DEFAULT_BOT_OUTBOX_INTERVAL_MS, getBot, onError } = {}) {
+  let timer = null;
+  let running = false;
+
+  async function tick() {
+    if (running) return;
+    running = true;
+    try {
+      const bot = typeof getBot === 'function' ? getBot() : null;
+      if (bot) {
+        const botOutboxService = require('./botOutboxService');
+        await botOutboxService.dispatchPending(bot);
+      }
+    } catch (err) {
+      if (onError) onError(err);
+      else console.error('[scheduler/postgresql] bot outbox dispatch failed:', err.message);
+    } finally {
+      running = false;
+    }
+  }
+
+  return {
+    start() {
+      if (timer) return;
+      timer = setInterval(tick, intervalMs);
+      if (typeof timer.unref === 'function') timer.unref();
+    },
+    stop() {
+      if (!timer) return;
+      clearInterval(timer);
+      timer = null;
+    },
+    isRunning() {
+      return timer !== null;
+    },
+    async runOnce() {
+      await tick();
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Контроль расчётных инвариантов и достройка документов (Stage 22)
 // ---------------------------------------------------------------------------
 //
@@ -349,4 +405,6 @@ module.exports = {
   createRefundReconciliationScheduler,
   DEFAULT_ORDER_TIMEOUT_INTERVAL_MS,
   DEFAULT_REFUND_RECONCILIATION_INTERVAL_MS,
+  createBotOutboxScheduler,
+  DEFAULT_BOT_OUTBOX_INTERVAL_MS,
 };

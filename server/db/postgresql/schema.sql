@@ -477,7 +477,12 @@ CREATE TABLE IF NOT EXISTS payments (
   status TEXT NOT NULL DEFAULT 'pending'
     CHECK (status IN ('creating', 'pending', 'succeeded', 'failed', 'refunded')),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  -- receipt_url (0011, Stage 31 раздел 3) — nullable, ничем в текущем коде
+  -- не заполняется. Безопасное место для будущего публичного URL чека,
+  -- когда появится реальная интеграция с чеком провайдера — НЕ выдумывать
+  -- значение и НЕ путать с internal payment/confirmation URL.
+  receipt_url TEXT
 );
 
 -- =========================================================================
@@ -2702,3 +2707,46 @@ CREATE TABLE IF NOT EXISTS restaurant_candidate_votes (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (candidate_id, device_id)
 );
+
+-- =========================================================================
+-- bot_notifications — persistent outbox для критичных Telegram-уведомлений (0010)
+-- =========================================================================
+--
+-- order:new (и потенциально другие критичные уведомления) идут через эту
+-- таблицу, а не прямым sendMessage() — переживает рестарт backend между
+-- попытками, устойчивый dedup_key = 'order:<id>:new' не даёт повторный
+-- emit события создать вторую строку/второе сообщение (Stage 31, раздел
+-- 1.2). sent_at — источник истины для честного 7-минутного окна ответа
+-- ресторана (sweepTimeouts в orderService.js, Stage 31, раздел 1.3).
+CREATE TABLE IF NOT EXISTS bot_notifications (
+  id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  dedup_key TEXT NOT NULL UNIQUE,
+  order_id INTEGER REFERENCES orders(id) ON DELETE CASCADE,
+  chat_id TEXT NOT NULL,
+  message_text TEXT NOT NULL,
+  reply_markup JSONB,
+  -- Stage 31.1 — 'processing' (atomic claim lease, см. botOutboxService.
+  -- claimNotification) и 'skipped' (заказ устарел до фактической отправки)
+  -- добавлены до первого реального применения этой таблицы.
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'processing', 'sent', 'failed', 'skipped')),
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+  max_attempts INTEGER NOT NULL DEFAULT 5 CHECK (max_attempts >= 1),
+  next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_error TEXT,
+  sent_message_id BIGINT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  sent_at TIMESTAMPTZ,
+  CHECK (
+    (status = 'sent' AND sent_at IS NOT NULL)
+    OR (status = 'failed' AND last_error IS NOT NULL)
+    OR (status = 'skipped')
+    OR (status IN ('pending', 'processing'))
+  )
+);
+CREATE INDEX IF NOT EXISTS ix_bot_notifications_pending
+  ON bot_notifications (next_attempt_at)
+  WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS ix_bot_notifications_order
+  ON bot_notifications (order_id);

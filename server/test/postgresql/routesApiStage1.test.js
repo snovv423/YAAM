@@ -638,7 +638,20 @@ test('DTO compatibility: набор полей GET /orders/:code идентич�
     const { order: sqliteOrder } = await sqliteOrderService.createOrder(sqlitePayload);
     const sqliteBody = sqliteOrderService.toPublicOrderDTO(sqliteOrder);
 
-    assert.deepEqual(Object.keys(pgBody).sort(), Object.keys(sqliteBody).sort(), 'PostgreSQL и SQLite версии GET /orders/:code обязаны отдавать один и тот же набор полей');
+    // Stage 31.1, Issue 3 — restaurant_response_deadline_at добавлено
+    // ТОЛЬКО на PostgreSQL-стороне: вычисляется из bot_notifications.
+    // sent_at (persistent Telegram outbox, Stage 31 раздел 1.2), которого у
+    // SQLite-пути структурно не существует — SQLite шлёт order:new прямым
+    // синхронным bot.sendMessage() без outbox/retry, поэтому "честный
+    // дедлайн от факта доставки" там неприменим (тот же принцип, что уже
+    // применён к текстам Telegram-сообщений — SQLite legacy-бот не
+    // меняется без необходимости, см. header-комментарий bot/postgresql/
+    // index.js). Единственное осознанное расхождение набора полей,
+    // остальной DTO обязан совпадать один в один.
+    const PG_ONLY_FIELDS = new Set(['restaurant_response_deadline_at']);
+    const pgKeysExcludingKnownExtras = Object.keys(pgBody).filter((k) => !PG_ONLY_FIELDS.has(k)).sort();
+    assert.deepEqual(pgKeysExcludingKnownExtras, Object.keys(sqliteBody).sort(), 'PostgreSQL и SQLite версии GET /orders/:code обязаны отдавать один и тот же набор полей (кроме документированных PG-only исключений)');
+    assert.ok(Object.prototype.hasOwnProperty.call(pgBody, 'restaurant_response_deadline_at'), 'PostgreSQL DTO обязан содержать restaurant_response_deadline_at (Stage 31.1, Issue 3)');
   } finally {
     for (const suffix of ['', '-shm', '-wal']) { try { fs.unlinkSync(sqliteDbPath + suffix); } catch { /* нет файла */ } }
     if (previousDbPath === undefined) delete process.env.DB_PATH; else process.env.DB_PATH = previousDbPath;

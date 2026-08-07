@@ -35,6 +35,7 @@ const {
   createWeeklySettlementScheduler,
   createPaymentReconciliationScheduler,
   createFinancialHealthScheduler,
+  createBotOutboxScheduler,
 } = require('./scheduler');
 const { createHealthCheck } = require('./health');
 const { createLifecycle } = require('./lifecycle');
@@ -362,6 +363,9 @@ function createPostgresqlApp({
   paymentReconciliationRunOnStart = false,
   financialHealthIntervalMs,
   financialHealthRunOnStart = true,
+  // Telegram-outbox dispatcher (Stage 31, раздел 1.2) — только для тестов;
+  // production использует дефолт scheduler.js (5с).
+  botOutboxIntervalMs,
   bootstrapOptions,
   // Stage 15: сколько ждать завершения активных HTTP-запросов при выключении.
   // Без предела httpServer.close() висит вечно на keep-alive-соединениях, и
@@ -467,13 +471,24 @@ function createPostgresqlApp({
     console.warn('[app-postgresql] TELEGRAM_BOT_TOKEN не задан — бот ресторана не запущен');
   }
 
+  // Telegram-outbox dispatcher (Stage 31, раздел 1.2) — тот же getBot()
+  // паттерн, что и у weeklySettlementScheduler: бот запускается/
+  // останавливается независимо от этого планировщика, клиент спрашивается
+  // в момент тика. Создаётся ВСЕГДА (даже если бот выключен) — тик просто
+  // no-op, пока getBot() не начнёт отдавать живой клиент (см.
+  // createBotOutboxScheduler в scheduler.js).
+  const botOutboxScheduler = createBotOutboxScheduler({
+    intervalMs: botOutboxIntervalMs,
+    getBot: () => (botAdapter ? botAdapter.getBot() : null),
+  });
+
   // Bot НЕ входит в getSchedulers() (то самостоятельное понятие — только
   // периодические sweep'ы, как и в Stage 6) — состояние бота отдельное,
   // наблюдаемое поле readiness(), не участвующее в `ok` (см. health.js).
   const health = createHealthCheck({
     getSchedulers: () => [
       scheduler, orderTimeoutScheduler, refundReconciliationScheduler, weeklySettlementScheduler,
-      paymentReconciliationScheduler, financialHealthScheduler,
+      paymentReconciliationScheduler, financialHealthScheduler, botOutboxScheduler,
     ],
     // Финансовая готовность отделена от технической: приложение может быть
     // технически живым, но иметь необъяснённое расхождение в расчётах.
@@ -669,6 +684,10 @@ function createPostgresqlApp({
       // Stage 22: без этих двух потерянный платёж и расхождение в расчётах
       // остались бы необнаруженными — то, ради чего этап и делается.
       paymentReconciliationScheduler, financialHealthScheduler,
+      // Stage 31: без него pending-строки bot_notifications никогда не
+      // подбирались бы после первой неудачной попытки — заказ оставался бы
+      // без уведомления ресторана до самого timeout, вместо честного retry.
+      botOutboxScheduler,
     ];
     lifecycle = createLifecycle({
       schedulers: botAdapter ? [...baseSchedulers, botAdapter] : baseSchedulers,
@@ -739,6 +758,7 @@ function createPostgresqlApp({
   return {
     app, start, stop, isRunning, isReady, address, health, scheduler, botAdapter,
     orderTimeoutScheduler, refundReconciliationScheduler, weeklySettlementScheduler,
+    botOutboxScheduler,
   };
 }
 

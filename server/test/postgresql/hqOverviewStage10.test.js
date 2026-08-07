@@ -403,7 +403,7 @@ test('D: sweepTimeouts создаёт ровно одно order_missed собы�
     const missed = events.filter((e) => e.category === 'order_missed');
     assert.equal(missed.length, 1);
     assert.equal(missed[0].restaurantName, 'Хачапурная');
-    assert.match(missed[0].message, /не принят за 5 минут/);
+    assert.match(missed[0].message, /не принят за 7 минут/); // Stage 31, раздел 4 — было 5
     assert.match(missed[0].message, /YAAM-T\d+/);
 
     // Повторный sweep — заказ уже timed_out, второй раз событие не создаётся.

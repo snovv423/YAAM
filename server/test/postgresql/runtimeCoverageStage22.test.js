@@ -67,6 +67,7 @@ test('RC1: сборка приложения поднимает ВСЕ фина�
     weeklySettlementIntervalMs: 1_000_000, weeklySettlementRunOnStart: false,
     paymentReconciliationIntervalMs: 1_000_000, paymentReconciliationRunOnStart: false,
     financialHealthIntervalMs: 1_000_000, financialHealthRunOnStart: false,
+    botOutboxIntervalMs: 1_000_000,
   });
   try {
     await instance.start();
@@ -77,9 +78,10 @@ test('RC1: сборка приложения поднимает ВСЕ фина�
     }
     const readiness = await instance.health.readiness();
 
-    // Шесть планировщиков: пауза, таймаут заказа, сверка возвратов,
-    // еженедельный расчёт, сверка ПЛАТЕЖЕЙ, финансовое здоровье.
-    assert.equal(readiness.schedulers.length, 6, 'должно быть шесть планировщиков');
+    // Семь планировщиков: пауза, таймаут заказа, сверка возвратов,
+    // еженедельный расчёт, сверка ПЛАТЕЖЕЙ, финансовое здоровье, Telegram-
+    // outbox dispatcher (Stage 31, раздел 1.2 — было шесть).
+    assert.equal(readiness.schedulers.length, 7, 'должно быть семь планировщиков');
     assert.ok(readiness.schedulers.every((s) => s.running === true),
       'все планировщики обязаны быть запущены');
 
