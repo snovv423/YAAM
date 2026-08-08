@@ -685,6 +685,7 @@ function saveOrderState(){
         amount:currentOrderAmount,
         restId:currentOrderRestaurantId||(curRest?curRest.id:null),
         orderItems:currentOrderItems,
+        address:currentOrderAddress,comment:currentOrderComment,
         qrDeadline,preDeadline,orderCreatedAtMs,
       };
       if(!USE_API){
@@ -769,6 +770,8 @@ function hydrateStoredOrder(savedOrder){
   currentOrderAmount=savedOrder.amount||null;
   currentOrderRestaurantId=savedOrder.restId||null;
   currentOrderItems=normalizeOrderSnapshotItems(savedOrder.orderItems);
+  currentOrderAddress=typeof savedOrder.address==='string'?savedOrder.address:'';
+  currentOrderComment=typeof savedOrder.comment==='string'?savedOrder.comment:'';
   qrDeadline=savedOrder.qrDeadline||null;
   preDeadline=savedOrder.preDeadline||null;
   orderCreatedAtMs=savedOrder.orderCreatedAtMs||null;
@@ -788,6 +791,21 @@ async function applyRecoveredOrder(result,credentials,{fallbackContext}={}){
   currentOrderAmount=Number(order.items_total)||null;
   currentOrderRestaurantId=safeContext.restaurantId||null;
   currentOrderItems=normalizeOrderSnapshotItems(safeContext.items);
+  // Stage 35.1 — order (реальный ответ createOrder/recoverOrder, тот же
+  // owner-protected toPublicOrderDTO, что и polling) теперь САМ возвращает
+  // address/comment — авторитетный источник, переживающий потерю
+  // localStorage/открытие на другом устройстве. safeContext
+  // (fallbackContext из Stage 35) остаётся только переходным fallback'ом —
+  // на случай если по какой-то причине order их не содержит (например,
+  // recoverOrder() ответ старого формата). typeof-проверка на обоих
+  // уровнях: легитимная пустая строка "нет адреса/комментария" не должна
+  // подменяться ни устаревшим fallback, ни считаться "не пришло".
+  currentOrderAddress=typeof order.address==='string'?order.address
+    :(typeof safeContext.address==='string'?safeContext.address:'');
+  currentOrderComment=typeof order.comment==='string'?order.comment
+    :(typeof safeContext.comment==='string'?safeContext.comment:'');
+  const fulfillmentSource=order.fulfillment_type||safeContext.fulfillmentType;
+  if(fulfillmentSource)currentFulfillment=fulfillmentSource==='pickup'?'pickup':'delivery';
   orderCreatedAtMs=parseServerCreatedAt(safeContext.createdAt,credentials.submittedAt||credentials.createdAt);
   // Единая точка входа и для СВЕЖЕГО заказа (createOrder), и для recover/exact
   // replay — оба пути проходят через applyRecoveredOrder(). Дедлайн приходит
@@ -951,7 +969,7 @@ function restoreDemoOrder(saved){
   ratingJustNow=false; // "только что" — только пока не было перезагрузки, см. ту же логику в pollOrderOnce
   curEstimatedMinutes=saved.curEstimatedMinutes||null;
   setOrderTime(orderCreatedAtMs);showOrderDot(true);
-  document.getElementById('st-items').innerHTML=orderItemsHTML();
+  document.getElementById('st-items').innerHTML=orderItemsHTML()+orderTotalHTML()+orderDeliveryHTML();
   document.getElementById('st-num').textContent=currentOrderCode;
   document.getElementById('statusbg').style.display='block';
   showStatusSpinner(false);
@@ -1159,10 +1177,40 @@ async function openCartBar(){
   if(!cur('menu')&&curRest)await doOpenRest(curRest.id);
   openSheet();
 }
-// Строки заказа "N × Блюдо — сумма" — используются в корзине и на двух экранах статуса.
+// Stage 35, раздел 3.2 — quantity/name/price раздельными DOM-элементами
+// (не одна строка "${qty} × ${name} ${price} ₽"), чтобы длинное название
+// блюда переносилось само по себе, никогда не задевая цену. ₽ остаётся
+// приклеен к сумме через white-space:nowrap на .oi-price (см. css/style.css).
+// nameHtml принимается уже готовым (esc()/без esc() — на усмотрение
+// вызывающей стороны, тот же принцип, что был у соответствующих строк раньше).
+function orderItemRowHTML(qty,nameHtml,priceTotal){
+  return `<div class="order-item"><span class="oi-qty">${qty}×</span><span class="oi-name">${nameHtml}</span><span class="oi-price">${priceTotal} ₽</span></div>`;
+}
+// Строки заказа — используются в корзине и на двух экранах статуса.
 function orderItemsHTML(){
   const items=currentOrderCode&&currentOrderItems.length?currentOrderItems:Object.values(cart);
-  return items.map(c=>`<div class="sumrow"><span>${c.q} × ${c.n}</span><span>${c.p*c.q} ₽</span></div>`).join('');
+  return items.map(c=>orderItemRowHTML(c.q,c.n,c.p*c.q)).join('');
+}
+// Stage 35, раздел 3.4 — «Итого» отдельным визуальным блоком под составом,
+// не смешанным с ценами позиций (переиспользует уже существующий класс
+// .sumrow.total — тот же, что и в корзине оформления). currentOrderAmount —
+// уже авторитетное серверное значение (order.items_total из applyRecoveredOrder/
+// pollOrderOnce), НЕ пересчитывается заново на клиенте.
+function orderTotalHTML(){
+  if(!Number.isFinite(currentOrderAmount))return'';
+  return `<div class="sumrow total"><span>Итого</span><span>${currentOrderAmount} ₽</span></div>`;
+}
+// Stage 35, раздел 3.5 — адрес отдельным структурированным блоком, не частью
+// длинного текста. Только delivery (у pickup адрес — это адрес РЕСТОРАНА,
+// уже показанный при оформлении, здесь новых полей не изобретаем — задание:
+// "не придумывать новые поля, которых нет в модели"). Только собственный
+// статус-экран владельца заказа — НЕ sharedOrderItemsHTML(): чужая read-only
+// ссылка "Поделиться" не должна раскрывать домашний адрес клиента постороннему.
+function orderDeliveryHTML(){
+  if(currentFulfillment!=='delivery'||!currentOrderAddress)return'';
+  const commentHtml=currentOrderComment
+    ?`<div class="order-delivery-comment">${esc(currentOrderComment)}</div>`:'';
+  return `<div class="order-delivery"><div class="order-delivery-title">Доставка</div><div class="order-delivery-addr">${esc(currentOrderAddress)}</div>${commentHtml}</div>`;
 }
 // Доставка/самовывоз — выбор клиента при оформлении. По умолчанию доставка,
 // но дальше сохраняется между открытиями корзины (openCart передаёт текущее
@@ -1279,6 +1327,14 @@ function validateLegalConsent(){
 // pollOrderOnce() (API-режим) — это и есть backend-данные заказа.
 let currentOrderCode=null, currentOrderAccessToken=null, currentCreateIdempotencyKey=null, currentRetryIdempotencyKey=null;
 let currentPaymentUrl=null, currentOrderAmount=null, currentOrderRestaurantId=null, currentOrderItems=[];
+// Stage 35 — адрес/комментарий заказа для структурированного блока «Доставка»
+// на статус-экране (задание, раздел 3.5). Тот же принцип, что и currentOrderItems
+// выше: захватываются ОДИН РАЗ в момент оформления (из чекаут-формы), кэшируются
+// в localStorage (saveOrderState/hydrateStoredOrder), сервер их НЕ возвращает
+// через toPublicOrderDTO — это чисто клиентское эхо собственного ввода
+// владельца заказа, поэтому НЕ используется в sharedOrderItemsHTML() (чужая
+// read-only ссылка не должна получать домашний адрес клиента).
+let currentOrderAddress=null, currentOrderComment=null;
 // orderCreatedAtMs — момент фактического создания заказа (не оплаты), один раз
 // зафиксированный в openQR(). Персистится и восстанавливается тем же принципом,
 // что qrDeadline/preDeadline, но не очищается на nextStatus()/переходах статуса —
@@ -1361,6 +1417,11 @@ async function openQR(){
         restaurantId:apiPayload.restaurantId,
         createdAt:orderCreatedAtMs,
         items:apiPayload.items.map(({name,price,qty})=>({name,price,qty})),
+        // Stage 35 — только для локального эха в active-order snapshot этого
+        // же браузера (см. applyRecoveredOrder/saveOrderState ниже), НЕ для
+        // pending-credentials localStorage (та хранит только две capability,
+        // см. комментарий выше) — тот же trust boundary, что и items.
+        address:apiPayload.address,fulfillmentType:apiPayload.fulfillmentType,comment:apiPayload.comment,
       };
       const outcome=await resolveInitialOrder({allowCreate:true,apiPayload,fallbackContext});
       if(outcome.kind==='active'){
@@ -1381,6 +1442,8 @@ async function openQR(){
       currentOrderAmount=sum;
       currentOrderRestaurantId=curRest?.id||null;
       currentOrderItems=normalizeOrderSnapshotItems(Object.values(cart));
+      currentOrderAddress=payload.address||'';
+      currentOrderComment=payload.comment||'';
       demoStage='qr';
       saveOrderState();
     }
@@ -1488,7 +1551,7 @@ function startResponseTimer(){
 function initStatusScreen(){
   statusStep=0;inPreStatus=true;curEstimatedMinutes=null;prepDeadlineMs=null;stopPrepTimer();ratingSubmitted=false;ratingJustNow=false;setOrderTime(orderCreatedAtMs);
   document.getElementById('st-num').textContent=currentOrderCode; // и demo (openStatus), и API (startOrderPolling/pollOrderOnce) — один и тот же реальный код, не HTML-заглушка
-  document.getElementById('st-items').innerHTML=orderItemsHTML();
+  document.getElementById('st-items').innerHTML=orderItemsHTML()+orderTotalHTML()+orderDeliveryHTML();
   document.getElementById('statusbg').style.display='block';
   showStatusSpinner(true);
   // Кнопка «Поделиться» скрыта по умолчанию здесь — до первого реального
@@ -1606,7 +1669,7 @@ function openRejected(reason,order){
   stopOrderPolling();
   const orderCodeForClear=currentOrderCode;
   const orderTokenForClear=currentOrderAccessToken;
-  currentOrderCode=null;currentOrderAccessToken=null;currentCreateIdempotencyKey=null;currentRetryIdempotencyKey=null;currentPaymentUrl=null;currentOrderAmount=null;currentOrderRestaurantId=null;currentOrderItems=[];orderCreatedAtMs=null;
+  currentOrderCode=null;currentOrderAccessToken=null;currentCreateIdempotencyKey=null;currentRetryIdempotencyKey=null;currentPaymentUrl=null;currentOrderAmount=null;currentOrderRestaurantId=null;currentOrderItems=[];currentOrderAddress=null;currentOrderComment=null;orderCreatedAtMs=null;
   void clearStoredOrderStateSafely(orderCodeForClear,orderTokenForClear);
 }
 
@@ -1844,7 +1907,7 @@ function openOrderNotFound(){
   const orderTokenForClear=currentOrderAccessToken;
   stopOrderPolling();
   showStatusSpinner(false);showOrderDot(false);showRestaurantPhone(null);
-  currentOrderCode=null;currentOrderAccessToken=null;currentCreateIdempotencyKey=null;currentRetryIdempotencyKey=null;currentPaymentUrl=null;currentOrderAmount=null;currentOrderRestaurantId=null;currentOrderItems=[];orderCreatedAtMs=null;
+  currentOrderCode=null;currentOrderAccessToken=null;currentCreateIdempotencyKey=null;currentRetryIdempotencyKey=null;currentPaymentUrl=null;currentOrderAmount=null;currentOrderRestaurantId=null;currentOrderItems=[];currentOrderAddress=null;currentOrderComment=null;orderCreatedAtMs=null;
   void clearStoredOrderStateSafely(orderCodeForDisplay,orderTokenForClear);
   setRejOrderCode(orderCodeForDisplay);
   document.getElementById('rej-title').textContent='Не удалось найти заказ';
@@ -1886,6 +1949,25 @@ async function pollOrderOnce(){
   // для уже оценённого заказа, хотя повторная отправка всё равно отклонится сервером.
   ratingSubmitted=order.rating!=null;
   currentFulfillment=order.fulfillment_type==='pickup'?'pickup':'delivery';
+  // Stage 35.1 — сервер (owner-protected toPublicOrderDTO, требует order
+  // access token) теперь тоже возвращает address/comment — единственный
+  // источник истины, переживающий потерю localStorage/открытие заказа на
+  // другом устройстве. currentOrderAddress/currentOrderComment (Stage 35,
+  // из fallbackContext/yaam_active_order) остаются только переходным
+  // fallback'ом до этого момента — как только пришёл реальный ответ
+  // сервера, он побеждает безусловно (typeof-проверка, а не ||, чтобы
+  // легитимная пустая строка "нет комментария" не подменялась устаревшим
+  // client-side значением). Полный state заказа локально не хранит
+  // "адрес ещё не пришёл" отдельным флагом — просто перезаписываем на
+  // каждом poll-тике тем, что реально пришло, тем же принципом, что и
+  // currentOrderAmount/ratingSubmitted выше.
+  if(typeof order.address==='string')currentOrderAddress=order.address;
+  if(typeof order.comment==='string')currentOrderComment=order.comment;
+  // #st-items уже мог быть заполнен initStatusScreen() ДО этого поля (или
+  // вообще без localStorage — путой строкой) — пересобираем целиком тем же
+  // набором функций, что и initStatusScreen(), теперь уже с авторитетными
+  // данными. Дёшево (несколько span/div), идемпотентно.
+  document.getElementById('st-items').innerHTML=orderItemsHTML()+orderTotalHTML()+orderDeliveryHTML();
   document.getElementById('st-num').textContent=order.public_code;
   if(order.estimated_ready_minutes)curEstimatedMinutes=order.estimated_ready_minutes;
   applyPreparationDeadline(order);
@@ -2151,7 +2233,7 @@ function parseSharedHash(){
 // названий блюд, что и остальной пользовательский текст (esc()), в отличие
 // от orderItemsHTML() (владельческий экран, отдельная функция, не трогаем).
 function sharedOrderItemsHTML(order){
-  const rows=(order.items||[]).map(i=>`<div class="sumrow"><span>${i.qty} × ${esc(i.name)}</span><span>${i.price*i.qty} ₽</span></div>`).join('');
+  const rows=(order.items||[]).map(i=>orderItemRowHTML(i.qty,esc(i.name),i.price*i.qty)).join('');
   const total=Number.isFinite(order.items_total)?`<div class="sumrow total"><span>Итого</span><span>${order.items_total} ₽</span></div>`:'';
   return rows+total;
 }
@@ -2235,7 +2317,7 @@ function cur(id){return document.getElementById(id).classList.contains('active')
 function go(id){document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));document.getElementById(id).classList.add('active');document.querySelector('.dish-add').style.display=(id==='dish')?'block':'none';if(id!=='status'&&id!=='rejected')document.getElementById('statusbg').style.display='none';window.scrollTo(0,0);updateBar();if(id==='home'&&introFadeHandler)introFadeHandler();try{if(id!=='home')history.pushState({screen:id},'');else history.replaceState({screen:'home'},'');}catch(e){}}
 function resetAll(){
   const orderCodeForClear=currentOrderCode,orderTokenForClear=currentOrderAccessToken;
-  clearInterval(preTimer);clearTimeout(preAutoTimer);preDeadline=null;stopQRTimer();qrDeadline=null;stopOrderPolling();showRestaurantPhone(null);showOrderDot(false);cart={};curRest=null;currentOrderCode=null;currentOrderAccessToken=null;currentCreateIdempotencyKey=null;currentRetryIdempotencyKey=null;currentPaymentUrl=null;currentOrderAmount=null;currentOrderRestaurantId=null;currentOrderItems=[];orderCreatedAtMs=null;initialRecoveryBlocked=false;demoStage='qr';
+  clearInterval(preTimer);clearTimeout(preAutoTimer);preDeadline=null;stopQRTimer();qrDeadline=null;stopOrderPolling();showRestaurantPhone(null);showOrderDot(false);cart={};curRest=null;currentOrderCode=null;currentOrderAccessToken=null;currentCreateIdempotencyKey=null;currentRetryIdempotencyKey=null;currentPaymentUrl=null;currentOrderAmount=null;currentOrderRestaurantId=null;currentOrderItems=[];currentOrderAddress=null;currentOrderComment=null;orderCreatedAtMs=null;initialRecoveryBlocked=false;demoStage='qr';
   // Stage 27 (L-1) — cart={} выше уже верно сбрасывает СОСТОЯНИЕ, но штора
   // корзины (#sheet/#sheet-overlay) — независимый оверлей, а не .screen:
   // go('home') ниже прячет только нижнюю сумму-кнопку (updateBar() внутри

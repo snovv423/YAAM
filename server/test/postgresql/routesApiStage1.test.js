@@ -389,10 +389,15 @@ const PUBLIC_ALLOWLIST = [
   'public_code', 'status', 'status_updated_at', 'items_total',
   'estimated_ready_minutes', 'restaurant_phone', 'fulfillment_type', 'rating',
   'refund_status',
+  // Stage 35.1 — владелец заказа (этот endpoint требует order access token)
+  // обязан видеть собственный адрес/комментарий даже без localStorage —
+  // см. orderService.js toPublicOrderDTO. customer_name/customer_phone
+  // сознательно остаются запрещёнными ниже — задание Stage 35.1 их не просило.
+  'address', 'comment',
 ];
 const FORBIDDEN_FIELDS = [
-  'id', 'restaurant_id', 'city', 'customer_name', 'customer_phone', 'address',
-  'comment', 'commission_amount', 'created_at', 'restaurant_name', 'items',
+  'id', 'restaurant_id', 'city', 'customer_name', 'customer_phone',
+  'commission_amount', 'created_at', 'restaurant_name', 'items',
 ];
 
 test('GET /api/orders/:code — владелец получает 200 и DTO без запрещённых полей', async () => {
@@ -704,7 +709,10 @@ test('DTO compatibility: набор полей GET /orders/:code идентич�
     // меняется без необходимости, см. header-комментарий bot/postgresql/
     // index.js). Единственное осознанное расхождение набора полей,
     // остальной DTO обязан совпадать один в один.
-    const PG_ONLY_FIELDS = new Set(['restaurant_response_deadline_at']);
+    // Stage 35.1 — address/comment добавлены только в PostgreSQL owner DTO
+    // (см. orderService.js: toPublicOrderDTO), тем же принципом, что и
+    // restaurant_response_deadline_at выше — SQLite-путь не переносится.
+    const PG_ONLY_FIELDS = new Set(['restaurant_response_deadline_at', 'address', 'comment']);
     const pgKeysExcludingKnownExtras = Object.keys(pgBody).filter((k) => !PG_ONLY_FIELDS.has(k)).sort();
     assert.deepEqual(pgKeysExcludingKnownExtras, Object.keys(sqliteBody).sort(), 'PostgreSQL и SQLite версии GET /orders/:code обязаны отдавать один и тот же набор полей (кроме документированных PG-only исключений)');
     assert.ok(Object.prototype.hasOwnProperty.call(pgBody, 'restaurant_response_deadline_at'), 'PostgreSQL DTO обязан содержать restaurant_response_deadline_at (Stage 31.1, Issue 3)');

@@ -336,9 +336,17 @@ function renderMenuItemForm({
             <input id="if-carbs" name="carbs_g" type="number" min="0" max="2000" value="${v.carbs_g ?? ''}" placeholder="не указаны" autocomplete="off">
           </div>
         </div>
-        <label for="if-photo">Ссылка на фото (необязательно)</label>
-        <input id="if-photo" name="photo_url" type="text" value="${esc(v.photo_url || '')}" placeholder="https://..." autocomplete="off">
-        ${photos.length ? '<div class="photo-meta">Используется, только если ниже нет ни одной загруженной фотографии.</div>' : ''}
+        <!-- Stage 35 — legacy-поле ручного ввода URL убрано из обычного
+             HQ-интерфейса (задание, раздел 2.2: администратор не должен
+             искать/вставлять ссылку на фото). Backend/модель по-прежнему
+             поддерживают photo_url как fallback для блюд, у которых он уже
+             был заполнен старым способом ДО этой стадии (см.
+             routes/hq/restaurants.js: thumb_url = загруженное фото ||
+             item.photo_url) — hidden-поле молча переносит текущее значение
+             при каждом сохранении формы, ничего не обнуляя и не показывая
+             владельцу. Новые блюда получают фото через renderPhotoManager
+             ниже (загрузка файла), не через эту ссылку. -->
+        <input id="if-photo" name="photo_url" type="hidden" value="${esc(v.photo_url || '')}">
         <button type="submit" class="compact">${isNew ? 'Добавить блюдо' : 'Сохранить'}</button>
         ${error ? `<div class="error">${esc(error)}</div>` : ''}
       </form>

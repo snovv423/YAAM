@@ -331,12 +331,11 @@ test('openSharedOrder(): рендерит прогресс-статус и ск�
   assert.equal(sandbox.document.getElementById('st-pending-pay-wrap').style.display, 'none');
   assert.equal(sandbox.document.getElementById('st-final').style.display, 'none');
   // Требование задания: состав заказа, количество, цены и итоговая сумма
-  // видны на read-only странице.
+  // видны на read-only странице. Stage 35 — qty/name/price раздельными
+  // DOM-элементами (order-item/oi-qty/oi-name/oi-price), не одной строкой.
   const itemsHtml = sandbox.document.getElementById('st-items').innerHTML;
-  assert.match(itemsHtml, /2 × Хинкали/);
-  assert.match(itemsHtml, /700 ₽/); // 350*2
-  assert.match(itemsHtml, /1 × Чай/);
-  assert.match(itemsHtml, /150 ₽/);
+  assert.match(itemsHtml, /<span class="oi-qty">2×<\/span><span class="oi-name">Хинкали<\/span><span class="oi-price">700 ₽<\/span>/); // 350*2
+  assert.match(itemsHtml, /<span class="oi-qty">1×<\/span><span class="oi-name">Чай<\/span><span class="oi-price">150 ₽<\/span>/);
   assert.match(itemsHtml, /Итого/);
   assert.match(itemsHtml, /850 ₽/);
   // Телефон ресторана кликабелен через tel:.

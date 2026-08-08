@@ -318,6 +318,23 @@
   .sumrow{display:flex;justify-content:space-between;padding:7px 0;font-size:14px;font-weight:600}
   .sumrow.deliv{color:var(--txt2);font-size:13px;border-top:1px dashed var(--gbord);padding-top:11px;margin-top:5px}
   .sumrow.total{font-weight:800;font-size:18px;padding-top:13px;margin-top:5px;border-top:1px solid var(--gbord)}
+  /* Stage 35, раздел 3.2 — карточка состава заказа: quantity/name/price
+     раздельными flex-элементами вместо одной строки "N × Название Цена ₽".
+     min-width:0 на .oi-name обязателен — без него flex-элемент не сжимается
+     ниже intrinsic-ширины самого длинного слова и не переносится корректно
+     внутри узкого мобильного контейнера. white-space:nowrap на .oi-price —
+     "₽" никогда не переносится отдельно от суммы (раздел 3.2). */
+  .order-item{display:flex;align-items:flex-start;gap:10px;padding:7px 0;font-size:14px;font-weight:600}
+  .order-item .oi-qty{flex:0 0 auto;color:var(--txt2);font-weight:700;white-space:nowrap}
+  .order-item .oi-name{flex:1 1 auto;min-width:0;overflow-wrap:break-word;word-break:break-word}
+  .order-item .oi-price{flex:0 0 auto;white-space:nowrap;font-weight:800;margin-left:4px}
+  /* Stage 35, раздел 3.5 — адрес отдельным структурированным блоком, тот же
+     визуальный язык, что уже есть в файле: пунктирный разделитель как у
+     .sumrow.deliv выше, подпись как у .field label (11px, uppercase, txt2). */
+  .order-delivery{border-top:1px dashed var(--gbord);margin-top:9px;padding-top:11px}
+  .order-delivery-title{font-size:11px;color:var(--txt2);font-weight:800;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}
+  .order-delivery-addr{font-size:14px;font-weight:600;color:var(--txt);overflow-wrap:break-word;word-break:break-word}
+  .order-delivery-comment{font-size:13px;color:var(--txt2);margin-top:4px;overflow-wrap:break-word;word-break:break-word}
   .trust{display:flex;align-items:center;gap:11px;border-radius:16px;padding:13px 15px;margin:6px 0 4px;background:rgba(52,211,140,.10);border:1px solid rgba(52,211,140,.3);animation:trustin .5s cubic-bezier(.2,.8,.2,1) both;animation-delay:.2s}
   @keyframes trustin{from{opacity:0;transform:translateY(18px)}to{opacity:1;transform:none}}
   /* риппл на кнопке оплатить */

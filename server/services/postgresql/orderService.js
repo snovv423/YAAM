@@ -2450,11 +2450,22 @@ function toPublicOrderDTO(order) {
     public_code, status, status_updated_at, items_total,
     estimated_ready_minutes, restaurant_phone, fulfillment_type, rating,
     latest_refund_status, payment_expires_at, preparation_deadline,
-    restaurant_response_deadline_at,
+    restaurant_response_deadline_at, address, comment,
   } = order;
   return {
     public_code, status, status_updated_at, items_total,
     estimated_ready_minutes, restaurant_phone, fulfillment_type, rating,
+    // Stage 35.1 — владелец заказа (только этот DTO, требует order access
+    // token — см. requireOrderAccess) обязан видеть собственный адрес/
+    // комментарий даже без localStorage (другое устройство, очищенный
+    // браузер) — до этой стадии единственным источником был client-side
+    // fallbackContext/yaam_active_order, что ломалось при потере
+    // localStorage. address/comment — уже существующие колонки orders,
+    // новых полей модели не добавлено. НЕ добавлять в toSharedOrderDTO ниже
+    // (allowlist там уже явно и намеренно отбрасывает оба поля — см. его
+    // комментарий).
+    address: address || '',
+    comment: comment || '',
     refund_status: toPublicRefundStatus(latest_refund_status),
     // Неизменяемый серверный срок готовности (docs/HQ-PRODUCT-SPEC.md,
     // «Таймер приготовления») — тот же ISO-timestamp на каждом poll и после
