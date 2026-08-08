@@ -17,6 +17,7 @@ const ORDER_STATUS_LABELS = {
   awaiting_restaurant: 'Ожидает ресторан',
   accepted: 'Принят',
   preparing: 'Готовится',
+  ready: 'Готов, ожидает курьера', // Stage 33
   courier: 'В доставке',
   delivered: 'Доставлен',
   payment_failed: 'Оплата не прошла',
@@ -467,6 +468,12 @@ function renderOrderDetail({ restaurant, detail, linkBasePath }) {
       <table>
         <tr><td>Создан</td><td style="text-align:right">${esc(formatMoscowDateTime(o.created_at))}</td></tr>
         <tr><td>Статус заказа</td><td style="text-align:right">${esc(ORDER_STATUS_LABELS[o.status] || o.status)}</td></tr>
+        <!-- Stage 33, раздел 10 — наблюдаемость: чем именно заказ дошёл до
+             delivered (клиент подтвердил / сервер закрыл по auto-timeout
+             через 6ч). NULL — заказ доставлен до Stage 33, либо pickup
+             (там ресторан по-прежнему сам отмечает "Клиент забрал"). Не
+             публичное поле, видно только здесь. -->
+        ${o.delivered_via ? `<tr><td>Как завершён</td><td style="text-align:right">${o.delivered_via === 'customer_confirmed' ? 'Клиент подтвердил получение' : 'Автозавершение (клиент не подтвердил за 6ч)'}</td></tr>` : ''}
         <tr><td>Тип получения</td><td style="text-align:right">${o.fulfillment_type === 'pickup' ? 'Самовывоз' : 'Доставка'}</td></tr>
         <tr><td>Статус оплаты</td><td style="text-align:right">${esc(lastPayment ? (PAYMENT_STATUS_LABELS[lastPayment.status] || lastPayment.status) : 'Платежей нет')}</td></tr>
         ${succeededRefund ? `<tr><td>Возврат</td><td style="text-align:right">${esc(REFUND_STATUS_LABELS[succeededRefund.status])} · ${money(succeededRefund.amount)}</td></tr>` : ''}

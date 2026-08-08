@@ -142,10 +142,15 @@ async function createOrderRow(db, { restaurantId, status, itemsTotal = 1000, com
   orderCounter += 1;
   const code = `YAAM-S${orderCounter}`;
   const phone = `+7902${String(orderCounter).padStart(7, '0')}`;
+  // Stage 33.1 — earned_at теперь единственный якорь финансового времени;
+  // фикстура пишет напрямую SQL, поэтому сама выставляет earned_at =
+  // status_updated_at ровно когда status='delivered' (тот же принцип, что
+  // и backfill в миграции 0013).
   const rows = await db.execute(
     `INSERT INTO orders
-       (public_code, restaurant_id, city, customer_name, customer_phone, address, items_total, commission_amount, status, status_updated_at)
-     VALUES ($1,$2,'Грозный','Тест',$3,'адрес',$4,$5,$6,COALESCE($7, NOW()))
+       (public_code, restaurant_id, city, customer_name, customer_phone, address, items_total, commission_amount, status, status_updated_at, earned_at)
+     VALUES ($1,$2,'Грозный','Тест',$3,'адрес',$4,$5,$6,COALESCE($7, NOW()),
+       CASE WHEN $6 = 'delivered' THEN COALESCE($7, NOW()) ELSE NULL END)
      RETURNING id`,
     [code, restaurantId, phone, itemsTotal, commissionAmount, status, statusUpdatedAt],
   );
@@ -613,7 +618,7 @@ test('N: заказ, доставленный ПОСЛЕ закрытия пер
     const period = await settlementService.createDraftSettlementPeriod({ periodFrom: todayStr(-1), periodTo: todayStr(-1) });
     // Order1 создан "сегодня" (NOW()), а период — "вчера" — сместим
     // status_updated_at заказа на вчера, чтобы он попал в закрываемый период.
-    await db.execute(`UPDATE orders SET status_updated_at = (NOW() - INTERVAL '1 day') WHERE id = $1`, [order1]);
+    await db.execute(`UPDATE orders SET status_updated_at = (NOW() - INTERVAL '1 day'), earned_at = (NOW() - INTERVAL '1 day') WHERE id = $1`, [order1]);
     const result = await settlementService.closeSettlementPeriod(period.id);
     assert.equal(result.lines[0].turnover, 1000);
 
@@ -928,7 +933,7 @@ test('W: удаление draft-периода работает; удалени�
     const orderId = await createOrderRow(db, { restaurantId, status: 'delivered', itemsTotal: 1000, commissionAmount: 70 });
     await addSucceededPayment(db, orderId, 1000);
     const period2 = await settlementService.createDraftSettlementPeriod({ periodFrom: todayStr(-1), periodTo: todayStr(-1) });
-    await db.execute(`UPDATE orders SET status_updated_at = (NOW() - INTERVAL '1 day') WHERE id = $1`, [orderId]);
+    await db.execute(`UPDATE orders SET status_updated_at = (NOW() - INTERVAL '1 day'), earned_at = (NOW() - INTERVAL '1 day') WHERE id = $1`, [orderId]);
     await settlementService.closeSettlementPeriod(period2.id);
     await assert.rejects(() => settlementService.deleteDraftSettlementPeriod(period2.id), /закрытый период нельзя удалить/i);
   } finally {

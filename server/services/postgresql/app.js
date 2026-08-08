@@ -36,6 +36,7 @@ const {
   createPaymentReconciliationScheduler,
   createFinancialHealthScheduler,
   createBotOutboxScheduler,
+  createCourierAutoCompleteScheduler,
 } = require('./scheduler');
 const { createHealthCheck } = require('./health');
 const { createLifecycle } = require('./lifecycle');
@@ -366,6 +367,9 @@ function createPostgresqlApp({
   // Telegram-outbox dispatcher (Stage 31, раздел 1.2) — только для тестов;
   // production использует дефолт scheduler.js (5с).
   botOutboxIntervalMs,
+  // Stage 33 — auto-complete забытых courier-заказов; только для тестов
+  // (production использует дефолт scheduler.js, 5 минут).
+  courierAutoCompleteIntervalMs,
   bootstrapOptions,
   // Stage 15: сколько ждать завершения активных HTTP-запросов при выключении.
   // Без предела httpServer.close() висит вечно на keep-alive-соединениях, и
@@ -431,6 +435,10 @@ function createPostgresqlApp({
   // между commit и scheduleRefundProcessing, неоднозначный сетевой исход),
   // никогда не были бы повторены — см. services/postgresql/orderService.js.
   const orderTimeoutScheduler = createOrderTimeoutScheduler({ intervalMs: orderTimeoutIntervalMs });
+  // Stage 33, раздел 7 — без него забытый клиентом courier-заказ никогда не
+  // закрылся бы сам (см. orderService.js autoCompleteCourierOrders/
+  // COURIER_AUTO_COMPLETE_SEC).
+  const courierAutoCompleteScheduler = createCourierAutoCompleteScheduler({ intervalMs: courierAutoCompleteIntervalMs });
   // Еженедельное закрытие расчётных периодов (docs/HQ-PRODUCT-SPEC.md).
   // weeklySettlementIntervalMs — только для тестов; production использует
   // дефолт. runOnStart=true даёт catch-up после простоя сервера.
@@ -489,6 +497,7 @@ function createPostgresqlApp({
     getSchedulers: () => [
       scheduler, orderTimeoutScheduler, refundReconciliationScheduler, weeklySettlementScheduler,
       paymentReconciliationScheduler, financialHealthScheduler, botOutboxScheduler,
+      courierAutoCompleteScheduler,
     ],
     // Финансовая готовность отделена от технической: приложение может быть
     // технически живым, но иметь необъяснённое расхождение в расчётах.
@@ -688,6 +697,9 @@ function createPostgresqlApp({
       // подбирались бы после первой неудачной попытки — заказ оставался бы
       // без уведомления ресторана до самого timeout, вместо честного retry.
       botOutboxScheduler,
+      // Stage 33: без него забытый клиентом courier-заказ никогда не
+      // закрылся бы сам — см. courierAutoCompleteScheduler выше.
+      courierAutoCompleteScheduler,
     ];
     lifecycle = createLifecycle({
       schedulers: botAdapter ? [...baseSchedulers, botAdapter] : baseSchedulers,

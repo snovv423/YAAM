@@ -29,7 +29,7 @@ const { countAvailableMenuItems } = require('./menuAdminService');
 const { ValidationError } = lifecycle;
 
 const PAGE_SIZE = 20;
-const ACTIVE_STATUSES = ['awaiting_payment', 'awaiting_restaurant', 'accepted', 'preparing', 'courier'];
+const ACTIVE_STATUSES = ['awaiting_payment', 'awaiting_restaurant', 'accepted', 'preparing', 'ready', 'courier'];
 
 // ---------------------------------------------------------------------------
 // Список ресторанов — search/filter/sort/pagination

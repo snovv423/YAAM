@@ -315,16 +315,32 @@ async function sendRestaurantStatusPanel(bot, chatId, restaurant) {
   }
 }
 
+// Stage 33 — ресторан отвечает за заказ ТОЛЬКО до физической передачи
+// курьеру. Для delivery это теперь ДВА раздельных шага (preparing -> ready
+// на кнопку «Готово», ready -> courier на кнопку «Передал курьеру») вместо
+// прежнего одного; для 'courier' эта функция НЕ вызывается вообще —
+// courier терминален для ресторана (см. handleCallbackQuery/advance ниже,
+// раздел 3.2 задания: "ВСЕ кнопки действий по этому заказу должны исчезнуть").
+// У самовывоза курьера нет — там по-прежнему один шаг, preparing -> delivered
+// напрямую (см. комментарий у ADVANCE_MAP.pickup в orderService.js).
 async function sendProgressButton(bot, chatId, orderId, currentStatus) {
   const order = await pgOrderService.getOrder(orderId);
-  const isPickup = order.fulfillment_type === 'pickup';
-  const nextMap = isPickup ? { preparing: 'delivered' } : { preparing: 'courier', courier: 'delivered' };
-  const labelMap = isPickup ? { delivered: 'Клиент забрал' } : { courier: 'Передал курьеру', delivered: 'Доставлен' };
-  const next = nextMap[currentStatus];
-  if (!next) return;
-  await bot.sendMessage(chatId, `Заказ ${order.public_code}: когда будет готово, нажмите ниже.`, {
-    reply_markup: { inline_keyboard: [[{ text: labelMap[next], callback_data: `advance:${next}:${orderId}` }]] },
-  });
+  if (order.fulfillment_type === 'pickup') {
+    if (currentStatus !== 'preparing') return;
+    await bot.sendMessage(chatId, `Заказ ${order.public_code}: когда будет готово, нажмите ниже.`, {
+      reply_markup: { inline_keyboard: [[{ text: 'Клиент забрал', callback_data: `advance:delivered:${orderId}` }]] },
+    });
+    return;
+  }
+  if (currentStatus === 'preparing') {
+    await bot.sendMessage(chatId, `Заказ ${order.public_code} готовится.\nКогда заказ будет готов, нажмите кнопку ниже.`, {
+      reply_markup: { inline_keyboard: [[{ text: 'Готово', callback_data: `advance:ready:${orderId}` }]] },
+    });
+  } else if (currentStatus === 'ready') {
+    await bot.sendMessage(chatId, `Заказ ${order.public_code} готов.\nОжидает курьера.`, {
+      reply_markup: { inline_keyboard: [[{ text: 'Передал курьеру', callback_data: `advance:courier:${orderId}` }]] },
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -412,7 +428,12 @@ async function handleCallbackQuery(bot, query) {
         await untrackOrderMessage(orderId);
       }
     } else if (action === 'advance') {
-      // advance:nextStatus:orderId (courier -> delivered, или preparing -> delivered напрямую для самовывоза)
+      // advance:nextStatus:orderId — Stage 33: 'ready' (preparing->ready,
+      // «Готово»), 'courier' (ready->courier, «Передал курьеру» — терминал
+      // для ресторана, см. ниже), или 'delivered' (preparing->delivered
+      // напрямую, ТОЛЬКО для самовывоза — delivery-заказы больше не могут
+      // дойти сюда с nextStatus='delivered', ADVANCE_MAP.delivery такого
+      // перехода не содержит, restaurantAdvance бросит).
       const nextStatus = parts[1];
       const orderId = Number(parts[2]);
       let updated;
@@ -429,11 +450,21 @@ async function handleCallbackQuery(bot, query) {
         await bot.answerCallbackQuery(query.id);
         return;
       }
-      const labels = updated.fulfillment_type === 'pickup'
-        ? { delivered: 'Клиент забрал' }
-        : { courier: 'Передал курьеру', delivered: 'Доставлен' };
-      await bot.editMessageText(`Статус обновлён: ${labels[nextStatus]}`, { chat_id: chatId, message_id: messageId });
-      if (nextStatus !== 'delivered') await sendProgressButton(bot, chatId, orderId, nextStatus);
+      if (nextStatus === 'delivered') {
+        // Только pickup — единственный оставшийся путь ресторана в 'delivered'
+        // (см. ADVANCE_MAP.pickup). Терминально, кнопок дальше нет.
+        await bot.editMessageText(`Заказ ${updated.public_code}: клиент забрал заказ.`, { chat_id: chatId, message_id: messageId });
+      } else if (nextStatus === 'ready') {
+        await bot.editMessageText(`Заказ ${updated.public_code}: отмечено «Готово».`, { chat_id: chatId, message_id: messageId });
+        await sendProgressButton(bot, chatId, orderId, 'ready');
+      } else if (nextStatus === 'courier') {
+        // Задание, раздел 3.2 — финальный текст ресторана по этому заказу:
+        // ни дальнейших кнопок, ни "Доставлен"/"Заказ доставлен" — с этого
+        // момента ответственность на курьере/клиенте, не на ресторане.
+        // editMessageText без reply_markup убирает прежние кнопки (тот же
+        // принцип, что и everywhere в этом файле, см. header-комментарий).
+        await bot.editMessageText(`Заказ ${updated.public_code} передан курьеру.`, { chat_id: chatId, message_id: messageId });
+      }
     } else if (action === 'pause' || action === 'close_menu') {
       // close_menu — та же длительность-панель, что и /pause, вызванная из
       // кнопки "Закрыть ресторан" панели статуса (раздел 1.3); pause:key —

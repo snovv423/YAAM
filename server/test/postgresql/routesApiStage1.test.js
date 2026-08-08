@@ -544,6 +544,62 @@ test('POST /api/orders/:code/rate — успешная оценка достав
 });
 
 // ---------------------------------------------------------------------------
+// Stage 33 — POST /api/orders/:code/confirm-receipt («Заказ получен»)
+// ---------------------------------------------------------------------------
+
+test('POST /api/orders/:code/confirm-receipt — courier -> delivered по валидному токену владельца', async () => {
+  const { body: created, payload } = await createOrderDirect();
+  const orderRow = (await db.query('SELECT id FROM orders WHERE public_code=$1', [created.order.public_code]))[0];
+  await db.execute(`UPDATE orders SET status='courier' WHERE id=$1`, [orderRow.id]);
+
+  const res = await fetch(`${mainBaseUrl}/api/orders/${created.order.public_code}/confirm-receipt`, {
+    method: 'POST', headers: auth(payload.orderAccessToken),
+  });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.status, 'delivered');
+});
+
+test('POST /api/orders/:code/confirm-receipt — без токена даёт 401', async () => {
+  const { body: created } = await createOrderDirect();
+  const orderRow = (await db.query('SELECT id FROM orders WHERE public_code=$1', [created.order.public_code]))[0];
+  await db.execute(`UPDATE orders SET status='courier' WHERE id=$1`, [orderRow.id]);
+
+  const res = await fetch(`${mainBaseUrl}/api/orders/${created.order.public_code}/confirm-receipt`, { method: 'POST' });
+  assert.equal(res.status, 401);
+});
+
+test('POST /api/orders/:code/confirm-receipt — заказ ещё не передан курьеру (preparing) даёт ошибку', async () => {
+  const { body: created, payload } = await createOrderDirect();
+  const orderRow = (await db.query('SELECT id FROM orders WHERE public_code=$1', [created.order.public_code]))[0];
+  await db.execute(`UPDATE orders SET status='preparing' WHERE id=$1`, [orderRow.id]);
+
+  const res = await fetch(`${mainBaseUrl}/api/orders/${created.order.public_code}/confirm-receipt`, {
+    method: 'POST', headers: auth(payload.orderAccessToken),
+  });
+  assert.equal(res.status, 400);
+  const body = await res.json();
+  assert.equal(body.error, 'заказ ещё не передан курьеру — подтвердить получение нельзя');
+});
+
+test('POST /api/orders/:code/confirm-receipt — повторный вызов на уже delivered идемпотентен (200, без ошибки)', async () => {
+  const { body: created, payload } = await createOrderDirect();
+  const orderRow = (await db.query('SELECT id FROM orders WHERE public_code=$1', [created.order.public_code]))[0];
+  await db.execute(`UPDATE orders SET status='courier' WHERE id=$1`, [orderRow.id]);
+
+  const first = await fetch(`${mainBaseUrl}/api/orders/${created.order.public_code}/confirm-receipt`, {
+    method: 'POST', headers: auth(payload.orderAccessToken),
+  });
+  assert.equal(first.status, 200);
+  const second = await fetch(`${mainBaseUrl}/api/orders/${created.order.public_code}/confirm-receipt`, {
+    method: 'POST', headers: auth(payload.orderAccessToken),
+  });
+  assert.equal(second.status, 200, 'повторный клик — идемпотентный успех, не ошибка');
+  const body = await second.json();
+  assert.equal(body.status, 'delivered');
+});
+
+// ---------------------------------------------------------------------------
 // Webhook — регистрация маршрута зависит от PAYMENT_PROVIDER (module-load-time gate)
 // ---------------------------------------------------------------------------
 

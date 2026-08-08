@@ -216,12 +216,13 @@ test('L7: повторный запуск ничего не применяет',
   const { db, migrator } = requireFresh();
   const first = await migrator.migrate({ logger: quiet });
   // Stage 25: аддитивная миграция 0006 расширяет счёт с 5 до 6 — сам факт
-  // "повторный запуск ничего не применяет" ниже это не меняет.
-  assert.equal(first.applied.length, 11);
+  // "повторный запуск ничего не применяет" ниже это не меняет. Stage 33
+  // добавила 0012 (было 11); Stage 33.1 — 0013.
+  assert.equal(first.applied.length, 13);
   const second = await migrator.migrate({ logger: quiet });
   assert.deepEqual(second.applied, []);
   const rows = await db.query('SELECT version FROM schema_migrations ORDER BY version');
-  assert.deepEqual(rows.map((r) => r.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+  assert.deepEqual(rows.map((r) => r.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
   await db.close();
 });
 
@@ -430,9 +431,9 @@ test('L13: конкурентный запуск применяет каждую
   const total = results.reduce((n, r) => n + r.applied.length, 0);
 
   const rows = await db.query('SELECT version, count(*)::int n FROM schema_migrations GROUP BY version ORDER BY version');
-  assert.deepEqual(rows.map((r) => r.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+  assert.deepEqual(rows.map((r) => r.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
   assert.ok(rows.every((r) => r.n === 1), 'каждая версия записана ровно один раз');
-  assert.equal(total, 11, 'суммарно применено ровно одиннадцать миграций (Stage 31 добавила 0010, 0011)');
+  assert.equal(total, 13, 'суммарно применено ровно тринадцать миграций (Stage 31 добавила 0010, 0011; Stage 33 — 0012; Stage 33.1 — 0013)');
   await db.close();
 });
 
@@ -440,13 +441,13 @@ test('L13: конкурентный запуск применяет каждую
 // 14-15. Пустая база и согласованность справочника
 // ===========================================================================
 
-test('L14: пустая база проходит строго 0001 -> 0002 -> ... -> 0010 -> 0011', async () => {
+test('L14: пустая база проходит строго 0001 -> 0002 -> ... -> 0012 -> 0013', async () => {
   await cluster.createDatabase('lg_empty');
   process.env.DATABASE_URL = cluster.connectionString('lg_empty');
   const { db, migrator } = requireFresh();
 
   const result = await migrator.migrate({ logger: quiet });
-  assert.deepEqual(result.applied.map((a) => a.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+  assert.deepEqual(result.applied.map((a) => a.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
   // На пустой базе НИЧЕГО не отмечается — всё выполняется.
   assert.ok(result.applied.every((a) => a.adopted === false));
 
@@ -516,7 +517,7 @@ test('L16: 0003 не содержит разрушающих операций и
 
   const { migrator } = requireFresh();
   const files = migrator.listMigrationFiles();
-  assert.deepEqual(files.map((f) => f.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+  assert.deepEqual(files.map((f) => f.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
   const m3 = files.find((f) => f.version === 3);
   assert.doesNotThrow(() => migrator.assertNotSilentlyDestructive(m3));
   // 0004 (Stage 19.1) — только расширение CHECK-списка аудита: ни одной

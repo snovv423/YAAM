@@ -175,6 +175,10 @@
       </div>
       <div class="demobar">
         <button class="pay" id="st-next" onclick="nextStatus()">Следующий статус →</button>
+        <!-- Stage 33 — показывается ТОЛЬКО пока order.status==='courier'
+             (см. pollOrderOnce() в app.js). Подтверждает физическое
+             получение заказа клиентом, courier -> delivered. -->
+        <div id="st-confirm-wrap" style="display:none"><button class="pay" id="st-confirm-btn" onclick="confirmOrderReceipt()">Заказ получен</button></div>
         <div id="st-final" style="display:none">
           <div class="final-wrap">
             <div id="st-rating-wrap"></div>

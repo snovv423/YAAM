@@ -132,6 +132,12 @@ const api = {
   rateOrder: (code, token, rating) => apiRequest(`/api/orders/${code}/rate`, {
     method: 'POST', headers: orderAccessHeaders(token), body: JSON.stringify({ rating }),
   }),
+  // Stage 33 — «Заказ получен»: подтверждение физического получения заказа
+  // клиентом (courier -> delivered). Тот же order access token, что и у
+  // cancel/rate выше, никакого нового способа авторизации.
+  confirmOrderReceipt: (code, token) => apiRequest(`/api/orders/${code}/confirm-receipt`, {
+    method: 'POST', headers: orderAccessHeaders(token),
+  }),
   devMarkPaid: (code, token) => apiRequest(`/api/orders/${code}/dev-confirm-payment`, {
     method: 'POST', headers: orderAccessHeaders(token),
   }),

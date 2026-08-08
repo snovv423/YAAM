@@ -341,6 +341,8 @@ async function main() {
       await orderService.markPaid(orderId, paymentId);
       await orderService.restaurantAccept(orderId);
       await orderService.restaurantAdvance(orderId, 'preparing', { estimatedMinutes: 30 });
+      // Stage 33 — новый обязательный шаг между preparing и courier.
+      await orderService.restaurantAdvance(orderId, 'ready');
       await orderService.restaurantAdvance(orderId, 'courier');
     }
   }
@@ -353,8 +355,11 @@ async function main() {
       await orderService.markPaid(orderId, paymentId);
       await orderService.restaurantAccept(orderId);
       await orderService.restaurantAdvance(orderId, 'preparing', { estimatedMinutes: 30 });
+      await orderService.restaurantAdvance(orderId, 'ready');
       await orderService.restaurantAdvance(orderId, 'courier');
-      await orderService.restaurantAdvance(orderId, 'delivered');
+      // Stage 33 — ресторан больше не доводит delivery-заказ до delivered
+      // сам; здесь это симулирует клиентское подтверждение получения.
+      await orderService.confirmReceiptByCustomer(orderId);
     }
   }
 
@@ -532,11 +537,16 @@ async function main() {
         await orderService.markPaid(orderIdForB, paymentIdB);
         await orderService.restaurantAccept(orderIdForB);
         await orderService.restaurantAdvance(orderIdForB, 'preparing', { estimatedMinutes: 20 });
+        await orderService.restaurantAdvance(orderIdForB, 'ready');
         await orderService.restaurantAdvance(orderIdForB, 'courier');
-        await orderService.restaurantAdvance(orderIdForB, 'delivered');
+        await orderService.confirmReceiptByCustomer(orderIdForB);
       }
+      // Stage 33.1 — earned_at (зафиксирован restaurantAdvance на ready->courier,
+      // ДО confirmReceiptByCustomer) тоже нужно сдвинуть на вчера — иначе
+      // заказ физически не попадёт в закрываемый ниже период (расчёт теперь
+      // ключуется на earned_at, не на status_updated_at).
       await db.execute(
-        `UPDATE orders SET status_updated_at = NOW() - INTERVAL '1 day' WHERE id = $1`,
+        `UPDATE orders SET status_updated_at = NOW() - INTERVAL '1 day', earned_at = NOW() - INTERVAL '1 day' WHERE id = $1`,
         [orderIdForB],
       );
       const periodB = await settlementService.createDraftSettlementPeriod({ periodFrom: todayStr(-1), periodTo: todayStr(-1) });

@@ -396,19 +396,36 @@ CREATE TABLE IF NOT EXISTS orders (
   comment TEXT NOT NULL DEFAULT '',
   items_total INTEGER NOT NULL,              -- сумма блюд, руб. Комиссия YAAM считается от неё.
   commission_amount INTEGER NOT NULL,        -- 7% на момент создания заказа (фиксируем, а не пересчитываем задним числом)
-  -- Ровно 10 допустимых значений — идентично CHECK в SQLite-версии.
+  -- Stage 33, миграция 0012: было 10 значений (идентично CHECK в
+  -- SQLite-версии), добавлено 11-е — 'ready' ("Заказ готов, ожидает
+  -- курьера") — сознательное расхождение ТОЛЬКО на PostgreSQL-стороне
+  -- (SQLite legacy-путь не трогаем, см. CLAUDE.md).
   status TEXT NOT NULL DEFAULT 'awaiting_payment'
     CHECK (status IN (
-      'awaiting_payment', 'awaiting_restaurant', 'accepted', 'preparing', 'courier',
+      'awaiting_payment', 'awaiting_restaurant', 'accepted', 'preparing', 'ready', 'courier',
       'delivered', 'payment_failed', 'declined', 'timed_out', 'cancelled'
     )),
   -- статусы: awaiting_payment -> paid(=awaiting_restaurant) -> accepted -> preparing
-  --          -> courier -> delivered
+  --          -> ready -> courier -> delivered
   --          | payment_failed | declined | timed_out | cancelled
+  -- 'ready' -> 'courier' переводит ТОЛЬКО ресторан (кнопка «Передал
+  -- курьеру»); 'courier' -> 'delivered' переводит ТОЛЬКО клиент (кнопка
+  -- «Заказ получен») либо серверный auto-complete — см. orderService.js
+  -- confirmReceiptByCustomer/autoCompleteCourierOrders.
   status_updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   rating INTEGER,                             -- 1..5, ставится один раз после delivered
-  estimated_ready_minutes INTEGER             -- ресторан выбирает в боте на шаге "Готовится" (см. bot/index.js)
+  estimated_ready_minutes INTEGER,             -- ресторан выбирает в боте на шаге "Готовится" (см. bot/index.js)
+  -- Stage 33, миграция 0012 — см. её комментарий: НЕ публичное поле,
+  -- только для HQ-наблюдаемости "клиент подтвердил / auto-timeout".
+  delivered_via TEXT
+    CHECK (delivered_via IS NULL OR delivered_via IN ('customer_confirmed', 'auto_timeout')),
+  -- Stage 33.1, миграция 0013 — момент, когда РЕСТОРАН завершил свою
+  -- операционную работу по заказу (delivery: ready->courier; pickup:
+  -- preparing->delivered) — единственный источник времени для финансовых
+  -- расчётов (services/hq/restaurantFinanceService.js), НЕ зависит от
+  -- клиентского confirm-receipt/auto-complete. См. миграцию 0013.
+  earned_at TIMESTAMPTZ
 );
 
 -- =========================================================================
@@ -1827,6 +1844,17 @@ CREATE INDEX IF NOT EXISTS ix_hq_events_occurred_at ON hq_events (occurred_at);
 -- обновлением страницы. Обнуляется при переходе в courier/delivered: готовка
 -- закончилась, таймер клиенту больше не показывается.
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS preparation_deadline TIMESTAMPTZ;
+
+-- Stage 33.1, миграция 0013 — момент, когда РЕСТОРАН завершил свою
+-- операционную работу по заказу (delivery: ready->courier; pickup:
+-- preparing->delivered), единственный источник времени для финансовых
+-- расчётов (services/hq/restaurantFinanceService.js). ALTER (не только
+-- инлайн-колонка в CREATE TABLE orders выше) — тем же принципом, что и
+-- preparation_deadline: schema.sql применяется не только к пустой базе, но
+-- и поверх УЖЕ существующей таблицы orders (upgrade-путь, см. тесты
+-- миграции Stage 9.5 -> 9.6) — CREATE TABLE IF NOT EXISTS в этом случае
+-- новую колонку не добавит, только явный ALTER это гарантирует.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS earned_at TIMESTAMPTZ;
 
 -- Название рабочей Telegram-группы ресторана (docs/HQ-PRODUCT-SPEC.md,
 -- раздел «Telegram-подключение»): владельцу в HQ показывается человеческое

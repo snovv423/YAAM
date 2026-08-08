@@ -11,8 +11,9 @@
 //     его формулы НЕ переопределяет — EARNED_ORDER_FILTER_SQL импортируется
 //     оттуда буквально тем же экспортированным константным SQL-фрагментом,
 //     не копируется параллельным текстом.
-//   - Период заработка — orders.status_updated_at (Stage 7, доказательство:
-//     restaurantFinanceService.js, раздел "Якорь времени"). Период возврата —
+//   - Период заработка — orders.earned_at (Stage 33.1, доказательство:
+//     restaurantFinanceService.js, раздел "Якорь времени"; было
+//     status_updated_at до Stage 33.1 — см. её отчёт). Период возврата —
 //     refunds.completed_at (Stage 7.1). Обе даты ЗДЕСЬ не переизобретаются.
 //   - Stage 6 payout readiness (services/hq/restaurantPayoutService.js) —
 //     переиспользуется как есть для snapshot готовности на момент закрытия.
@@ -96,12 +97,20 @@ async function getSettlementPeriodById(periodId) {
 // ПОЛНЫЙ список order_id для settlement_order_lines (задание, раздел 7,
 // вариант B) — но фильтр "что считается заработком" читается буквально из
 // EARNED_ORDER_FILTER_SQL (Stage 7), не переписывается заново.
+// STAGE33.1 — якорь диапазона earned_at, НЕ status_updated_at (см.
+// restaurantFinanceService.js, комментарий над pushRangeConditions):
+// status_updated_at заказа в 'delivered' теперь зависит от клиентского
+// клика/auto-complete, earned_at — нет, зафиксирован атомарно на
+// ready->courier (delivery) / preparing->delivered (pickup) и больше не
+// переписывается. AS status_updated_at ниже — совместимость имени поля
+// для остального кода этого файла (closeSettlementPeriod пишет его как
+// settlement_order_lines.delivered_at_snapshot); значение теперь earned_at.
 async function fetchEarnedOrderRows(range, client = null) {
   return db.query(
-    `SELECT o.id AS order_id, o.restaurant_id, o.items_total, o.commission_amount, o.status_updated_at
+    `SELECT o.id AS order_id, o.restaurant_id, o.items_total, o.commission_amount, o.earned_at AS status_updated_at
      FROM orders o
      WHERE ${financeService.EARNED_ORDER_FILTER_SQL}
-       AND o.status_updated_at >= $1 AND o.status_updated_at < $2
+       AND o.earned_at >= $1 AND o.earned_at < $2
      ORDER BY o.id`,
     [range.startUtc, range.endUtc],
     client,
@@ -275,10 +284,11 @@ async function computeSettlementPreview(range, client = null) {
 // молча выпадала бы из очереди. Правильная нижняя граница берётся из самих
 // данных — эта функция и есть её источник.
 //
-// Оба anchor'а те же, что и во всём расчёте: orders.status_updated_at для
-// заказов (Stage 7) и refunds.completed_at для возвратов (Stage 7.1).
-// date_trunc('week') в PostgreSQL даёт понедельник — ровно ту границу недели,
-// которой пользуется weeklySettlementService.
+// Оба anchor'а те же, что и во всём расчёте: orders.earned_at для заказов
+// (Stage 33.1 — было status_updated_at до неё, см. её отчёт) и
+// refunds.completed_at для возвратов (Stage 7.1). date_trunc('week') в
+// PostgreSQL даёт понедельник — ровно ту границу недели, которой пользуется
+// weeklySettlementService.
 //
 // Смещение времени проекта применяется до date_trunc: иначе воскресный вечер
 // по Москве попал бы в предыдущую неделю по UTC.
@@ -287,11 +297,11 @@ async function listWeeksWithFinancialActivity(client = null) {
     `WITH activity AS (
        SELECT date_trunc(
                 'week',
-                (o.status_updated_at AT TIME ZONE 'UTC') + make_interval(mins => $1)
+                (o.earned_at AT TIME ZONE 'UTC') + make_interval(mins => $1)
               )::date AS week_start
          FROM orders o
         WHERE ${financeService.EARNED_ORDER_FILTER_SQL}
-          AND o.status_updated_at IS NOT NULL
+          AND o.earned_at IS NOT NULL
        UNION
        SELECT date_trunc(
                 'week',

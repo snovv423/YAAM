@@ -139,6 +139,50 @@ function createOrderTimeoutScheduler({ intervalMs = DEFAULT_ORDER_TIMEOUT_INTERV
   };
 }
 
+// ---------------------------------------------------------------------------
+// Stage 33 — auto-complete забытых курьером заказов
+// ---------------------------------------------------------------------------
+//
+// Задание, раздел 7: если клиент забыл нажать «Заказ получен», заказ не
+// должен оставаться в 'courier' вечно. Интервал тика — как часто ПРОВЕРЯТЬ,
+// не как часто заказы реально закрываются (закрываются они через
+// COURIER_AUTO_COMPLETE_SEC = 6 часов, см. orderService.js) — 5 минут тот
+// же порядок, что и у paymentReconciliationScheduler, с большим запасом
+// относительно 6-часового окна.
+const DEFAULT_COURIER_AUTO_COMPLETE_INTERVAL_MS = 5 * 60 * 1000;
+
+function createCourierAutoCompleteScheduler({ intervalMs = DEFAULT_COURIER_AUTO_COMPLETE_INTERVAL_MS, onError } = {}) {
+  let timer = null;
+
+  async function tick() {
+    try {
+      await pgOrderService.autoCompleteCourierOrders();
+    } catch (err) {
+      if (onError) onError(err);
+      else console.error('[scheduler/postgresql] autoCompleteCourierOrders failed:', err.message);
+    }
+  }
+
+  return {
+    start() {
+      if (timer) return;
+      timer = setInterval(tick, intervalMs);
+      if (typeof timer.unref === 'function') timer.unref();
+    },
+    stop() {
+      if (!timer) return;
+      clearInterval(timer);
+      timer = null;
+    },
+    isRunning() {
+      return timer !== null;
+    },
+    async runOnce() {
+      await tick();
+    },
+  };
+}
+
 // options.limit — прокинут в sweepStuckRefunds({limit}) (bounded batch, см.
 // orderService.js) — конфигурируемо для тестов (маленький batch на
 // маленьком тестовом наборе строк не имеет значения, но параметр не должен
@@ -402,6 +446,8 @@ module.exports = {
   createPauseExpiryScheduler,
   DEFAULT_INTERVAL_MS,
   createOrderTimeoutScheduler,
+  createCourierAutoCompleteScheduler,
+  DEFAULT_COURIER_AUTO_COMPLETE_INTERVAL_MS,
   createRefundReconciliationScheduler,
   DEFAULT_ORDER_TIMEOUT_INTERVAL_MS,
   DEFAULT_REFUND_RECONCILIATION_INTERVAL_MS,

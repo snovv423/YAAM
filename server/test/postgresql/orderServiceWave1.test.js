@@ -550,10 +550,14 @@ function normalizeForParity(order) {
   // orderService.getOrder() структурно нет вовсе (вычисляется из
   // bot_notifications — persistent Telegram outbox, которого у SQLite-пути
   // не существует, см. bot/postgresql/index.js header-комментарий про
-  // намеренное расхождение PostgreSQL/SQLite после Stage 31).
+  // намеренное расхождение PostgreSQL/SQLite после Stage 31). delivered_via
+  // (Stage 33) и earned_at (Stage 33.1) — тот же принцип: только
+  // PostgreSQL, различает клиента/auto-complete и фиксирует финансовый
+  // момент соответственно, структурно недостижимо на SQLite (нет ни
+  // 'ready', ни confirmReceiptByCustomer/autoCompleteCourierOrders).
   const {
     id, restaurant_id, order_id, created_at, status_updated_at, public_code,
-    preparation_deadline, restaurant_response_deadline_at, ...rest
+    preparation_deadline, restaurant_response_deadline_at, delivered_via, earned_at, ...rest
   } = order;
   return {
     ...rest,

@@ -104,10 +104,14 @@ let counter = 0;
 async function order(db, restaurantId, { itemsTotal, commissionAmount, deliveredAt }) {
   counter += 1;
   const code = `YAAM-S27-${String(counter).padStart(4, '0')}`;
+  // Stage 33.1 — earned_at теперь единственный якорь финансового времени;
+  // эта фикстура всегда создаёт 'delivered' напрямую SQL, поэтому earned_at
+  // безусловно равен тому же deliveredAt, что и status_updated_at (тот же
+  // принцип, что и backfill в миграции 0013).
   const o = await db.execute(
     `INSERT INTO orders (public_code, restaurant_id, city, customer_name, customer_phone, address, comment,
-                         items_total, commission_amount, status, status_updated_at)
-     VALUES ($1,$2,'Грозный','Иса Тестов',$3,'ул. Тестовая, 5','',$4,$5,'delivered',$6) RETURNING id`,
+                         items_total, commission_amount, status, status_updated_at, earned_at)
+     VALUES ($1,$2,'Грозный','Иса Тестов',$3,'ул. Тестовая, 5','',$4,$5,'delivered',$6,$6) RETURNING id`,
     [code, restaurantId, `+7903${String(counter).padStart(7, '0')}`, itemsTotal, commissionAmount, deliveredAt],
   );
   await db.execute(`INSERT INTO payments (order_id, amount, status) VALUES ($1,$2,'succeeded')`, [o.rows[0].id, itemsTotal]);

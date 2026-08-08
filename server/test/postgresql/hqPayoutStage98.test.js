@@ -57,10 +57,14 @@ async function createOrderRow(db, { restaurantId, status, itemsTotal = 1000, com
   orderCounter += 1;
   const code = `YAAM-98${orderCounter}`;
   const phone = `+7905${String(orderCounter).padStart(7, '0')}`;
+  // Stage 33.1 — earned_at теперь единственный якорь финансового времени;
+  // фикстура пишет напрямую SQL, поэтому сама выставляет earned_at = NOW()
+  // ровно когда status='delivered' (тот же принцип, что и backfill в
+  // миграции 0013).
   const rows = await db.execute(
     `INSERT INTO orders
-       (public_code, restaurant_id, city, customer_name, customer_phone, address, items_total, commission_amount, status, status_updated_at)
-     VALUES ($1,$2,'Грозный','Тест',$3,'адрес',$4,$5,$6,NOW())
+       (public_code, restaurant_id, city, customer_name, customer_phone, address, items_total, commission_amount, status, status_updated_at, earned_at)
+     VALUES ($1,$2,'Грозный','Тест',$3,'адрес',$4,$5,$6,NOW(), CASE WHEN $6 = 'delivered' THEN NOW() ELSE NULL END)
      RETURNING id`,
     [code, restaurantId, phone, itemsTotal, commissionAmount, status],
   );
@@ -73,7 +77,7 @@ async function addSucceededPayment(db, orderId, amount) {
 
 async function closedPeriodWithEarnings(db, settlementService, restaurantId, { itemsTotal = 1000, commissionAmount = 70, dayOffset = 0 } = {}) {
   const orderId = await createOrderRow(db, { restaurantId, status: 'delivered', itemsTotal, commissionAmount });
-  if (dayOffset) await db.execute(`UPDATE orders SET status_updated_at = NOW() + $2 * INTERVAL '1 day' WHERE id = $1`, [orderId, dayOffset]);
+  if (dayOffset) await db.execute(`UPDATE orders SET status_updated_at = NOW() + $2 * INTERVAL '1 day', earned_at = NOW() + $2 * INTERVAL '1 day' WHERE id = $1`, [orderId, dayOffset]);
   await addSucceededPayment(db, orderId, itemsTotal);
   const period = await settlementService.createDraftSettlementPeriod({ periodFrom: todayStr(dayOffset), periodTo: todayStr(dayOffset) });
   await settlementService.closeSettlementPeriod(period.id);
@@ -298,10 +302,36 @@ test('Stage9.8 F3: миграционный backfill (Stage 9 -> 9.5, legacy fai
   const settlementService = require('../../services/hq/settlementService');
   try {
     const restaurantId = await createRestaurant(db, 'BackfillCheck98');
-    const orderId = await createOrderRow(db, { restaurantId, status: 'delivered', itemsTotal: 1000, commissionAmount: 70 });
+    // Stage 33.1 — как и Stage9.6 #3 (hqTBankReadinessStage96.test.js):
+    // OLD_STAGE9_SCHEMA_SQL — застывший снимок ДО earned_at (Stage 33.1,
+    // миграция 0013), а createOrderRow/settlementService.closeSettlementPeriod
+    // уже безусловно читают/пишут orders.earned_at. Тест проверяет ТОЛЬКО
+    // backfill попыток выплат при миграции — не корректность расчёта
+    // периода, поэтому period/order-line здесь собираются напрямую SQL.
+    const orderRows = await db.execute(
+      `INSERT INTO orders (public_code, restaurant_id, city, customer_name, customer_phone, address, items_total, commission_amount, status, status_updated_at)
+       VALUES ('YAAM-98BACKFILL',$1,'Грозный','Тест','+79080000000','адрес',1000,70,'delivered',NOW()) RETURNING id`,
+      [restaurantId],
+    );
+    const orderId = orderRows.rows[0].id;
     await addSucceededPayment(db, orderId, 1000);
-    const period = await settlementService.createDraftSettlementPeriod({ periodFrom: todayStr(), periodTo: todayStr() });
-    await settlementService.closeSettlementPeriod(period.id);
+    const periodRows = await db.execute(
+      `INSERT INTO settlement_periods (period_from, period_to, status, closed_at) VALUES ($1,$1,'closed',NOW()) RETURNING id`,
+      [todayStr()],
+    );
+    const period = { id: periodRows.rows[0].id };
+    await db.execute(
+      `INSERT INTO settlement_restaurant_lines
+         (settlement_period_id, restaurant_id, delivered_paid_orders, turnover, yaam_commission, restaurant_earnings, payable_amount, payout_readiness_snapshot)
+       VALUES ($1,$2,1,1000,70,930,930,'{}')`,
+      [period.id, restaurantId],
+    );
+    await db.execute(
+      `INSERT INTO settlement_order_lines
+         (settlement_period_id, restaurant_id, order_id, items_total_snapshot, commission_amount_snapshot, restaurant_amount_snapshot, delivered_at_snapshot)
+       VALUES ($1,$2,$3,1000,70,930,NOW())`,
+      [period.id, restaurantId, orderId],
+    );
     const payoutRows = await db.execute(
       `INSERT INTO restaurant_payouts (restaurant_id, settlement_period_id, amount, status, failed_at, failure_reason)
        VALUES ($1,$2,930,'failed',NOW(),'Провайдер отклонил перевод') RETURNING id`,

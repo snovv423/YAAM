@@ -23,6 +23,8 @@
 // POST /orders/:code/cancel, POST /orders/:code/retry-payment,
 // POST /orders/:code/rate, POST /webhooks/payment,
 // POST /orders/:code/dev-confirm-payment — все 9 маршрутов SQLite-оригинала,
+// плюс POST /orders/:code/confirm-receipt (Stage 33, «Заказ получен» —
+// SQLite-оригинал этого маршрута не имеет вообще, см. STAGE33 отчёт),
 // без исключений (см. PDF-отчёт Stage 1 за обоснованием retry-payment: он
 // стал переносим только благодаря добавленному в этой же задаче
 // ensureRetryAttemptReady()).
@@ -555,6 +557,21 @@ router.post('/orders/:code/retry-payment', orderMutationLimiter, requireOrderAcc
 router.post('/orders/:code/rate', orderMutationLimiter, requireOrderAccess, async (req, res) => {
   try {
     const updated = await orderService.rateOrder(req.order.id, Number(req.body.rating));
+    res.json(orderService.toPublicOrderDTO(updated));
+  } catch (err) {
+    res.status(errorStatus(err)).json({ error: err.message });
+  }
+});
+
+// Stage 33 — «Заказ получен»: единственный маршрут, которым КЛИЕНТ (не
+// ресторан) переводит courier -> delivered, тем же requireOrderAccess
+// (order_access_token), что и cancel/retry-payment/rate выше — никакого
+// нового способа авторизации. orderService.confirmReceiptByCustomer сама
+// идемпотентна (повторный/конкурентный вызов — тихий успех, см. её
+// комментарий), поэтому здесь нет отдельной обработки "уже подтверждено".
+router.post('/orders/:code/confirm-receipt', orderMutationLimiter, requireOrderAccess, async (req, res) => {
+  try {
+    const updated = await orderService.confirmReceiptByCustomer(req.order.id);
     res.json(orderService.toPublicOrderDTO(updated));
   } catch (err) {
     res.status(errorStatus(err)).json({ error: err.message });

@@ -364,10 +364,14 @@ function dotTap(){if(document.getElementById('orderdot').classList.contains('on'
 // (реальный бэкенд, из order.fulfillment_type) до первого renderStatus().
 const STEP_SETS={
   delivery:{
-    steps:['Принят','Готовится','В пути','Доставлен'],
-    icons:['order','preparing','delivery','check'],
-    anims:['iconpop .5s cubic-bezier(.3,1.4,.4,1), pulse-glow 2s ease-in-out .5s infinite','iconpop .5s cubic-bezier(.3,1.4,.4,1), cooking 1s ease-in-out .5s infinite','iconpop .5s cubic-bezier(.3,1.4,.4,1), riding .65s ease-in-out .5s infinite','delivered .65s cubic-bezier(.3,1.6,.4,1)'],
-    statusToStep:{accepted:0,preparing:1,courier:2,delivered:3},
+    // Stage 33 — вставлен новый шаг "Готов" между "Готовится" и "В пути":
+    // ресторан закончил готовить, но курьер ещё не забрал заказ. Иконка
+    // "clock" (та же, что и у ожидания ответа ресторана) — переиспользована,
+    // не заведена новая (см. правило "единым SVG-набором" в CLAUDE.md).
+    steps:['Принят','Готовится','Готов','В пути','Доставлен'],
+    icons:['order','preparing','clock','delivery','check'],
+    anims:['iconpop .5s cubic-bezier(.3,1.4,.4,1), pulse-glow 2s ease-in-out .5s infinite','iconpop .5s cubic-bezier(.3,1.4,.4,1), cooking 1s ease-in-out .5s infinite','iconpop .5s cubic-bezier(.3,1.4,.4,1), pulse-glow 2s ease-in-out .5s infinite','iconpop .5s cubic-bezier(.3,1.4,.4,1), riding .65s ease-in-out .5s infinite','delivered .65s cubic-bezier(.3,1.6,.4,1)'],
+    statusToStep:{accepted:0,preparing:1,ready:2,courier:3,delivered:4},
   },
   pickup:{
     steps:['Принят','Готовится','Готово'],
@@ -418,6 +422,31 @@ async function submitRating(n){
     setTimeout(renderRatingStars,350); // короткая пауза, чтобы увидеть подсветку звёзд перед "спасибо"
   }catch(err){
     showToast(err.message||'Не удалось сохранить оценку');
+  }
+}
+
+// Stage 33 — «Заказ получен»: courier -> delivered ТОЛЬКО по нажатию клиента
+// (или серверным auto-complete, если клиент забыл — см. STAGE33 отчёт).
+// "Заказ получен." — намеренно ТОЛЬКО toast (эфемерный, не сохраняется в
+// order-состоянии): после hard reload/на другом устройстве заказ обязан
+// показывать один и тот же нейтральный "Доставлен" независимо от того, кто
+// именно нажал кнопку — тот же принцип, что уже защищает автозакрытые
+// заказы от ложного "вы подтвердили получение" (задание, раздел 7).
+async function confirmOrderReceipt(){
+  const btn=document.getElementById('st-confirm-btn');
+  if(btn)btn.disabled=true;
+  try{
+    if(USE_API&&currentOrderCode)await api.confirmOrderReceipt(currentOrderCode,currentOrderAccessToken);
+    showToast('Заказ получен.');
+    // Немедленный ре-опрос вместо ожидания следующего тика POLL_INTERVAL_MS —
+    // тот же принцип мгновенной обратной связи, что и у submitRating() выше
+    // (рейтинг обновляется отдельным сохранением состояния, здесь источник
+    // истины — сам сервер, поэтому просто форсируем один внеочередной poll).
+    if(USE_API&&currentOrderCode)await pollOrderOnce();
+  }catch(err){
+    showToast(err.message||'Не удалось подтвердить получение заказа');
+  }finally{
+    if(btn)btn.disabled=false;
   }
 }
 
@@ -487,10 +516,18 @@ function renderStatus(){
   const{steps,icons,anims}=stepSet();
   document.getElementById('st-progress').innerHTML=steps.map((s,i)=>`<div class="pstep ${i<statusStep?'done':''} ${i===statusStep?'cur':''}"><div class="pline"></div><div class="pdot">${i<statusStep?'✓':i+1}</div><div class="plbl">${s}</div></div>`).join('');
   document.getElementById('st-state').textContent=steps[statusStep];
-  // время готовки от ресторана — на шаге «Готовится»
+  // Stage 33 — у delivery появился шаг "Готов" (индекс 2) между "Готовится"
+  // (1) и "В пути"/курьер (сдвинулся с 2 на 3). У pickup своего "ready" нет
+  // (там всего 3 шага), поэтому оба условия проверяют currentFulfillment.
+  const isReadyStep=currentFulfillment==='delivery'&&statusStep===2;
+  const isCourierStep=currentFulfillment==='delivery'&&statusStep===3;
+  // время готовки от ресторана — на шаге «Готовится»; статичные пояснения —
+  // на «Готов» (ждём курьера) и «В пути» (курьер уже забрал).
   const sub=document.getElementById('st-substate');
   if(sub){
     if(statusStep===1){renderPrepTimer();sub.style.display='block';}
+    else if(isReadyStep){stopPrepTimer();sub.textContent='Ожидаем курьера.';sub.style.display='block';}
+    else if(isCourierStep){stopPrepTimer();sub.textContent='Курьер забрал заказ из ресторана.';sub.style.display='block';}
     else{stopPrepTimer();sub.style.display='none';}
   }
   const ic=document.getElementById('st-icon');
@@ -502,7 +539,6 @@ function renderStatus(){
   const bgGreen='radial-gradient(880px circle at 8% -2%,#1B5639,transparent 54%),radial-gradient(680px circle at 98% 8%,#13674A,transparent 50%),linear-gradient(165deg,#0A2417,#08301E)';
   const bgAmber='radial-gradient(880px circle at 10% 0%,#7a4a12,transparent 54%),radial-gradient(680px circle at 95% 10%,#8a5410,transparent 50%),linear-gradient(165deg,#241405,#2e1a08)';
   // Янтарный фон — только на шаге "В пути" (курьер), которого у самовывоза нет вообще.
-  const isCourierStep=currentFulfillment==='delivery'&&statusStep===2;
   document.getElementById('statusbg').style.background=isCourierStep?bgAmber:bgGreen;
   const last=statusStep===steps.length-1;
   document.getElementById('st-next').style.display=last?'none':'block';
@@ -1740,7 +1776,7 @@ function stopOrderPolling(){clearInterval(orderPollTimer);orderPollTimer=null;}
 // список). Если когда-нибудь придёт что-то за его пределами (битые данные,
 // будущая рассинхронизация версий клиент/сервер), pollOrderOnce() не должен
 // молча ничего не делать — см. FALLBACK ниже.
-const KNOWN_ORDER_STATUSES=['awaiting_payment','awaiting_restaurant','accepted','preparing','courier','delivered','declined','timed_out','cancelled','payment_failed'];
+const KNOWN_ORDER_STATUSES=['awaiting_payment','awaiting_restaurant','accepted','preparing','ready','courier','delivered','declined','timed_out','cancelled','payment_failed'];
 let unknownOrderStatusNoticeShown=false; // не спамить тем же тостом каждые POLL_INTERVAL_MS, пока статус остаётся нераспознанным
 // order.refund_status (см. GET /api/orders/:code) — публичный, уже суженный
 // словарь: none | processing | done | failed. Внутренние состояния
@@ -1931,7 +1967,12 @@ async function pollOrderOnce(){
     document.getElementById('st-next').style.display='none'; // статус двигает ресторан по-настоящему, не демо-кнопка
     document.getElementById('st-demowrap').style.display='none';
     document.getElementById('st-cancel-wrap').style.display='none';
-    showOrderDot(true); // accepted/preparing/courier — renderStatus сам выключит на delivered
+    // Stage 33 — «Заказ получен» видна ТОЛЬКО пока курьер везёт заказ.
+    // Источник истины — серверный order.status на каждом poll-тике, не
+    // локальный statusStep (тот же принцип, что и у остальных wrap-блоков
+    // на этом экране) — переживает hard reload/другое устройство/restart.
+    document.getElementById('st-confirm-wrap').style.display=order.status==='courier'?'block':'none';
+    showOrderDot(true); // accepted/preparing/ready/courier — renderStatus сам выключит на delivered
     setShareButtonVisible(true);
     renderStatus();
     if(order.status==='delivered')stopOrderPolling();
@@ -2161,6 +2202,9 @@ function applySharedOrderToDom(order){
   document.getElementById('st-cancel-wrap').style.display='none';
   document.getElementById('st-pending-pay-wrap').style.display='none';
   document.getElementById('st-final').style.display='none';
+  // Stage 33 — «Заказ получен» тоже владельческое действие (требует
+  // orderAccessToken, не share-токена) — читатель чужой ссылки его не видит.
+  document.getElementById('st-confirm-wrap').style.display='none';
 }
 async function pollSharedOrderOnce(code,token){
   let order;

@@ -716,13 +716,16 @@ test('Concurrency 6: markPaid vs restaurantDecline — не возникает �
 
 function normalizeForParity(order) {
   if (!order) return null;
-  // restaurant_response_deadline_at (Stage 31.1, Issue 3) исключён — поле
-  // существует ТОЛЬКО на PostgreSQL-стороне (вычисляется из
-  // bot_notifications, которого у SQLite-пути нет структурно), тот же
-  // принцип, что уже применён к этому же исключению в orderServiceWave1.test.js.
+  // restaurant_response_deadline_at (Stage 31.1, Issue 3), delivered_via
+  // (Stage 33) и earned_at (Stage 33.1) исключены — все три поля существуют
+  // ТОЛЬКО на PostgreSQL-стороне (delivered_via/earned_at — миграции
+  // 0012/0013, структурно невозможны на SQLite, у которого нет ни
+  // 'ready'-статуса, ни confirmReceiptByCustomer/autoCompleteCourierOrders)
+  // — тот же принцип, что уже применён к этому же исключению в
+  // orderServiceWave1.test.js.
   const {
     id, restaurant_id, order_id, created_at, status_updated_at, public_code,
-    restaurant_response_deadline_at, ...rest
+    restaurant_response_deadline_at, delivered_via, earned_at, ...rest
   } = order;
   return {
     ...rest,

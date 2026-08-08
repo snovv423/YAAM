@@ -540,7 +540,12 @@ test('E: Обзор/Заказы/Оценки/Статистика показы�
       };
       const { order } = await orderService.createOrderAndResolve(payload);
       await db.execute("UPDATE payments SET status='succeeded' WHERE order_id=$1", [order.id]);
-      await db.execute("UPDATE orders SET status='delivered' WHERE id=$1", [order.id]);
+      // Stage 33.1 — earned_at теперь единственный якорь финансового
+      // времени; этот хелпер переводит заказ в 'delivered' напрямую SQL
+      // (в обход restaurantAdvance/confirmReceiptByCustomer), поэтому сам
+      // выставляет earned_at = NOW() (тот же принцип, что и backfill в
+      // миграции 0013) — иначе заказ не попадёт в финансовую статистику.
+      await db.execute("UPDATE orders SET status='delivered', earned_at=NOW() WHERE id=$1", [order.id]);
       await orderService.rateOrder(order.id, 4);
       return order;
     }

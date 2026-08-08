@@ -371,10 +371,13 @@ test('R1: правка данных YAAM после закрытия перио�
      VALUES ($1,'Д-С','2026-01-01','signed')`, [restId]);
 
   const msk = (y, m, d, hh) => new Date(Date.UTC(y, m - 1, d, hh) - 180 * 60 * 1000);
+  // Stage 33.1 — earned_at теперь единственный якорь финансового времени;
+  // прямой SQL-фикстуре нужно выставить его же значением, что и
+  // status_updated_at (тот же принцип, что и backfill в миграции 0013).
   await db.execute(
     `INSERT INTO orders (public_code, restaurant_id, city, customer_name, customer_phone, address, comment,
-                         items_total, commission_amount, status, status_updated_at)
-     VALUES ('YAAM-S1401',$1,'Грозный','Иса','+79010000001','ул. Тестовая, 1','',1000,70,'delivered',$2) RETURNING id`,
+                         items_total, commission_amount, status, status_updated_at, earned_at)
+     VALUES ('YAAM-S1401',$1,'Грозный','Иса','+79010000001','ул. Тестовая, 1','',1000,70,'delivered',$2,$2) RETURNING id`,
     [restId, msk(2026, 7, 29, 12)]);
   const orderId = (await db.query("SELECT id FROM orders WHERE public_code = 'YAAM-S1401'"))[0].id;
   await db.execute(`INSERT INTO payments (order_id, amount, status) VALUES ($1,1000,'succeeded')`, [orderId]);
@@ -461,10 +464,13 @@ async function seedPaidOrder(db, { itemsTotal = 1000, commission = 70 } = {}) {
     `INSERT INTO restaurant_legal_details (restaurant_id, legal_form, legal_name, inn, ogrn, legal_address, director_name, contact_phone)
      VALUES ($1,'ip','ИП Поставщик',$2,$3,'Адрес поставщика','П. П. П.','+79280000005')`,
     [restId, FICT.INN12, FICT.OGRNIP]);
+  // Stage 33.1 — earned_at теперь единственный якорь финансового времени;
+  // прямой SQL-фикстуре нужно выставить его же значением, что и
+  // status_updated_at (тот же принцип, что и backfill в миграции 0013).
   const o = await db.execute(
     `INSERT INTO orders (public_code, restaurant_id, city, customer_name, customer_phone, address, comment,
-                         items_total, commission_amount, status, status_updated_at)
-     VALUES ('YAAM-F' || floor(random()*100000)::text,$1,'Грозный','Иса Магомадов','+79011112233','ул. Секретная, 7, кв. 3','позвонить',$2,$3,'delivered',NOW()) RETURNING id`,
+                         items_total, commission_amount, status, status_updated_at, earned_at)
+     VALUES ('YAAM-F' || floor(random()*100000)::text,$1,'Грозный','Иса Магомадов','+79011112233','ул. Секретная, 7, кв. 3','позвонить',$2,$3,'delivered',NOW(),NOW()) RETURNING id`,
     [restId, itemsTotal, commission]);
   const orderId = o.rows[0].id;
   await db.execute(

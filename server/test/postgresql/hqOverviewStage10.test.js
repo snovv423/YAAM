@@ -175,10 +175,15 @@ async function createOrderRow(db, { restaurantId, status, itemsTotal = 1000, com
   orderCounter += 1;
   const code = `YAAM-T${orderCounter}`;
   const phone = `+7900${String(orderCounter).padStart(7, '0')}`;
+  // Stage 33.1 — earned_at теперь единственный якорь финансового времени;
+  // фикстура пишет напрямую SQL, поэтому сама выставляет earned_at =
+  // status_updated_at ровно когда status='delivered' (тот же принцип, что
+  // и backfill в миграции 0013).
   const rows = await db.execute(
     `INSERT INTO orders
-       (public_code, restaurant_id, city, customer_name, customer_phone, address, items_total, commission_amount, status, status_updated_at)
-     VALUES ($1,$2,'Грозный','Тест',$3,'адрес',$4,$5,$6,COALESCE($7, NOW()))
+       (public_code, restaurant_id, city, customer_name, customer_phone, address, items_total, commission_amount, status, status_updated_at, earned_at)
+     VALUES ($1,$2,'Грозный','Тест',$3,'адрес',$4,$5,$6,COALESCE($7, NOW()),
+       CASE WHEN $6 = 'delivered' THEN COALESCE($7, NOW()) ELSE NULL END)
      RETURNING id`,
     [code, restaurantId, phone, itemsTotal, commissionAmount, status, statusUpdatedAt],
   );

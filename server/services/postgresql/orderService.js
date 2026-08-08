@@ -239,14 +239,31 @@ const payments = require('../paymentService');
 // выше) — структурно независимый инстанс, те же имена событий/форма payload.
 const orderEvents = new EventEmitter();
 
-// Дословная копия ADVANCE_MAP из server/services/orderService.js — та же
-// таблица переходов, тот же исходный комментарий про самовывоз без courier.
-// У самовывоза нет курьера — ресторан переводит заказ сразу из "preparing" в
-// "delivered" (клиент забрал), шаг "courier" для pickup-заказов не существует.
+// Stage 33 — разделены "готовка закончилась" (ready) и "курьер физически
+// забрал заказ" (courier). Ресторан отвечает за заказ ТОЛЬКО до передачи
+// курьеру: 'courier' -> 'delivered' в этой таблице больше НЕ существует —
+// ресторан не может через Telegram отметить заказ доставленным (см.
+// confirmReceiptByCustomer/autoCompleteCourierOrders ниже — единственные
+// два пути в 'delivered' для delivery-заказов). У самовывоза курьера нет
+// вообще — ресторан по-прежнему переводит заказ сразу из "preparing" в
+// "delivered" (клиент физически у ресторана, это и есть момент передачи,
+// аналог "передал курьеру" для delivery) — это НЕ трогаем (см. STAGE33
+// отчёт: pickup сознательно вне области этого этапа, задание описывает
+// цепочку delivery-заказов).
 const ADVANCE_MAP = {
-  delivery: { accepted: 'preparing', preparing: 'courier', courier: 'delivered' },
+  delivery: { accepted: 'preparing', preparing: 'ready', ready: 'courier' },
   pickup: { accepted: 'preparing', preparing: 'delivered' },
 };
+
+// Задание, раздел 7 — именованная константа (не магическое число): если
+// клиент забыл нажать «Заказ получен», backend сам переводит courier ->
+// delivered через 6 часов после факта передачи курьеру (status_updated_at
+// в момент 'courier' — курьер никогда не возвращается в 'ready', и
+// единственная операция, которая после этого ещё трогает заказ до
+// delivered/auto-complete — ничего, см. ADVANCE_MAP выше, 'courier' не
+// является ничьим ключом). См. autoCompleteCourierOrders() ниже и
+// createCourierAutoCompleteScheduler в scheduler.js.
+const COURIER_AUTO_COMPLETE_SEC = 6 * 60 * 60; // 6 часов
 
 // РАНЬШЕ была дословной копией RESTAURANT_RESPONSE_WINDOW_SEC из SQLite
 // orderService.js (300с = 5 минут). Stage 31, раздел 4 — увеличено до 420с
@@ -1516,14 +1533,34 @@ async function restaurantAdvance(orderId, nextStatus, { estimatedMinutes } = {})
         client
       );
     }
-    // Готовка закончилась — таймер клиенту больше не показывается
-    // (спецификация: «исчезает, когда ресторан нажимает Передан курьеру»).
-    if (nextStatus === 'courier' || nextStatus === 'delivered') {
+    // Готовка закончилась — таймер клиенту больше не показывается. Stage 33:
+    // теперь это происходит на «Готово» (preparing -> ready), а не на
+    // «Передал курьеру» — ready уже недвусмысленно значит "готово, не
+    // готовится". 'courier'/'delivered' оставлены в условии как defensive
+    // no-op (preparation_deadline к этому моменту уже NULL с шага ready;
+    // 'delivered' здесь достижим только для pickup, где своего 'ready' нет).
+    if (nextStatus === 'ready' || nextStatus === 'courier' || nextStatus === 'delivered') {
       await db.execute('UPDATE orders SET preparation_deadline = NULL WHERE id = $1', [orderId], client);
     }
 
+    // Stage 33.1 — earned_at: момент, когда РЕСТОРАН физически завершил
+    // свою операционную работу по заказу — единственный источник времени
+    // для финансовых расчётов (services/hq/restaurantFinanceService.js),
+    // устанавливается АТОМАРНО ОДИН РАЗ, здесь же, тем же UPDATE, что двигает
+    // status. Ровно два целевых статуса это означают: 'courier' для delivery
+    // (ready->courier — курьер физически забрал) и 'delivered' для pickup
+    // (preparing->delivered — клиент физически забрал у ресторана, курьера
+    // у pickup нет вообще, см. ADVANCE_MAP.pickup выше). Ни при каких других
+    // nextStatus (preparing/ready/pickup нет 'courier' вообще) earned_at не
+    // трогается. confirmReceiptByCustomer/autoCompleteCourierOrders (ниже)
+    // earned_at НЕ устанавливают и не переписывают — к моменту их вызова
+    // (delivery, courier->delivered) значение уже зафиксировано здесь.
+    const setsEarnedAt = nextStatus === 'courier'
+      || (nextStatus === 'delivered' && current.fulfillment_type === 'pickup');
+
     const applied = await db.execute(
-      `UPDATE orders SET status = $1, status_updated_at = NOW() WHERE id = $2 AND status = $3`,
+      `UPDATE orders SET status = $1, status_updated_at = NOW()${setsEarnedAt ? ', earned_at = NOW()' : ''}
+       WHERE id = $2 AND status = $3`,
       [nextStatus, orderId, current.status],
       client
     );
@@ -1538,6 +1575,111 @@ async function restaurantAdvance(orderId, nextStatus, { estimatedMinutes } = {})
   // исключения, уже сигнал успешного перехода — отдельный boolean не нужен.
   orderEvents.emit('order:status', order);
   return order;
+}
+
+// ---------------------------------------------------------------------------
+// confirmReceiptByCustomer(orderId) — Stage 33
+// ---------------------------------------------------------------------------
+//
+// Единственный путь, которым КЛИЕНТ (не ресторан) переводит courier ->
+// delivered — подтверждение физического получения заказа. Ресторан НЕ имеет
+// доступа к этой функции (routes/postgresql/api.js вызывает её только из-под
+// requireOrderAccess — того же token-механизма, что cancel/rate; Telegram-бот
+// её нигде не импортирует).
+//
+// SQL-стратегия и race-защита — тот же паттерн, что уже доказан в
+// cancelByCustomer ниже (Stage 9 HIGH-фикс, "concurrent cancel HTTP 500"):
+// conditional UPDATE выполняется ПЕРВЫМ, без предварительного SELECT ради
+// проверки статуса (WHERE status='courier', константа). Если rowCount!==1 —
+// внутри ТОЙ ЖЕ транзакции повторно читаем состояние (READ COMMITTED даёт
+// свежий снимок на каждый оператор) и различаем:
+//   - fresh.status === 'delivered' -> идемпотентный успех (повторный клик
+//     того же клиента, ИЛИ конкурентный проигрыш параллельного запроса,
+//     ИЛИ auto-complete уже успел раньше) — задание, раздел 5.1: "двойной
+//     клик... не должен создавать вторую запись, должен вернуть текущий
+//     успешный результат", БЕЗ повторной эмиссии order:status (не changed).
+//   - fresh не существует -> throw «заказ не найден».
+//   - fresh.status — что-то ещё (awaiting_restaurant/preparing/ready/
+//     cancelled/declined/timed_out) -> throw — заказ ещё не передан
+//     курьеру либо уже терминален в другую сторону, подтверждать нечего
+//     (задание, раздел 5.1: полный список запрещённых исходных статусов).
+//
+// Stage 33.1 — earned_at НЕ трогается: к моменту courier->delivered
+// финансовый момент уже неизменяемо зафиксирован на ready->courier
+// (restaurantAdvance выше) — клиентский клик влияет только на UX/рейтинг,
+// не на то, когда ресторан заработал деньги (задание Stage 33.1, раздел 3).
+async function confirmReceiptByCustomer(orderId) {
+  let changed = false;
+  const order = await db.transaction(async (client) => {
+    const applied = await db.execute(
+      `UPDATE orders SET status = 'delivered', status_updated_at = NOW(), delivered_via = 'customer_confirmed'
+       WHERE id = $1 AND status = 'courier'`,
+      [orderId],
+      client
+    );
+    if (applied.rowCount === 1) {
+      changed = true;
+      return getOrder(orderId, client);
+    }
+
+    const fresh = await getOrder(orderId, client);
+    if (!fresh) throw new Error('заказ не найден');
+    if (fresh.status === 'delivered') return fresh; // идемпотентный повтор/проигранная гонка — тихий успех
+    throw new Error('заказ ещё не передан курьеру — подтвердить получение нельзя');
+  });
+  if (changed) orderEvents.emit('order:status', order);
+  return order;
+}
+
+// ---------------------------------------------------------------------------
+// autoCompleteCourierOrders() — Stage 33
+// ---------------------------------------------------------------------------
+//
+// Задание, раздел 7 — безопасность на случай, если клиент забыл нажать
+// «Заказ получен»: заказ не должен оставаться в 'courier' вечно. Тот же
+// периодический sweep-паттерн, что sweepTimeouts() (Wave 3, см. выше) —
+// каждый просроченный заказ в СВОЕЙ транзакции (падение на одном не должно
+// останавливать обработку остальных), сравнение возраста через
+// status_updated_at (момент ready->courier — единственный переход, ведущий
+// В 'courier', см. restaurantAdvance выше) средствами самой БД
+// (NOW() - interval), не JS Date-арифметикой. Это НЕ финансовый якорь —
+// финансовый расчёт (Stage 33.1) читает отдельное earned_at, которое уже
+// зафиксировано к этому моменту и здесь не трогается вообще.
+//
+// delivered_via='auto_timeout' — единственное отличие от
+// confirmReceiptByCustomer: наблюдаемо (HQ), но НЕ публично (toPublicOrderDTO
+// его не включает) и НЕ создаёт рейтинг — rateOrder() ничего не знает про
+// delivered_via, работает одинаково для обоих путей, по факту status='delivered'.
+// earned_at ЭТА функция тоже не трогает — тем же принципом, что и
+// confirmReceiptByCustomer выше (Stage 33.1): значение уже неизменяемо
+// зафиксировано на ready->courier, задолго до auto-complete.
+async function autoCompleteCourierOrders() {
+  const staleRows = await db.query(
+    `SELECT id FROM orders
+     WHERE status = 'courier' AND status_updated_at < NOW() - ($1 || ' seconds')::interval`,
+    [COURIER_AUTO_COMPLETE_SEC]
+  );
+  for (const row of staleRows) {
+    try {
+      let changed = false;
+      // eslint-disable-next-line no-await-in-loop
+      const order = await db.transaction(async (client) => {
+        const applied = await db.execute(
+          `UPDATE orders SET status = 'delivered', status_updated_at = NOW(), delivered_via = 'auto_timeout'
+           WHERE id = $1 AND status = 'courier'`,
+          [row.id],
+          client
+        );
+        changed = applied.rowCount === 1;
+        return changed ? getOrder(row.id, client) : null;
+      });
+      if (changed) orderEvents.emit('order:status', order);
+    } catch (err) {
+      // Тот же принцип, что sweepTimeouts — один сбойный заказ не должен
+      // останавливать обработку остальных строк в этом же тике.
+      console.error(`[services/postgresql/orderService] autoCompleteCourierOrders failed for order ${row.id}:`, err.message);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2356,7 +2498,7 @@ function toPublicOrderDTO(order) {
 // в pollOrderOnce()) — единственный источник истины для is_paid ниже, НЕ
 // технический payment_status/provider-код (те не входят в этот DTO вообще).
 const SHARED_ORDER_PAID_STATUSES = new Set([
-  'awaiting_restaurant', 'accepted', 'preparing', 'courier', 'delivered',
+  'awaiting_restaurant', 'accepted', 'preparing', 'ready', 'courier', 'delivered',
 ]);
 
 function toSharedOrderDTO(order) {
@@ -3221,6 +3363,9 @@ module.exports = {
   restaurantAccept,
   restaurantDecline,
   restaurantAdvance,
+  confirmReceiptByCustomer,
+  autoCompleteCourierOrders,
+  COURIER_AUTO_COMPLETE_SEC,
   cancelByCustomer,
   finalizeRefundSucceeded,
   applyConfirmedPaymentSuccess,

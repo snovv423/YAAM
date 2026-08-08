@@ -160,14 +160,24 @@ async function createRestaurant(db, name) {
 }
 
 let orderCounter = 0;
+// Stage 33.1 — earned_at теперь единственный якорь финансового времени
+// (см. restaurantFinanceService.js). Эта фикстура пишет заказ напрямую SQL
+// (в обход orderService.restaurantAdvance, которая в реальном приложении
+// устанавливает earned_at атомарно) — поэтому для status='delivered' она
+// сама выставляет earned_at = тот же момент, что и status_updated_at,
+// ровно тем же принципом, что и backfill в миграции 0013: для этого теста
+// НЕ delivery/pickup-путь важен, а сам факт "заказ доставлен" — earned_at
+// должен существовать, иначе заказ структурно не попадёт ни в один
+// финансовый диапазон (earned_at IS NULL никогда не проходит >=/< сравнение).
 async function createOrderRow(db, { restaurantId, status, itemsTotal = 1000, commissionAmount = 70, statusUpdatedAt = null, phone = null }) {
   orderCounter += 1;
   const code = `YAAM-T${orderCounter}`;
   const phoneValue = phone || `+7900${String(orderCounter).padStart(7, '0')}`;
   const rows = await db.execute(
     `INSERT INTO orders
-       (public_code, restaurant_id, city, customer_name, customer_phone, address, items_total, commission_amount, status, status_updated_at)
-     VALUES ($1,$2,'Грозный','Тест',$3,'адрес',$4,$5,$6,COALESCE($7, NOW()))
+       (public_code, restaurant_id, city, customer_name, customer_phone, address, items_total, commission_amount, status, status_updated_at, earned_at)
+     VALUES ($1,$2,'Грозный','Тест',$3,'адрес',$4,$5,$6,COALESCE($7, NOW()),
+       CASE WHEN $6 = 'delivered' THEN COALESCE($7, NOW()) ELSE NULL END)
      RETURNING id`,
     [code, restaurantId, phoneValue, itemsTotal, commissionAmount, status, statusUpdatedAt],
   );
@@ -217,7 +227,7 @@ test('A: оплаченный доставленный заказ учитыва
   }
 });
 
-test('B: оплаченный, но НЕ доставленный заказ не учитывается', async () => {
+test('B: оплаченный заказ БЕЗ earned_at (ещё не заработан рестораном) не учитывается', async () => {
   const databaseUrl = await freshDatabase('finance_paid_not_delivered');
   process.env.DATABASE_URL = databaseUrl;
   delete require.cache[require.resolve('../../db/postgresql')];
@@ -226,7 +236,14 @@ test('B: оплаченный, но НЕ доставленный заказ н�
   const financeService = require('../../services/hq/restaurantFinanceService');
   try {
     const restaurantId = await createRestaurant(db, 'B');
-    for (const status of ['awaiting_payment', 'awaiting_restaurant', 'accepted', 'preparing', 'courier']) {
+    // Stage 33.2 — 'courier' сознательно убран из этого списка: с новым
+    // gate'ом earned_at IS NOT NULL РЕАЛЬНЫЙ courier-заказ (после
+    // ready->courier через restaurantAdvance) уже финансово учтён — см.
+    // server/test/postgresql/financialEligibilityStage332.test.js, тест A.
+    // Здесь остаются только статусы, которые СТРУКТУРНО никогда не получают
+    // earned_at (createOrderRow создаёт их напрямую SQL, без реального
+    // restaurantAdvance-перехода — earned_at физически NULL).
+    for (const status of ['awaiting_payment', 'awaiting_restaurant', 'accepted', 'preparing']) {
       const orderId = await createOrderRow(db, { restaurantId, status });
       await addSucceededPayment(db, orderId, 1000);
     }
@@ -254,7 +271,9 @@ test('C: доставленный заказ БЕЗ succeeded-платежа н�
 
     const invariants = await financeService.checkFinancialInvariants();
     assert.equal(invariants.ok, false);
-    assert.ok(invariants.violations.some((v) => v.kind === 'delivered_without_succeeded_payment'));
+    // Stage 33.2 — переименовано в earned_without_succeeded_payment
+    // (courier добавлен к delivered, см. restaurantFinanceService.js).
+    assert.ok(invariants.violations.some((v) => v.kind === 'earned_without_succeeded_payment'));
   } finally {
     await db.close();
     delete process.env.DATABASE_URL;

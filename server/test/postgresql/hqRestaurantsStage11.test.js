@@ -184,11 +184,16 @@ async function createOrderRow(db, { restaurantId, status, itemsTotal = 1000, com
   orderCounter += 1;
   const code = `YAAM-R${orderCounter}`;
   const phone = `+7900${String(orderCounter).padStart(7, '0')}`;
+  // Stage 33.1 — earned_at теперь единственный якорь финансового времени;
+  // фикстура пишет напрямую SQL, поэтому сама выставляет earned_at =
+  // status_updated_at ровно когда status='delivered' (тот же принцип, что
+  // и backfill в миграции 0013).
   const rows = await db.execute(
     `INSERT INTO orders
        (public_code, restaurant_id, city, customer_name, customer_phone, address, comment,
-        items_total, commission_amount, status, status_updated_at)
-     VALUES ($1,$2,'Грозный','Тестовый Клиент',$3,'ул. Тестовая, 7','без лука',$4,$5,$6,COALESCE($7, NOW()))
+        items_total, commission_amount, status, status_updated_at, earned_at)
+     VALUES ($1,$2,'Грозный','Тестовый Клиент',$3,'ул. Тестовая, 7','без лука',$4,$5,$6,COALESCE($7, NOW()),
+       CASE WHEN $6 = 'delivered' THEN COALESCE($7, NOW()) ELSE NULL END)
      RETURNING id`,
     [code, restaurantId, phone, itemsTotal, commissionAmount, status, statusUpdatedAt],
   );
@@ -763,7 +768,7 @@ test('I: перерыв через Telegram создаёт события нач
 // ===========================================================================
 // J — таймер приготовления
 // ===========================================================================
-test('J: серверный дедлайн ставится один раз при «Готовится» и обнуляется при передаче курьеру', async () => {
+test('J: серверный дедлайн ставится один раз при «Готовится» и обнуляется на «Готово» (Stage 33 — раньше обнулялся на «Передал курьеру»)', async () => {
   const databaseUrl = await freshDatabase('stage11_prep_deadline');
   process.env.DATABASE_URL = databaseUrl;
   const { db, orderService } = requireFreshModules();
@@ -792,9 +797,17 @@ test('J: серверный дедлайн ставится один раз пр
     const again = (await db.query('SELECT preparation_deadline FROM orders WHERE id = $1', [order.id]))[0];
     assert.equal(again.preparation_deadline.toISOString(), row.preparation_deadline.toISOString());
 
+    // Stage 33 — таймер теперь исчезает на «Готово» (preparing -> ready), не
+    // на «Передал курьеру»: ready уже недвусмысленно значит "готовка
+    // закончена", раньше единственным сигналом этого была именно передача
+    // курьеру.
+    await orderService.restaurantAdvance(order.id, 'ready');
+    row = (await db.query('SELECT preparation_deadline FROM orders WHERE id = $1', [order.id]))[0];
+    assert.equal(row.preparation_deadline, null, 'после «Готово» таймер исчезает');
+
     await orderService.restaurantAdvance(order.id, 'courier');
     row = (await db.query('SELECT preparation_deadline FROM orders WHERE id = $1', [order.id]))[0];
-    assert.equal(row.preparation_deadline, null, 'после передачи курьеру таймер исчезает');
+    assert.equal(row.preparation_deadline, null, 'после передачи курьеру таймер по-прежнему отсутствует');
   } finally {
     await db.close();
     delete process.env.DATABASE_URL;

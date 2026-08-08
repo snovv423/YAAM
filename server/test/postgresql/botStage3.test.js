@@ -493,7 +493,7 @@ test('D2: Отказаться — заказ declined, деньги возвр�
   }
 });
 
-test('D3: полный delivery-цикл — accepted -> cook_time(preparing) -> advance(courier) -> advance(delivered)', async () => {
+test('D3 (Stage 33): полный delivery-цикл — accepted -> cook_time(preparing) -> advance(ready,«Готово») -> advance(courier,«Передал курьеру»); ресторан больше НЕ может дойти до delivered', async () => {
   const fakeBot = new FakeTelegramBot();
   const handlers = botModule.createBotHandlers(fakeBot);
   try {
@@ -504,22 +504,46 @@ test('D3: полный delivery-цикл — accepted -> cook_time(preparing) ->
     assert.equal(rows[0].status, 'preparing');
     assert.equal(rows[0].estimated_ready_minutes, 30);
 
-    await fakeBot.triggerCallbackQuery({ id: 'c', data: `advance:courier:${order.id}`, chatId: sent.chatId, messageId: sent.messageId });
+    // Сразу после cook_time ресторан видит кнопку «Готово» (preparing), не
+    // «Передал курьеру» — задание, раздел 3: пока готовится, единственное
+    // действие ресторана — отметить готовность.
+    const readyPrompt = fakeBot.sentMessages[fakeBot.sentMessages.length - 1];
+    assert.match(readyPrompt.text, /готовится/);
+    assert.equal(readyPrompt.opts.reply_markup.inline_keyboard[0][0].text, 'Готово');
+    assert.equal(readyPrompt.opts.reply_markup.inline_keyboard[0][0].callback_data, `advance:ready:${order.id}`);
+
+    await fakeBot.triggerCallbackQuery({ id: 'c', data: `advance:ready:${order.id}`, chatId: sent.chatId, messageId: sent.messageId });
+    rows = await db.query('SELECT status FROM orders WHERE id = $1', [order.id]);
+    assert.equal(rows[0].status, 'ready');
+
+    // После «Готово» — новое сообщение "готов, ожидает курьера" с ЕДИНСТВЕННОЙ
+    // кнопкой «Передал курьеру» (раздел 3.1 — не отдельная "Ожидает курьера").
+    const courierPrompt = fakeBot.sentMessages[fakeBot.sentMessages.length - 1];
+    assert.match(courierPrompt.text, /готов/i);
+    assert.match(courierPrompt.text, /Ожидает курьера/);
+    assert.equal(courierPrompt.opts.reply_markup.inline_keyboard[0][0].text, 'Передал курьеру');
+    assert.equal(courierPrompt.opts.reply_markup.inline_keyboard[0][0].callback_data, `advance:courier:${order.id}`);
+
+    await fakeBot.triggerCallbackQuery({ id: 'd', data: `advance:courier:${order.id}`, chatId: sent.chatId, messageId: sent.messageId });
     rows = await db.query('SELECT status FROM orders WHERE id = $1', [order.id]);
     assert.equal(rows[0].status, 'courier');
 
-    await fakeBot.triggerCallbackQuery({ id: 'd', data: `advance:delivered:${order.id}`, chatId: sent.chatId, messageId: sent.messageId });
-    rows = await db.query('SELECT status FROM orders WHERE id = $1', [order.id]);
-    assert.equal(rows[0].status, 'delivered');
-
+    // Раздел 3.2 — финальный текст ресторана, БЕЗ кнопок, БЕЗ "Доставлен";
+    // ресторан не может дойти до delivered — advance:delivered из courier
+    // структурно недопустим (ADVANCE_MAP.delivery не содержит courier как ключ).
     const lastEdit = fakeBot.editedMessages[fakeBot.editedMessages.length - 1];
-    assert.equal(lastEdit.text, 'Статус обновлён: Доставлен');
+    assert.equal(lastEdit.text, `Заказ ${order.public_code} передан курьеру.`);
+    assert.equal(lastEdit.opts.reply_markup, undefined, 'финальное сообщение не должно содержать кнопок');
+
+    await assert.rejects(() => pgOrderService.restaurantAdvance(order.id, 'delivered'));
+    rows = await db.query('SELECT status FROM orders WHERE id = $1', [order.id]);
+    assert.equal(rows[0].status, 'courier', 'ресторан не может довести заказ до delivered ни при каких условиях');
   } finally {
     handlers.stop();
   }
 });
 
-test('D4: pickup-цикл — accepted -> cook_time(preparing) -> advance(delivered), без courier', async () => {
+test('D4: pickup-цикл — accepted -> cook_time(preparing) -> advance(delivered), без courier/ready (не затронуто Stage 33)', async () => {
   const fakeBot = new FakeTelegramBot();
   const handlers = botModule.createBotHandlers(fakeBot);
   try {
@@ -531,7 +555,7 @@ test('D4: pickup-цикл — accepted -> cook_time(preparing) -> advance(delive
     const rows = await db.query('SELECT status FROM orders WHERE id = $1', [order.id]);
     assert.equal(rows[0].status, 'delivered');
     const lastEdit = fakeBot.editedMessages[fakeBot.editedMessages.length - 1];
-    assert.equal(lastEdit.text, 'Статус обновлён: Клиент забрал');
+    assert.equal(lastEdit.text, `Заказ ${order.public_code}: клиент забрал заказ.`);
   } finally {
     handlers.stop();
   }
@@ -940,6 +964,7 @@ test('F8: двойной клик advance (Передал курьеру два�
     const { order, sent } = await notifyAndGetAcceptDeclineData(fakeBot, handlers, { fulfillmentType: 'delivery' });
     await fakeBot.triggerCallbackQuery({ id: 'a', data: `accept:${order.id}`, chatId: sent.chatId, messageId: sent.messageId });
     await fakeBot.triggerCallbackQuery({ id: 'b', data: `cook_time:${order.id}:30`, chatId: sent.chatId, messageId: sent.messageId });
+    await fakeBot.triggerCallbackQuery({ id: 'b2', data: `advance:ready:${order.id}`, chatId: sent.chatId, messageId: sent.messageId });
     await fakeBot.triggerCallbackQuery({ id: 'c', data: `advance:courier:${order.id}`, chatId: sent.chatId, messageId: sent.messageId });
     const editsAfterFirstAdvance = fakeBot.editedMessages.length;
 

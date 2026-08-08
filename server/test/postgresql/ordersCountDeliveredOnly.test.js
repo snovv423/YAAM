@@ -112,9 +112,14 @@ async function createOrderUpTo(status) {
   if (status === 'accepted') return order;
   await orderService.restaurantAdvance(order.id, 'preparing');
   if (status === 'preparing') return order;
+  // Stage 33 — новый обязательный шаг между preparing и courier.
+  await orderService.restaurantAdvance(order.id, 'ready');
+  if (status === 'ready') return order;
   await orderService.restaurantAdvance(order.id, 'courier');
   if (status === 'courier') return order;
-  await orderService.restaurantAdvance(order.id, 'delivered');
+  // Stage 33 — ресторан больше не может довести delivery-заказ до delivered
+  // (courier->delivered убран из ADVANCE_MAP) — только клиент/auto-complete.
+  await orderService.confirmReceiptByCustomer(order.id);
   return order;
 }
 
@@ -133,6 +138,12 @@ test('принятый рестораном заказ (accepted) не увел�
 test('заказ в статусе preparing не увеличивает публичный счётчик', async () => {
   const before1 = await fetchOrdersCount();
   await createOrderUpTo('preparing');
+  assert.equal(await fetchOrdersCount(), before1);
+});
+
+test('заказ в статусе ready не увеличивает публичный счётчик (Stage 33)', async () => {
+  const before1 = await fetchOrdersCount();
+  await createOrderUpTo('ready');
   assert.equal(await fetchOrdersCount(), before1);
 });
 

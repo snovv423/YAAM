@@ -173,10 +173,14 @@ async function createRestaurant(db, name) {
 let orderCounter = 0;
 async function createEarnedOrder(db, restaurantId, { itemsTotal = 1000, commissionAmount = 70 } = {}) {
   orderCounter += 1;
+  // Stage 33.1 — earned_at теперь единственный якорь финансового времени;
+  // эта фикстура всегда создаёт 'delivered' напрямую SQL (status_updated_at
+  // берёт DEFAULT NOW() схемы), поэтому earned_at выставляется явно тем же
+  // NOW() (тот же принцип, что и backfill в миграции 0013).
   const rows = await db.execute(
     `INSERT INTO orders (public_code, restaurant_id, city, customer_name, customer_phone, address,
-                         items_total, commission_amount, status)
-     VALUES ($1,$2,'Грозный','Клиент',$3,'ул. Тестовая',$4,$5,'delivered') RETURNING id`,
+                         items_total, commission_amount, status, earned_at)
+     VALUES ($1,$2,'Грозный','Клиент',$3,'ул. Тестовая',$4,$5,'delivered',NOW()) RETURNING id`,
     [`YAAM-F${orderCounter}`, restaurantId, `+7900${String(orderCounter).padStart(7, '0')}`, itemsTotal, commissionAmount],
   );
   await db.execute(`INSERT INTO payments (order_id, amount, status) VALUES ($1,$2,'succeeded')`, [rows.rows[0].id, itemsTotal]);

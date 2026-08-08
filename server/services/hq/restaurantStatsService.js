@@ -11,7 +11,7 @@ const { todayRangeUtc, PROJECT_TIMEZONE_OFFSET_MINUTES } = require('./dashboardM
 const { ValidationError, ACTIVE_STATUSES, PAGE_SIZE, parsePage } = require('./restaurantAdminService');
 
 const VALID_ORDER_STATUSES = [
-  'awaiting_payment', 'awaiting_restaurant', 'accepted', 'preparing', 'courier',
+  'awaiting_payment', 'awaiting_restaurant', 'accepted', 'preparing', 'ready', 'courier',
   'delivered', 'payment_failed', 'declined', 'timed_out', 'cancelled',
 ];
 

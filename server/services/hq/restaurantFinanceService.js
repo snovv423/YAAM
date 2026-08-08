@@ -39,32 +39,62 @@ const payoutService = require('./restaurantPayoutService');
 // Какие заказы считаются "заработанными" (задание, раздел 4)
 // ---------------------------------------------------------------------------
 //
-// status = 'delivered' — единственный статус, означающий, что ресторан
-//   выполнил заказ целиком (не awaiting_payment/payment_failed/cancelled/
-//   declined/timed_out — ни одно из НЕ придумано, все взяты из
-//   реального CHECK orders.status в db/postgresql/schema.sql).
+// STAGE33.2 — earned_at IS NOT NULL, НЕ status = 'delivered' (задание Stage
+// 33.2, разделы 1-4). Stage 33.1 добавила orders.earned_at как отдельный
+// неизменяемый финансовый якорь, но ОСТАВИЛА status='delivered' обязательным
+// булевым условием "заказ вообще заработан" — и этим НЕЗАМЕТНО сохранила
+// прежнюю зависимость: delivery-заказ сразу после ready->courier УЖЕ имеет
+// earned_at (ресторан физически закончил свою часть), но ещё НЕ status=
+// 'delivered' (тот наступает только после customer confirm/auto-complete) —
+// значит он всё ещё НЕ попадал ни в live-финансы, ни в settlement preview,
+// ни в закрываемый период, пока клиент не нажмёт кнопку или не истекут 6
+// часов. Кнопка клиента по-прежнему управляла ELIGIBILITY заказа для
+// расчёта, даже перестав управлять его ВРЕМЕННЫМ ЯКОРЕМ (Stage 33.1
+// закрыла только половину проблемы) — это и есть найденное противоречие
+// Stage 33.2.
+//
+// Решение: earned_at IS NOT NULL — сам по себе достаточный и корректный
+// gate, без status='delivered' вообще. earned_at устанавливается АТОМАРНО
+// ОДИН РАЗ, в restaurantAdvance(), РОВНО в момент, когда ресторан физически
+// завершил свою операционную работу:
+//   - delivery: ready -> courier (restaurantAdvance, «Передал курьеру»);
+//   - pickup:   preparing -> delivered (restaurantAdvance, «Клиент забрал»).
+// НИ confirmReceiptByCustomer(), НИ autoCompleteCourierOrders() earned_at не
+// трогают (проверено тестами Stage 33.1/33.2) — значит уже с момента
+// ready->courier заказ финансово eligible, и дальнейший courier->delivered
+// (клиентом или auto-complete) эту eligibility никак не меняет.
+//
+// Почему НЕ нужен дополнительный status-guard поверх earned_at IS NOT NULL:
+// earned_at устанавливается ИСКЛЮЧИТЕЛЬНО в двух точках ADVANCE_MAP
+// (services/postgresql/orderService.js) — 'courier' (delivery) и 'delivered'
+// (pickup). После входа в 'courier' заказ СТРУКТУРНО не может попасть ни в
+// один другой статус, кроме 'delivered' (courier не встречается как ключ ни
+// в одном допустимом переходе cancelByCustomer/restaurantDecline/
+// sweepTimeouts — эти функции принимают только awaiting_payment/
+// awaiting_restaurant, см. их собственные гварды) — значит "earned_at IS NOT
+// NULL" структурно эквивалентно "status IN ('courier', 'delivered')", без
+// need отдельно перечислять статусы и без риска снова завязаться на
+// status='delivered'.
+//
 // EXISTS succeeded payment — defense-in-depth поверх state machine
-//   (структурно оплата должна предшествовать 'delivered', но эта проверка
-//   не полагается только на это допущение молча — тот же принцип, что уже
-//   применён в orderService.rateOrder(), см. его комментарий "Явная
-//   перепроверка оплаты... defense-in-depth поверх state machine").
+//   (оплата структурно предшествует earned_at, но проверка не полагается
+//   только на это допущение молча — тот же принцип, что уже применён в
+//   orderService.rateOrder()).
 // NOT EXISTS succeeded refund — задание, раздел 4/10: "не имеет успешного
 //   полного возврата". Возвраты в этой схеме ТОЛЬКО полные (DB-триггер
-//   fn_refunds_amount_matches_payment, "full-refund-only for MVP") — частные
-//   возвраты не проектируются, потому что их не существует.
+//   fn_refunds_amount_matches_payment, "full-refund-only for MVP").
 //
-// НАЙДЕННЫЙ ФАКТ (см. отчёт Stage 7, раздел 2): reserveRefundRow()
-// (services/postgresql/orderService.js) вызывается ТОЛЬКО с причинами
-// customer_cancel/restaurant_decline/timeout — ни один из этих путей не
-// проходит через 'delivered'. Комбинация "delivered И succeeded refund"
-// СТРУКТУРНО НЕДОСТИЖИМА через сегодняшний жизненный цикл заказа. Условие
-// ниже тем не менее защищает от неё — на случай будущего изменения бизнес-
-// правил (пост-доставочные споры/возвраты) эта строка сразу же и корректно
-// перестанет считаться заработком, без изменений в этом файле. Проверено
-// тестом, который создаёт такое состояние напрямую через SQL (см.
-// server/test/postgresql/hqRestaurantFinanceStage7.test.js).
+// НАЙДЕННЫЙ ФАКТ (Stage 7, раздел 2, актуален и после Stage 33.2):
+// reserveRefundRow() (services/postgresql/orderService.js) вызывается ТОЛЬКО
+// с причинами customer_cancel/restaurant_decline/timeout — ни один из этих
+// путей не достижим ПОСЛЕ того, как earned_at уже установлен (courier
+// нельзя отменить — см. выше). Условие ниже тем не менее защищает от этой
+// комбинации на случай будущего изменения бизнес-правил (пост-доставочные
+// споры/возвраты). Проверено тестом (см.
+// server/test/postgresql/hqRestaurantFinanceStage7.test.js и
+// server/test/postgresql/financialEligibilityStage332.test.js).
 const EARNED_ORDER_FILTER_SQL = `
-  o.status = 'delivered'
+  o.earned_at IS NOT NULL
   AND EXISTS (SELECT 1 FROM payments p WHERE p.order_id = o.id AND p.status = 'succeeded')
   AND NOT EXISTS (
     SELECT 1 FROM payments p2
@@ -74,21 +104,20 @@ const EARNED_ORDER_FILTER_SQL = `
 `;
 
 // ---------------------------------------------------------------------------
-// Якорь времени (задание, раздел 6): status_updated_at, НЕ created_at.
+// Якорь времени (Stage 33.1): earned_at, НЕ status_updated_at, НЕ created_at.
 // ---------------------------------------------------------------------------
 //
-// orders не хранит отдельный delivered_at (найденный пробел схемы — прямо
-// зафиксирован, не подменён молча). Но status_updated_at ДОСТОВЕРНО
-// отражает момент, когда заказ стал 'delivered': restaurantAdvance()
-// (services/postgresql/orderService.js) устанавливает status_updated_at =
-// NOW() АТОМАРНО с каждым переходом статуса, включая финальный переход в
-// 'delivered'; 'delivered' — терминальное состояние (не встречается как ключ
-// в ADVANCE_MAP, то есть не бывает переходов ИЗ него), и единственная
-// операция, которая после этого ещё может тронуть строку заказа —
-// rateOrder() — обновляет только колонку rating, НЕ status_updated_at.
-// Значит, для delivered-заказа status_updated_at равен моменту доставки и
-// никогда не переписывается позже. Использование этого поля как якоря
-// финансового периода — осознанное решение, не совпадение имени колонки.
+// До Stage 33.1 использовался status_updated_at заказа в статусе 'delivered'
+// — это было корректно ДО Stage 33 (тогда 'delivered' был единственным,
+// сугубо ресторанным действием), но перестало быть корректным, когда Stage 33
+// отдала переход courier->delivered клиенту/auto-complete. earned_at решает
+// это: устанавливается ОДИН РАЗ, в restaurantAdvance(), атомарно с тем же
+// UPDATE, что двигает статус на 'courier' (delivery) или 'delivered'
+// (pickup) — см. services/postgresql/orderService.js. После этого момента
+// НИ ОДИН код-путь earned_at не переписывает (confirmReceiptByCustomer/
+// autoCompleteCourierOrders/rateOrder её не касаются) — значение застывает
+// раз и навсегда, тем же принципом, что уже применён к status_updated_at до
+// Stage 33.1, только теперь корректно для обеих ветвей делегирования.
 
 // Добавляет (если range задан) РОВНО ДВА самостоятельных условия в conditions
 // — не строку с собственным ведущим "AND" (та версия этой функции ошибочно
@@ -99,9 +128,9 @@ const EARNED_ORDER_FILTER_SQL = `
 function pushRangeConditions(conditions, params, range) {
   if (!range) return;
   params.push(range.startUtc);
-  conditions.push(`o.status_updated_at >= $${params.length}`);
+  conditions.push(`o.earned_at >= $${params.length}`);
   params.push(range.endUtc);
-  conditions.push(`o.status_updated_at < $${params.length}`);
+  conditions.push(`o.earned_at < $${params.length}`);
 }
 
 // YAAM HQ Stage 7.1 — anchor времени возврата (задание, раздел 4):
@@ -322,17 +351,22 @@ function summarizeOverall(positions) {
 async function checkFinancialInvariants() {
   const violations = [];
 
-  // 1. "заказ доставлен, но финансово не учтён" — delivered без ни одного
-  //    succeeded-платежа вообще НЕ должен существовать структурно
-  //    (state machine это гарантирует), но проверяем реальные данные, не
-  //    только код.
+  // 1. "заказ физически заработан, но финансово не учтён" — courier/delivered
+  //    без ни одного succeeded-платежа вообще НЕ должен существовать
+  //    структурно (state machine это гарантирует — accepted, а значит и
+  //    courier/delivered, достижимы только из awaiting_restaurant, куда
+  //    заказ попадает исключительно через markPaid()), но проверяем реальные
+  //    данные, не только код. Stage 33.2 — courier добавлен к delivered:
+  //    с earned_at IS NOT NULL как gate'ом заказ в 'courier' уже финансово
+  //    учтён (см. EARNED_ORDER_FILTER_SQL выше), поэтому и он обязан иметь
+  //    succeeded-платёж.
   const [missingPaymentRow] = await db.query(`
     SELECT COUNT(*)::int AS c FROM orders o
-    WHERE o.status = 'delivered'
+    WHERE o.status IN ('courier', 'delivered')
       AND NOT EXISTS (SELECT 1 FROM payments p WHERE p.order_id = o.id AND p.status = 'succeeded')
   `);
   if (missingPaymentRow.c > 0) {
-    violations.push({ kind: 'delivered_without_succeeded_payment', count: missingPaymentRow.c });
+    violations.push({ kind: 'earned_without_succeeded_payment', count: missingPaymentRow.c });
   }
 
   // 2. "один заказ учтён дважды" — с агрегатным подходом невозможно на
@@ -379,6 +413,25 @@ async function checkFinancialInvariants() {
   `);
   if (negativeRows.length > 0) {
     violations.push({ kind: 'negative_restaurant_earnings', count: negativeRows.length, restaurantIds: negativeRows.map((r) => r.restaurant_id) });
+  }
+
+  // 5. STAGE33.2 — с переходом gate'а на earned_at IS NOT NULL, проверка
+  //    "заработанный заказ без earned_at" стала тавтологией (сам фильтр уже
+  //    требует earned_at IS NOT NULL — count всегда 0). Осмысленная
+  //    инвертированная проверка: заказ, СТРУКТУРНО обязанный иметь earned_at
+  //    (courier или delivered — единственные статусы, достижимые ПОСЛЕ
+  //    restaurantAdvance-перехода, который его устанавливает, см. комментарий
+  //    над EARNED_ORDER_FILTER_SQL), но earned_at всё же NULL — это и есть
+  //    реальный сигнал "ручная правка БД в обход сервисного слоя сломала
+  //    финансовый якорь", ровно тот случай, ради которого нужен defense-in-
+  //    depth (счёт по коду гарантирует обратное, но данные проверяем всё
+  //    равно).
+  const [missingEarnedAtRow] = await db.query(`
+    SELECT COUNT(*)::int AS c FROM orders o
+    WHERE o.status IN ('courier', 'delivered') AND o.earned_at IS NULL
+  `);
+  if (missingEarnedAtRow.c > 0) {
+    violations.push({ kind: 'courier_or_delivered_without_earned_at', count: missingEarnedAtRow.c });
   }
 
   return { ok: violations.length === 0, violations };
