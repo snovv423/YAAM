@@ -85,14 +85,32 @@ const payoutService = require('./restaurantPayoutService');
 //   fn_refunds_amount_matches_payment, "full-refund-only for MVP").
 //
 // НАЙДЕННЫЙ ФАКТ (Stage 7, раздел 2, актуален и после Stage 33.2):
-// reserveRefundRow() (services/postgresql/orderService.js) вызывается ТОЛЬКО
-// с причинами customer_cancel/restaurant_decline/timeout — ни один из этих
-// путей не достижим ПОСЛЕ того, как earned_at уже установлен (courier
+// reserveRefundRow() (services/postgresql/orderService.js) вызывается с
+// причинами customer_cancel/restaurant_decline/timeout — ни один из этих
+// ТРЁХ путей не достижим ПОСЛЕ того, как earned_at уже установлен (courier
 // нельзя отменить — см. выше). Условие ниже тем не менее защищает от этой
 // комбинации на случай будущего изменения бизнес-правил (пост-доставочные
 // споры/возвраты). Проверено тестом (см.
 // server/test/postgresql/hqRestaurantFinanceStage7.test.js и
 // server/test/postgresql/financialEligibilityStage332.test.js).
+//
+// Stage 37.1/37.2 — НАЙДЕН и закрыт четвёртый путь: reason='duplicate_payment'
+// (recordDuplicatePaymentSuccess(), см. orderService.js) НЕ гейтится статусом
+// заказа — поздняя/повторная webhook-нотификация о лишнем списании может
+// прийти в любой момент, включая уже earned/settled заказ. Экономически это
+// НЕ сторно продажи ресторана (сумма ресторана этим списанием никогда не
+// затрагивалась — оно просто лишнее и honestly возвращается клиенту), а
+// provider/payment reconciliation. SALE_REVERSING_REFUND_REASONS — ОДНО
+// каноническое место, которое решает «этот succeeded-возврат отменяет
+// заработок ресторана или нет» — используется здесь, в
+// computeRefundsAggregate() ниже и (через fetchSucceededRefundRows,
+// settlementService.js) в механизме late_refund adjustment. Один список,
+// три места чтения — физически не может разойтись по SQL/service слоям.
+const SALE_REVERSING_REFUND_REASONS = ['customer_cancel', 'restaurant_decline', 'timeout'];
+// SQL-литерал того же списка, а не второй параллельный список — единственный
+// generation-point, JS- и SQL-сторона гарантированно не расходятся.
+const SALE_REVERSING_REFUND_REASONS_SQL = SALE_REVERSING_REFUND_REASONS.map((r) => `'${r}'`).join(', ');
+
 const EARNED_ORDER_FILTER_SQL = `
   o.earned_at IS NOT NULL
   AND EXISTS (SELECT 1 FROM payments p WHERE p.order_id = o.id AND p.status = 'succeeded')
@@ -100,6 +118,7 @@ const EARNED_ORDER_FILTER_SQL = `
     SELECT 1 FROM payments p2
     JOIN refunds rf ON rf.payment_id = p2.id
     WHERE p2.order_id = o.id AND rf.status = 'succeeded'
+      AND rf.reason IN (${SALE_REVERSING_REFUND_REASONS_SQL})
   )
 `;
 
@@ -203,9 +222,20 @@ async function computeEarningsAggregate({ restaurantId = null, range = null } = 
 // него вычтен второй раз этой функцией — она в принципе не трогает
 // restaurantEarnings (задание, раздел 3; доказательство — Stage 7.1 отчёт,
 // раздел «Формулы»).
+//
+// Stage 37.2 — ограничена SALE_REVERSING_REFUND_REASONS: «Возвращено
+// клиентам» на экране ресторана — это витрина «сколько денег вернулось ИЗ
+// ПРОДАЖ ресторана», не общий payment-ledger. duplicate_payment (лишнее
+// списание, возвращённое клиенту) сюда физически другой природы — заказ не
+// возвращали, ресторан ничего не отменял; показывать его здесь выглядело бы
+// как «ресторан вернул заказ», хотя заказ остаётся доставленным и оплаченным
+// нормально. Сам факт двойного списания и его возврат никуда не исчезают —
+// они остаются в hq_events/hq_audit_log (category='payment_issue',
+// action='payment_duplicate_detected') и в самих таблицах payments/refunds,
+// просто не смешиваются с «ресторан вернул заказ клиенту».
 async function computeRefundsAggregate({ restaurantId = null, range = null } = {}) {
   const params = [];
-  const conditions = [`rf.status = 'succeeded'`];
+  const conditions = [`rf.status = 'succeeded'`, `rf.reason IN (${SALE_REVERSING_REFUND_REASONS_SQL})`];
   if (restaurantId !== null) {
     params.push(restaurantId);
     conditions.push(`o.restaurant_id = $${params.length}`);
@@ -439,6 +469,8 @@ async function checkFinancialInvariants() {
 
 module.exports = {
   EARNED_ORDER_FILTER_SQL,
+  SALE_REVERSING_REFUND_REASONS,
+  SALE_REVERSING_REFUND_REASONS_SQL,
   computeEarningsAggregate,
   computeRefundsAggregate,
   getRestaurantFinancialPosition,

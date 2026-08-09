@@ -119,6 +119,15 @@ async function fetchEarnedOrderRows(range, client = null) {
 
 // Успешные возвраты периода — построчно, тот же anchor (refunds.completed_at,
 // Stage 7.1), тот же принцип "не delivered-only" (Stage 7.1 отчёт).
+//
+// Stage 37.2 — ограничена financeService.SALE_REVERSING_REFUND_REASONS (тот
+// же единственный список, что и EARNED_ORDER_FILTER_SQL/
+// computeRefundsAggregate). Эта функция кормит ОБА последующих места: (1)
+// buildRestaurantLines() — «Возвраты» строки периода, тот же принцип «это не
+// сторно продажи ресторана», что и у computeRefundsAggregate; (2)
+// findLateRefundAdjustments() ниже — duplicate_payment refund не должен
+// порождать late_refund adjustment/долг ресторана (задание Stage 37.2,
+// раздел 7). Один choke point на оба места — не нужно чинить их порознь.
 async function fetchSucceededRefundRows(range, client = null) {
   return db.query(
     `SELECT rf.id AS refund_id, o.restaurant_id, rf.amount, rf.completed_at
@@ -126,6 +135,7 @@ async function fetchSucceededRefundRows(range, client = null) {
      JOIN payments p ON p.id = rf.payment_id
      JOIN orders o ON o.id = p.order_id
      WHERE rf.status = 'succeeded'
+       AND rf.reason IN (${financeService.SALE_REVERSING_REFUND_REASONS_SQL})
        AND rf.completed_at >= $1 AND rf.completed_at < $2
      ORDER BY rf.id`,
     [range.startUtc, range.endUtc],
