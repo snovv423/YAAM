@@ -195,7 +195,16 @@ async function listPayoutStatuses() {
       amount = activePayout.amount;
       periodFrom = activePayout.period_from;
       periodTo = activePayout.period_to;
-    } else if (lastPaid && readiness.status !== 'waiting_period') {
+    } else if (lastPaid) {
+      // Stage 37 (финансовый аудит) — находка: readiness.status здесь ВСЕГДА
+      // 'waiting_period' в штатном случае "всё выплачено, новых начислений
+      // нет" (hasClosedPeriod=false ровно потому, что payable пуст), поэтому
+      // прежнее условие "readiness.status !== 'waiting_period'" не пускало
+      // сюда именно самый частый случай — owner видел статус «Выплачено» без
+      // единой цифры рядом (renderPayoutStatusSection рендерит сумму только
+      // при amount>0). Комментарий выше ("чтобы строка никогда не была
+      // пустой без причины") описывал именно этот код — реализация ему не
+      // соответствовала.
       amount = lastPaid.amount;
       periodFrom = lastPaid.period_from;
       periodTo = lastPaid.period_to;

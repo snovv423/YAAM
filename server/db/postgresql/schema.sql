@@ -362,11 +362,15 @@ CREATE TABLE IF NOT EXISTS restaurant_bank_details (
 -- points (700 = 7%, текущая базовая модель YAAM), НЕ float — то же
 -- целочисленное представление денег/долей, что уже используется во всей
 -- остальной схеме (items_total/commission_amount на orders — целые рубли,
--- не float). Это ДОГОВОРНОЕ значение для БУДУЩЕГО финансового модуля — оно
--- НЕ подключено к фактическому расчёту комиссии заказа (тот остаётся
--- 0.07-константой в services/postgresql/orderService.js, задание, раздел 5:
--- "не ломать расчёты", "не делать скрытое изменение расчёта уже
--- существующих заказов").
+-- не float). YAAM HQ Stage 7 подключил это поле к реальному расчёту:
+-- services/postgresql/orderService.js:resolveCommissionBps() читает его для
+-- ресторана с подписанным (status='signed') и действующим на сегодня
+-- договором, иначе используется FALLBACK_COMMISSION_BPS=700 (та же 7%,
+-- дословная копия DEFAULT_COMMISSION_BPS ниже). Этот комментарий раньше
+-- (Stage 5/6, до Stage 7) утверждал обратное — "не подключено к расчёту" —
+-- что было верно на момент написания, но устарело и вводило в заблуждение;
+-- исправлено в рамках финансового аудита Stage 37, раздел 2 (без изменения
+-- логики — сама формула резолвинга не менялась).
 CREATE TABLE IF NOT EXISTS restaurant_contracts (
   restaurant_id INTEGER PRIMARY KEY REFERENCES restaurants(id),
   contract_number TEXT NOT NULL DEFAULT '',
