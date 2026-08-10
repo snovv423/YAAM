@@ -24,6 +24,7 @@ const { logAuditEvent } = require('../../services/hq/auditLog');
 const restaurantBankDetailsService = require('../../services/hq/restaurantBankDetailsService');
 const { layout } = require('../../hq/layout');
 const views = require('../../hq/payoutViews');
+const { formatMinorRub } = require('../../services/money');
 
 function notFoundBody(linkBasePath) {
   return `<h1>Выплата не найдена</h1><div class="panel"><div class="empty-state">Проверьте адрес или вернитесь к списку.</div></div><a class="btn ghost" href="${linkBasePath}/payouts">← К выплатам</a>`;
@@ -103,7 +104,7 @@ function createPayoutsRouter({ linkBasePath }) {
       await logAuditEvent({
         action: 'payout_attempt_succeeded', restaurantId: payout.restaurant_id,
         details: `выплата #${payout.id}: попытка #${attempt.attempt_number} подтверждена вручную владельцем `
-          + `(${hqUser || 'без логина'}), операция №${attempt.payment_id}, сумма ${payout.amount} ₽`
+          + `(${hqUser || 'без логина'}), операция №${attempt.payment_id}, сумма ${formatMinorRub(payout.amount)}`
           + `${comment ? `; комментарий: ${comment}` : ''}`,
         ip: req.ip,
       });
@@ -125,7 +126,7 @@ function createPayoutsRouter({ linkBasePath }) {
           category: 'other',
           restaurantId: payout.restaurant_id,
           restaurantName: row ? row.name : null,
-          message: `Выплата #${payout.id} на сумму ${payout.amount} ₽ подтверждена вручную владельцем — банк не задействован.`,
+          message: `Выплата #${payout.id} на сумму ${formatMinorRub(payout.amount)} подтверждена вручную владельцем — банк не задействован.`,
         });
       } catch (eventErr) {
         console.error('[hq/payouts] не удалось записать событие о ручном подтверждении:', eventErr.message);

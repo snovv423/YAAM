@@ -470,8 +470,11 @@ test('C: сервер отклоняет поддельную цену/чужо�
     }
 
     // C1: клиент передаёт price=1 и чужое name — сервер использует реальную цену/название из БД.
+    // Stage 38 — createOrderAndResolve() возвращает "внутренний" order-объект
+    // (сырая строка orders через getOrder(), НЕ публичный DTO) — items_total
+    // здесь integer minor units: 500 ₽ = 50000.
     const { order } = await orderService.createOrderAndResolve(basePayload());
-    assert.equal(order.items_total, 500, 'сервер должен был проигнорировать поддельную цену 1 и использовать реальную 500');
+    assert.equal(order.items_total, 50000, 'сервер должен был проигнорировать поддельную цену 1 и использовать реальную 500 ₽ (50000 minor)');
     const savedItems = await db.query('SELECT name, price FROM order_items WHERE order_id = $1', [order.id]);
     assert.equal(savedItems[0].name, 'Шашлык', 'name из БД, не из запроса клиента');
     assert.equal(savedItems[0].price, 500);

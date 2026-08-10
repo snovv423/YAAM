@@ -39,6 +39,7 @@ const webhookRejectionService = require('../../services/postgresql/webhookReject
 const { payloadFingerprint } = require('../../services/postgresql/paymentReconciliationService');
 const orderShareService = require('../../services/postgresql/orderShareService');
 const paymentService = require('../../services/paymentService');
+const money = require('../../services/money');
 // YAAM HQ Stage 5B — тот же module-level singleton принцип, что и db.js
 // выше (читает process.env напрямую, не получает конфигурацию через
 // factory/DI — routes/postgresql/api.js исторически изолированный модуль,
@@ -634,7 +635,10 @@ if (process.env.PAYMENT_PROVIDER === 'yookassa') {
           await reject('unknown_refund', 404, 'возврат провайдера отсутствует в базе', event.providerRefundId, 'refund');
           return res.status(404).json({ error: 'refund not found' });
         }
-        const amountOk = event.amount === Number(refund.amount).toFixed(2);
+        // Stage 38: refund.amount — integer minor units в БД, event.amount —
+        // rubles-decimal-string от провайдера ("1050.00") — точное строковое
+        // сравнение, без повторного float-умножения на этой границе.
+        const amountOk = event.amount === money.minorToRubleDecimalString(refund.amount);
         const paymentOk = event.providerPaymentId === refund.provider_payment_id;
         if (!amountOk || event.currency !== 'RUB' || !paymentOk) {
           console.error(`[api-postgresql] refund webhook rejected: identity/amount mismatch id=${logId} refund=${refund.id}`);
@@ -661,8 +665,10 @@ if (process.env.PAYMENT_PROVIDER === 'yookassa') {
 
       // Provider уже сверил amount/currency уведомления с каноническим
       // объектом YooKassa. Здесь второй независимый инвариант: каноническая
-      // сумма должна совпасть с локальной записью payment.
-      const amountOk = event.amount === Number(payment.amount).toFixed(2);
+      // сумма должна совпасть с локальной записью payment. Stage 38:
+      // payment.amount — integer minor units в БД, event.amount —
+      // rubles-decimal-string от провайдера — точное строковое сравнение.
+      const amountOk = event.amount === money.minorToRubleDecimalString(payment.amount);
       const currencyOk = event.currency === 'RUB';
       if (!amountOk || !currencyOk) {
         console.error(

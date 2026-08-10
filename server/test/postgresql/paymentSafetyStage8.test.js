@@ -536,11 +536,15 @@ test('A13: refund.succeeded сверяется через API и идемпот�
       status: 'succeeded',
       amount: '500.00',
     });
+    // Stage 38 — refunds.amount обязан точно совпасть с payments.amount
+    // (fn_refunds_amount_matches_payment), которая теперь integer minor
+    // units: createOrderWithYookassaPayment(provider, 500) создаёт реальный
+    // заказ с items_total/payments.amount = 500 ₽ × 100 = 50000 minor.
     const inserted = await db.execute(
       `INSERT INTO refunds (
          payment_id, provider, amount, status, reason, provider_refund_id,
          provider_idempotency_key, attempt_count, next_attempt_at
-       ) VALUES ($1, 'yookassa', 500, 'processing', 'customer_cancel', $2, $3, 1, NOW() + INTERVAL '1 minute')
+       ) VALUES ($1, 'yookassa', 50000, 'processing', 'customer_cancel', $2, $3, 1, NOW() + INTERVAL '1 minute')
        RETURNING id`,
       [paymentId, providerRefundId, crypto.randomUUID()]
     );

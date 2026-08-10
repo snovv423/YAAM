@@ -465,11 +465,15 @@ test('L7: перенос виден в документе и в UI отдель�
   await seedYaam(db);
   await seedLegal(db, restId);
 
-  const first = await order(db, restId, { itemsTotal: 1000, commissionAmount: 70, deliveredAt: msk(2026, 7, 29, 12, 0) });
+  // Stage 38 — эта фикстура пишет orders.items_total/commission_amount и
+  // refunds.amount НАПРЯМУЮ SQL (в обход createOrder(), которая одна умеет
+  // переводить рубли в minor units) — поэтому сама передаёт уже integer
+  // minor units: 1000 ₽ = 100000, 70 ₽ = 7000, 1075 ₽ = 107500, 75 ₽ = 7500.
+  const first = await order(db, restId, { itemsTotal: 100000, commissionAmount: 7000, deliveredAt: msk(2026, 7, 29, 12, 0) });
   await weekly.runWeeklySettlementJob({ now: msk(2026, 8, 3, 7, 0), generateDocuments: true });
-  await refund(db, first.paymentId, 1000, msk(2026, 8, 5, 12, 0));
+  await refund(db, first.paymentId, 100000, msk(2026, 8, 5, 12, 0));
   await weekly.runWeeklySettlementJob({ now: msk(2026, 8, 10, 7, 0), generateDocuments: true });
-  await order(db, restId, { itemsTotal: 1075, commissionAmount: 75, deliveredAt: msk(2026, 8, 12, 12, 0) });
+  await order(db, restId, { itemsTotal: 107500, commissionAmount: 7500, deliveredAt: msk(2026, 8, 12, 12, 0) });
   await weekly.runWeeklySettlementJob({ now: msk(2026, 8, 17, 7, 0), generateDocuments: true });
 
   const periods = await db.query('SELECT * FROM settlement_periods ORDER BY period_from');
@@ -479,11 +483,12 @@ test('L7: перенос виден в документе и в UI отдель�
   const t = report.payload.totals;
   await db.close();
 
-  // Начислено 1000, удержано 930 в счёт долга, к выплате 70.
-  assert.equal(t.carryForwardApplied, 930);
+  // Начислено 1000 ₽ (100000 minor), удержано 930 ₽ (93000 minor) в счёт
+  // долга, к выплате 70 ₽ (7000 minor).
+  assert.equal(t.carryForwardApplied, 93000);
   assert.equal(t.carryForwardRemaining, 0);
-  assert.equal(t.payableAmount, 70);
-  // Столбец документа сходится: 1075 − 75 − 930 = 70.
+  assert.equal(t.payableAmount, 7000);
+  // Столбец документа сходится: 107500 − 7500 − 93000 = 7000.
   assert.equal(t.sales - t.commissionAmount - t.adjustmentRestaurantAmount - t.carryForwardApplied, t.payableAmount);
 
   const { renderDocument } = require('../../hq/settlementDocumentViews');

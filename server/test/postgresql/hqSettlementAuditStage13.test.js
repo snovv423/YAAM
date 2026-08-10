@@ -398,14 +398,18 @@ test('B4: отчёт агента с поздним возвратом сход�
   await seedYaam(db);
   await seedLegal(db, restId);
 
+  // Stage 38 — createEarnedOrder/addRefund пишут orders.items_total/
+  // commission_amount/refunds.amount НАПРЯМУЮ SQL (в обход createOrder()),
+  // поэтому сами передают уже integer minor units: 1000 ₽=100000, 70 ₽=7000,
+  // 2000 ₽=200000, 140 ₽=14000.
   const order = await createEarnedOrder(db, restId, {
-    itemsTotal: 1000, commissionAmount: 70, deliveredAt: msk(2026, 7, 29, 12, 0),
+    itemsTotal: 100000, commissionAmount: 7000, deliveredAt: msk(2026, 7, 29, 12, 0),
   });
   await weekly.runWeeklySettlementJob({ now: msk(2026, 8, 3, 7, 0), generateDocuments: true });
   await createEarnedOrder(db, restId, {
-    itemsTotal: 2000, commissionAmount: 140, deliveredAt: msk(2026, 8, 11, 12, 0),
+    itemsTotal: 200000, commissionAmount: 14000, deliveredAt: msk(2026, 8, 11, 12, 0),
   });
-  await addRefund(db, order.paymentId, 1000, msk(2026, 8, 12, 12, 0));
+  await addRefund(db, order.paymentId, 100000, msk(2026, 8, 12, 12, 0));
   await weekly.runWeeklySettlementJob({ now: msk(2026, 8, 17, 7, 0), generateDocuments: true });
 
   const periods = await db.query('SELECT * FROM settlement_periods ORDER BY period_from');
@@ -414,15 +418,16 @@ test('B4: отчёт агента с поздним возвратом сход�
   const t = report.payload.totals;
   await db.close();
 
-  // Столбец: продажи 2000 − комиссия 140 − удержание 930 = 930.
-  assert.equal(t.sales, 2000);
-  assert.equal(t.commissionAmount, 140);
-  assert.equal(t.adjustmentRestaurantAmount, 930);
+  // Столбец: продажи 200000 − комиссия 14000 − удержание 93000 = 93000
+  // (2000 ₽ − 140 ₽ − 930 ₽ = 930 ₽).
+  assert.equal(t.sales, 200000);
+  assert.equal(t.commissionAmount, 14000);
+  assert.equal(t.adjustmentRestaurantAmount, 93000);
   assert.equal(t.sales - t.commissionAmount - t.adjustmentRestaurantAmount, t.payableAmount);
-  assert.equal(t.payableAmount, 930);
+  assert.equal(t.payableAmount, 93000);
   // Сторно комиссии существует, но НЕ участвует в удержании с ресторана.
-  assert.equal(t.adjustmentCommissionAmount, 70);
-  assert.equal(t.commissionAmountNet, 70);
+  assert.equal(t.adjustmentCommissionAmount, 7000);
+  assert.equal(t.commissionAmountNet, 7000);
   assert.equal(report.payload.adjustments.length, 1);
   assert.equal(report.payload.adjustments[0].orderCode, order.code);
   // Даты в payload нормализованы, форматирует их renderer — как и все

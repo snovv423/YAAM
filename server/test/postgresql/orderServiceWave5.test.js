@@ -171,19 +171,21 @@ test('createOrder: успешное создание — order/order_items/payme
   const order = orderRows[0];
   assert.equal(order.status, 'awaiting_payment');
   assert.equal(order.public_code, `YAAM-${String(result.orderId).padStart(5, '0')}`);
-  assert.equal(order.items_total, 1500);
-  assert.equal(order.commission_amount, Math.round(1500 * 0.07));
+  // Stage 38 — items_total/commission_amount/payments.amount теперь integer
+  // minor units: 500 ₽ × 3 = 1500 ₽ продуктовая сумма -> 150000 minor.
+  assert.equal(order.items_total, 150000);
+  assert.equal(order.commission_amount, Math.round(150000 * 0.07));
   assert.equal(order.customer_phone, params.customerPhone);
 
   const itemRows = await db.query('SELECT * FROM order_items WHERE order_id = $1', [result.orderId]);
   assert.equal(itemRows.length, 1);
   assert.equal(itemRows[0].qty, 3);
-  assert.equal(itemRows[0].price, 500);
+  assert.equal(itemRows[0].price, 500, 'order_items.price остаётся продуктовыми целыми рублями — Stage 38 не мигрирует');
 
   const paymentRows = await db.query('SELECT * FROM payments WHERE order_id = $1', [result.orderId]);
   assert.equal(paymentRows.length, 1);
   assert.equal(paymentRows[0].status, 'creating');
-  assert.equal(paymentRows[0].amount, 1500);
+  assert.equal(paymentRows[0].amount, 150000);
   assert.equal(paymentRows[0].provider_payment_id, null);
 
   const attemptRows = await db.query('SELECT * FROM payment_initial_attempts WHERE payment_id = $1', [paymentRows[0].id]);
@@ -573,7 +575,12 @@ test('Parity: createOrder — успешное создание даёт экв�
   const pgResult = await pgOrderService.createOrder(pgParams);
   assert.equal(pgResult.replay, false);
   const pgOrder = (await db.query('SELECT * FROM orders WHERE id = $1', [pgResult.orderId]))[0];
-  assert.equal(pgOrder.items_total, 1400);
+  // Stage 38 — PostgreSQL-путь хранит items_total в integer minor units
+  // (700 ₽ × 2 = 1400 ₽ -> 140000 minor); SQLite legacy-путь ниже
+  // сознательно НЕ мигрирован (CLAUDE.md: "SQLite и PostgreSQL paths
+  // нельзя незаметно смешивать") и остаётся в целых рублях — намеренное,
+  // не случайное расхождение единиц между двумя путями с этой стадии.
+  assert.equal(pgOrder.items_total, 140000);
   assert.equal(pgOrder.status, 'awaiting_payment');
 
   const sqliteRestaurantId = sqliteCreateRestaurant();

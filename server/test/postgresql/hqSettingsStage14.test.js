@@ -456,7 +456,12 @@ test('R2: реквизиты — форматная валидация, маск
 // F — фискальные чеки
 // ===========================================================================
 
-async function seedPaidOrder(db, { itemsTotal = 1000, commission = 70 } = {}) {
+// Stage 38 — orders.items_total/commission_amount теперь integer minor
+// units (копейки): фикстура пишет РОВНО ×100 от прежних рублёвых значений
+// (1000 ₽ = сумма позиций order_items ниже: 600+200×2, 70 ₽ = 7% комиссии),
+// чтобы снимок заказа оставался экономически согласован с order_items
+// (те остаются в целых рублях — продуктовый слой, не мигрирован).
+async function seedPaidOrder(db, { itemsTotal = 100000, commission = 7000 } = {}) {
   const rest = await db.execute(
     `INSERT INTO restaurants (name, cities, is_open, published_at) VALUES ('Кафе Чек','["Грозный"]',1,NOW()) RETURNING id`);
   const restId = rest.rows[0].id;
@@ -647,9 +652,12 @@ test('F6: возвратный чек зеркалит приход и связ�
   const { db, receiptService } = requireFresh();
   const { orderId, paymentId } = await seedPaidOrder(db);
 
+  // Stage 38 — сумма возврата обязана точно совпасть с payments.amount
+  // (fn_refunds_amount_matches_payment), теперь тоже в minor units — та же
+  // ×100 граница, что и у seedPaidOrder() выше (100000 = 1000 ₽).
   const rf = await db.execute(
     `INSERT INTO refunds (payment_id, provider, amount, status, reason, provider_idempotency_key, completed_at)
-     VALUES ($1,'mock',1000,'succeeded','customer_cancel','rk-1',NOW()) RETURNING id`, [paymentId]);
+     VALUES ($1,'mock',100000,'succeeded','customer_cancel','rk-1',NOW()) RETURNING id`, [paymentId]);
   const refundId = rf.rows[0].id;
 
   const payload = await receiptService.buildRefundReceiptPayload(refundId);

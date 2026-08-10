@@ -607,11 +607,16 @@ test('F3: дублирующая доставка webhook не вызывает 
       // реальные amount/currency этого платежа, иначе будет корректно
       // отклонено как несовпадение сумм (это отдельно и исчерпывающе
       // протестировано в paymentSafetyStage8.test.js, здесь не дублируется).
+      // Stage 38 — pendingPayment.amount теперь integer minor units;
+      // event.amount обязан быть rubles-decimal-string, как и реальный
+      // провайдер (money.minorToRubleDecimalString — та же граница, что и
+      // в routes/postgresql/api.js при сравнении).
+      const money = require('../../services/money');
       reloadedPaymentService.verifyWebhook = () => ({
         type: 'payment',
         providerPaymentId: pendingPayment.provider_payment_id,
         status: 'succeeded',
-        amount: Number(pendingPayment.amount).toFixed(2),
+        amount: money.minorToRubleDecimalString(pendingPayment.amount),
         currency: 'RUB',
       });
 

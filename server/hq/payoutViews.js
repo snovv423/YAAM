@@ -32,8 +32,13 @@ const READINESS_REASON_LABELS = {
 };
 void READINESS_REASONS; // импортирован для документируемой связи с источником enum, не используется напрямую в рендере
 
+const moneyLib = require('../services/money');
+
+// Stage 38 — та же граница, что и hq/settlementViews.js: значения из БД
+// теперь integer minor units, money() делегирует канонической
+// moneyLib.formatMinorRub(), вызовы money(n) по всему файлу не меняются.
 function money(n) {
-  return `${Number(n) || 0} ₽`;
+  return moneyLib.formatMinorRub(Number(n) || 0);
 }
 
 function formatDateOnly(date) {

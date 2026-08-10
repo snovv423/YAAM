@@ -235,7 +235,7 @@ test('A: реальный customer_cancel + succeeded refund (cancelByCustomer, 
 
     const position = await financeService.getRestaurantFinancialPosition(restaurantId);
     assert.equal(position.successfulRefundsCount, 1, 'реальный customer_cancel-возврат должен быть виден в отчёте');
-    assert.equal(position.successfulRefunds, 1000);
+    assert.equal(position.successfulRefunds, 100000); // Stage 38: minor units (1000 ₽)
     assert.equal(position.deliveredPaidOrders, 0, 'отменённый заказ никогда не был доставлен — не заработок');
     assert.equal(position.turnover, 0);
     assert.equal(position.restaurantEarnings, 0);
@@ -274,7 +274,7 @@ test('B: реальный restaurant_decline + succeeded refund (restaurantDecli
 
     const position = await financeService.getRestaurantFinancialPosition(restaurantId);
     assert.equal(position.successfulRefundsCount, 1);
-    assert.equal(position.successfulRefunds, 2000);
+    assert.equal(position.successfulRefunds, 200000); // Stage 38: minor units (2000 ₽)
     assert.equal(position.deliveredPaidOrders, 0);
   } finally {
     await db.close();
@@ -319,7 +319,7 @@ test('C: реальный timeout + succeeded refund (sweepTimeouts, mock-про
 
     const position = await financeService.getRestaurantFinancialPosition(restaurantId);
     assert.equal(position.successfulRefundsCount, 1);
-    assert.equal(position.successfulRefunds, 1500);
+    assert.equal(position.successfulRefunds, 150000); // Stage 38: minor units (1500 ₽)
   } finally {
     await db.close();
     delete process.env.DATABASE_URL;
@@ -521,10 +521,13 @@ test('I: /hq/finance и вкладка «Статистика» показыва
     const restaurantPath = createRes.headers.get('location');
     const restaurantId = Number(restaurantPath.split('/').pop());
 
+    // Stage 38 — orders.items_total/payments.amount/refunds.amount теперь
+    // integer minor units: 333 ₽ = 33300 minor (иначе HTML показал бы
+    // "3,33 ₽", а не ожидаемое целое "333 ₽").
     const db = require('../../db/postgresql');
-    const orderId = await createOrderRow(db, { restaurantId, status: 'cancelled', itemsTotal: 333, commissionAmount: 0 });
-    const paymentId = await addSucceededPayment(db, orderId, 333);
-    await addRefund(db, paymentId, { amount: 333, status: 'succeeded' });
+    const orderId = await createOrderRow(db, { restaurantId, status: 'cancelled', itemsTotal: 33300, commissionAmount: 0 });
+    const paymentId = await addSucceededPayment(db, orderId, 33300);
+    await addRefund(db, paymentId, { amount: 33300, status: 'succeeded' });
 
     const financeRes = await fetch(`${base}/hq/finance?period=today`, { headers: { Cookie: cookie } });
     const financeHtml = await financeRes.text();

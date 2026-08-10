@@ -14,9 +14,14 @@
 const { esc } = require('./layout');
 const { DOCUMENT_KIND_LABELS } = require('../services/hq/settlementDocumentService');
 const { toMskDate, MSK_SUFFIX } = require('./dateFormat');
+const moneyLib = require('../services/money');
 
+// Stage 38 — payload-суммы теперь integer minor units, money() делегирует
+// канонической moneyLib.formatMinorRub(), не считает деньги сама (тот же
+// принцип "renderer не обращается к БД и не считает деньги", описанный выше
+// в этом файле — форматирование не является расчётом).
 function money(n) {
-  return `${Number(n) || 0} ₽`;
+  return moneyLib.formatMinorRub(Number(n) || 0);
 }
 
 // Уже был корректно сдвинут на московское время (был единственным из четырёх

@@ -11,6 +11,7 @@ const { PROJECT_TIMEZONE_OFFSET_MINUTES } = require('../services/hq/dashboardMet
 const { READINESS_LABELS: PAYOUT_READINESS_LABELS } = require('../services/hq/restaurantPayoutService');
 const { SUPPORTED_CITIES } = require('../services/hq/restaurantAdminService');
 const { toMskDate, MSK_SUFFIX } = require('./dateFormat');
+const moneyLib = require('../services/money');
 
 const ORDER_STATUS_LABELS = {
   awaiting_payment: 'Ожидает оплаты',
@@ -74,8 +75,27 @@ function formatDateOnly(date) {
   return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
 }
 
+// Stage 38 — этот файл, в отличие от остальных *Views.js, рендерит ОБА
+// класса денежных величин одновременно: продуктовые целые рубли (цена
+// блюда/позиции заказа — order_items.price, НЕ мигрированы) и финансовые
+// minor units (снимок заказа orders.items_total, суммы возвратов/выплат,
+// агрегаты оборота/комиссии — все мигрированы миграцией 0014). Единая
+// money() здесь была бы ровно той опасностью, которую задание Stage 38
+// прямо называет ("один сервис посчитает ×100, другой забудет") — поэтому
+// две явно разные функции, а не одна с неявным контрактом.
+//
+// money(n)      — продуктовые целые рубли (order_items.price и производные
+//                  от него суммы вроде qty*price) — БЕЗ изменений, как и
+//                  до Stage 38.
+// moneyMinor(n) — финансовые integer minor units (payout/settlement/refund/
+//                  order snapshot amounts) — форматирует через каноническую
+//                  services/money.js.
 function money(n) {
   return `${Number(n) || 0} ₽`;
+}
+
+function moneyMinor(n) {
+  return moneyLib.formatMinorRub(Number(n) || 0);
 }
 
 function stars(rating) {
@@ -322,10 +342,10 @@ function renderPayoutStateBlock({ restaurant, state, csrfToken, linkBasePath }) 
       <div class="payout-line">${esc(when)}</div>
       <div class="payout-sub">${esc(weekday)} · ${hh}:00</div>`;
   } else if (state.kind === 'ready') {
-    const confirmText = `Подготовить выплату «${restaurant.name}» на ${state.amount} ₽ за период ${formatSettlementRange(state.periodFrom, state.periodTo)}?`;
+    const confirmText = `Подготовить выплату «${restaurant.name}» на ${moneyLib.formatMinorRub(state.amount)} за период ${formatSettlementRange(state.periodFrom, state.periodTo)}?`;
     body = `
       <div class="payout-line">Готово к выплате</div>
-      <div class="payout-amount">${money(state.amount)}</div>
+      <div class="payout-amount">${moneyMinor(state.amount)}</div>
       <div class="payout-sub">Период: ${esc(formatSettlementRange(state.periodFrom, state.periodTo))}</div>
       <form method="post" action="${base}/payout" onsubmit="return confirm('${esc(confirmText)}')" style="margin-top:12px">
         <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
@@ -339,17 +359,17 @@ function renderPayoutStateBlock({ restaurant, state, csrfToken, linkBasePath }) 
   } else if (state.kind === 'processing') {
     body = `
       <div class="payout-line">Выплата обрабатывается</div>
-      <div class="payout-amount">${money(state.amount)}</div>
+      <div class="payout-amount">${moneyMinor(state.amount)}</div>
       <div class="payout-sub">Период: ${esc(formatSettlementRange(state.periodFrom, state.periodTo))}</div>`;
   } else if (state.kind === 'blocked') {
     body = `
       <div class="payout-line">Выплата не прошла</div>
-      <div class="payout-amount">${money(state.amount)}</div>
+      <div class="payout-amount">${moneyMinor(state.amount)}</div>
       <div class="payout-sub">${esc(state.reason || 'Требует решения')}</div>`;
   } else {
     body = `
       <div class="payout-line">Выплачено</div>
-      <div class="payout-amount">${money(state.amount)}</div>
+      <div class="payout-amount">${moneyMinor(state.amount)}</div>
       <div class="payout-sub">Период: ${esc(formatSettlementRange(state.periodFrom, state.periodTo))}</div>`;
   }
 
@@ -381,8 +401,8 @@ function renderOverviewTab({ restaurant, overview, payoutState, csrfToken, linkB
     </div>
 
     <div class="metric-grid compact">
-      <div class="metric"><div class="value">${money(overview.turnoverToday)}</div><div class="label">Оборот сегодня</div></div>
-      <div class="metric"><div class="value">${money(overview.commissionToday)}</div><div class="label">Доход YAAM сегодня</div></div>
+      <div class="metric"><div class="value">${moneyMinor(overview.turnoverToday)}</div><div class="label">Оборот сегодня</div></div>
+      <div class="metric"><div class="value">${moneyMinor(overview.commissionToday)}</div><div class="label">Доход YAAM сегодня</div></div>
     </div>
 
     ${renderPayoutStateBlock({ restaurant, state: payoutState, csrfToken, linkBasePath })}
@@ -418,7 +438,7 @@ function renderOrdersTab({ restaurant, orders, page, totalPages, total, filters,
       <li class="dish-row">
         <a class="dish-link" href="${baseUrl}/${o.id}">
           <span class="dish-main">
-            <span class="dish-name">${esc(o.public_code)} · ${money(o.items_total)}</span>
+            <span class="dish-name">${esc(o.public_code)} · ${moneyMinor(o.items_total)}</span>
             <span class="dish-meta">${esc(formatMoscowDateTime(o.created_at))}</span>
             <span class="dish-meta">${esc(items)} · ${esc(ORDER_STATUS_LABELS[o.status] || o.status)}${o.rating ? ` · ${stars(o.rating)}` : ''}</span>
           </span>
@@ -476,7 +496,7 @@ function renderOrderDetail({ restaurant, detail, linkBasePath }) {
         ${o.delivered_via ? `<tr><td>Как завершён</td><td style="text-align:right">${o.delivered_via === 'customer_confirmed' ? 'Клиент подтвердил получение' : 'Автозавершение (клиент не подтвердил за 6ч)'}</td></tr>` : ''}
         <tr><td>Тип получения</td><td style="text-align:right">${o.fulfillment_type === 'pickup' ? 'Самовывоз' : 'Доставка'}</td></tr>
         <tr><td>Статус оплаты</td><td style="text-align:right">${esc(lastPayment ? (PAYMENT_STATUS_LABELS[lastPayment.status] || lastPayment.status) : 'Платежей нет')}</td></tr>
-        ${succeededRefund ? `<tr><td>Возврат</td><td style="text-align:right">${esc(REFUND_STATUS_LABELS[succeededRefund.status])} · ${money(succeededRefund.amount)}</td></tr>` : ''}
+        ${succeededRefund ? `<tr><td>Возврат</td><td style="text-align:right">${esc(REFUND_STATUS_LABELS[succeededRefund.status])} · ${moneyMinor(succeededRefund.amount)}</td></tr>` : ''}
         ${otherRefund ? `<tr><td>Возврат</td><td style="text-align:right">${esc(REFUND_STATUS_LABELS[otherRefund.status] || otherRefund.status)}</td></tr>` : ''}
         ${o.rating ? `<tr><td>Оценка клиента</td><td style="text-align:right">${stars(o.rating)}</td></tr>` : ''}
       </table>
@@ -489,8 +509,8 @@ function renderOrderDetail({ restaurant, detail, linkBasePath }) {
         <tbody>${itemsRows}</tbody>
       </table>
       <table style="margin-top:10px">
-        <tr><td>Сумма блюд</td><td style="text-align:right">${money(o.items_total)}</td></tr>
-        <tr><td>Итого к оплате</td><td style="text-align:right"><strong>${money(o.items_total)}</strong></td></tr>
+        <tr><td>Сумма блюд</td><td style="text-align:right">${moneyMinor(o.items_total)}</td></tr>
+        <tr><td>Итого к оплате</td><td style="text-align:right"><strong>${moneyMinor(o.items_total)}</strong></td></tr>
       </table>
     </div>
 

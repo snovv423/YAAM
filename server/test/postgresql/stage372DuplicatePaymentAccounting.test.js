@@ -120,16 +120,23 @@ async function deliverRealOrder(orderService, db, restaurantId, menuItemId) {
 // последующий refund() не найдёт providerPaymentId в своей внутренней карте
 // и вернёт 'failed' независимо от бизнес-логики — это артефакт stateful
 // mock-провайдера, не то, что проверяет этот тест.
-async function addOldFailedAttempt(db, orderId, amount) {
+//
+// amountMinor — integer minor units (то же, что и payments.amount колонка
+// после Stage 38). paymentService.js СОЗНАТЕЛЬНО не переведён на minor
+// units (общий с legacy SQLite-путём, см. services/money.js) — ему
+// передаются рубли через ту же границу, что использует
+// services/postgresql/orderService.js.
+async function addOldFailedAttempt(db, orderId, amountMinor) {
   const paymentService = require('../../services/paymentService');
+  const money = require('../../services/money');
   const idempotencyKey = `yaam_pay_v1_${crypto.randomBytes(16).toString('base64url')}`;
   const created = await paymentService.createPayment({
-    orderId, amount, description: 'Stage 37.2 duplicate-payment fixture', idempotencyKey,
+    orderId, amount: money.minorToRublesNumber(amountMinor), description: 'Stage 37.2 duplicate-payment fixture', idempotencyKey,
   });
   const rows = await db.execute(
     `INSERT INTO payments (order_id, provider, provider_payment_id, amount, status)
      VALUES ($1,'mock',$2,$3,'failed') RETURNING id`,
-    [orderId, created.providerPaymentId, amount],
+    [orderId, created.providerPaymentId, amountMinor],
   );
   return rows.rows[0].id;
 }
@@ -157,13 +164,13 @@ test('A: earned-заказ переживает succeeded duplicate_payment-во
 
     // Предпосылка: обычная live-позиция ДО дубля — оборот/комиссия/заработок как обычно.
     const before = await financeService.getRestaurantFinancialPosition(restaurantId);
-    assert.equal(before.turnover, 1000);
-    assert.equal(before.commission, 70);
-    assert.equal(before.restaurantEarnings, 930);
+    assert.equal(before.turnover, 100000);
+    assert.equal(before.commission, 7000);
+    assert.equal(before.restaurantEarnings, 93000);
     assert.equal(before.deliveredPaidOrders, 1);
 
     // Старая попытка, ранее failed, теперь подтверждена провайдером как успешная.
-    const oldPaymentId = await addOldFailedAttempt(db, orderId, 1000);
+    const oldPaymentId = await addOldFailedAttempt(db, orderId, 100000);
     const applied = await orderService.applyConfirmedPaymentSuccess(orderId, oldPaymentId, { source: 'webhook' });
     assert.equal(applied.outcome, 'duplicate');
     assert.ok(applied.refundId, 'лишняя сумма должна уйти в возврат');
@@ -176,9 +183,9 @@ test('A: earned-заказ переживает succeeded duplicate_payment-во
     // ГЛАВНАЯ ПРОВЕРКА (задание, раздел 1 и 3): заказ ОСТАЁТСЯ заработком.
     const after = await financeService.getRestaurantFinancialPosition(restaurantId);
     assert.equal(after.deliveredPaidOrders, 1, 'заказ не должен исчезнуть из заработка');
-    assert.equal(after.turnover, 1000, 'оборот не должен обнулиться из-за возврата дубля');
-    assert.equal(after.commission, 70, 'комиссия YAAM за настоящую продажу не должна обнулиться');
-    assert.equal(after.restaurantEarnings, 930, 'заработок ресторана не должен обнулиться');
+    assert.equal(after.turnover, 100000, 'оборот не должен обнулиться из-за возврата дубля');
+    assert.equal(after.commission, 7000, 'комиссия YAAM за настоящую продажу не должна обнулиться');
+    assert.equal(after.restaurantEarnings, 93000, 'заработок ресторана не должен обнулиться');
 
     // Заказ ровно один раз в settlement preview.
     const { periodFrom, periodTo } = widePeriodBounds();
@@ -188,8 +195,8 @@ test('A: earned-заказ переживает succeeded duplicate_payment-во
     const ordersOfThisOrder = orderRows.filter((o) => o.order_id === orderId);
     assert.equal(ordersOfThisOrder.length, 1, 'заказ должен попасть в preview ровно один раз, не ноль и не дважды');
     const line = restaurantLines.find((l) => l.restaurantId === restaurantId);
-    assert.equal(line.turnover, 1000);
-    assert.equal(line.restaurantEarnings, 930);
+    assert.equal(line.turnover, 100000);
+    assert.equal(line.restaurantEarnings, 93000);
 
     // Возврат дубля НЕ должен появляться в «Возвраты» ресторана (задание,
     // раздел 8: не должен выглядеть как «ресторан вернул заказ»).
@@ -227,12 +234,12 @@ test('B: поздний duplicate_payment-возврат ПОСЛЕ закрыт
     const draft1 = await settlementService.createDraftSettlementPeriod({ periodFrom: period1From, periodTo: period1To });
     const closed1 = await settlementService.closeSettlementPeriod(draft1.id);
     const line1 = closed1.lines.find((l) => l.restaurant_id === restaurantId);
-    assert.equal(line1.payable_amount, 930, 'предпосылка: период 1 закрылся с нормальным заработком');
+    assert.equal(line1.payable_amount, 93000, 'предпосылка: период 1 закрылся с нормальным заработком');
     const snapshotBefore = { ...line1 };
 
     // T3-T4: поздняя попытка платежа подтверждается провайдером как успешная,
     // лишнее списание уходит в duplicate_payment-возврат.
-    const oldPaymentId = await addOldFailedAttempt(db, orderId, 1000);
+    const oldPaymentId = await addOldFailedAttempt(db, orderId, 100000);
     const applied = await orderService.applyConfirmedPaymentSuccess(orderId, oldPaymentId, { source: 'webhook' });
     await sleep(300);
     const refundRow = (await db.query('SELECT status, reason, completed_at FROM refunds WHERE id = $1', [applied.refundId]))[0];
@@ -273,7 +280,7 @@ test('B: поздний duplicate_payment-возврат ПОСЛЕ закрыт
     // Выплата исходного заказа (если бы её готовили) осталась бы экономически
     // верной — payable_amount периода 1 по-прежнему 930, ничего не отняли.
     const line1Final = (await db.query('SELECT payable_amount FROM settlement_restaurant_lines WHERE id = $1', [line1.id]))[0];
-    assert.equal(line1Final.payable_amount, 930);
+    assert.equal(line1Final.payable_amount, 93000);
   } finally {
     await db.close();
     delete process.env.DATABASE_URL;
@@ -291,7 +298,7 @@ test('C: duplicate_payment payment/refund остаются полностью в
     const menuItem = await seedMenuItem(menuAdminService, restaurantId, 1000);
     const { orderId } = await deliverRealOrder(orderService, db, restaurantId, menuItem.id);
 
-    const oldPaymentId = await addOldFailedAttempt(db, orderId, 1000);
+    const oldPaymentId = await addOldFailedAttempt(db, orderId, 100000);
     const applied = await orderService.applyConfirmedPaymentSuccess(orderId, oldPaymentId, { source: 'webhook' });
     await sleep(300);
 
@@ -311,7 +318,7 @@ test('C: duplicate_payment payment/refund остаются полностью в
     assert.equal(refundRows.length, 1);
     assert.equal(refundRows[0].reason, 'duplicate_payment');
     assert.equal(refundRows[0].status, 'succeeded');
-    assert.equal(refundRows[0].amount, 1000);
+    assert.equal(refundRows[0].amount, 100000);
 
     // Аудит и Центр событий — та же проверка, что уже существовала до Stage
     // 37.2 (не трогали эту часть), подтверждаем, что фикс её не сломал.
@@ -364,7 +371,7 @@ test('D: обычный customer_cancel-возврат по-прежнему к�
     assert.equal(position.deliveredPaidOrders, 0, 'отменённый заказ никогда не был доставлен — не заработок, как и раньше');
     assert.equal(position.turnover, 0);
     assert.equal(position.successfulRefundsCount, 1, 'обычный возврат ДОЛЖЕН попадать в «Возвраты» — не задет фиксом');
-    assert.equal(position.successfulRefunds, 1500);
+    assert.equal(position.successfulRefunds, 150000);
   } finally {
     await db.close();
     delete process.env.DATABASE_URL;
@@ -382,7 +389,7 @@ test('E: повторный вызов applyConfirmedPaymentSuccess для то�
     const menuItem = await seedMenuItem(menuAdminService, restaurantId, 1000);
     const { orderId } = await deliverRealOrder(orderService, db, restaurantId, menuItem.id);
 
-    const oldPaymentId = await addOldFailedAttempt(db, orderId, 1000);
+    const oldPaymentId = await addOldFailedAttempt(db, orderId, 100000);
     const first = await orderService.applyConfirmedPaymentSuccess(orderId, oldPaymentId, { source: 'webhook' });
     await sleep(300);
     assert.equal(first.outcome, 'duplicate');
@@ -395,7 +402,7 @@ test('E: повторный вызов applyConfirmedPaymentSuccess для то�
 
     const position = await financeService.getRestaurantFinancialPosition(restaurantId);
     assert.equal(position.deliveredPaidOrders, 1, 'повторный вызов не должен дополнительно портить заработок');
-    assert.equal(position.restaurantEarnings, 930);
+    assert.equal(position.restaurantEarnings, 93000);
   } finally {
     await db.close();
     delete process.env.DATABASE_URL;
@@ -413,7 +420,7 @@ test('F: два ОДНОВРЕМЕННЫХ вызова applyConfirmedPaymentSuc
     const menuItem = await seedMenuItem(menuAdminService, restaurantId, 1000);
     const { orderId } = await deliverRealOrder(orderService, db, restaurantId, menuItem.id);
 
-    const oldPaymentId = await addOldFailedAttempt(db, orderId, 1000);
+    const oldPaymentId = await addOldFailedAttempt(db, orderId, 100000);
 
     const [r1, r2] = await Promise.allSettled([
       orderService.applyConfirmedPaymentSuccess(orderId, oldPaymentId, { source: 'webhook' }),
@@ -432,7 +439,7 @@ test('F: два ОДНОВРЕМЕННЫХ вызова applyConfirmedPaymentSuc
 
     const position = await financeService.getRestaurantFinancialPosition(restaurantId);
     assert.equal(position.deliveredPaidOrders, 1, 'гонка не должна ни задвоить, ни обнулить заработок ресторана');
-    assert.equal(position.restaurantEarnings, 930);
+    assert.equal(position.restaurantEarnings, 93000);
   } finally {
     await db.close();
     delete process.env.DATABASE_URL;

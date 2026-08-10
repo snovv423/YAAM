@@ -138,12 +138,24 @@ function uniquePhone() {
 function metricValues(html) {
   return (html.match(/<div class="value">([^<]*)<\/div>/g) || []).map((m) => m.replace(/<[^>]+>/g, ''));
 }
+// Stage 38 — HQ отображает деньги через formatMinorRub(): "1934 ₽" (целые)
+// ИЛИ "145,60 ₽" (с копейками). Правильный разбор ОБЯЗАН учитывать позицию
+// запятой как разделитель дробной части, а не просто вырезать все нецифровые
+// символы (это дало бы 193400 для целого случая, но 14560 для дробного —
+// два разных множителя от одной и той же функции стрипинга, ловушка).
+function parseMoneyTextToMinor(text) {
+  const m = /(\d+)(?:,(\d{2}))?\s*₽/.exec(text);
+  if (!m) return null;
+  const rubles = Number(m[1]);
+  const kopecks = m[2] ? Number(m[2]) : 0;
+  return rubles * 100 + kopecks;
+}
 function payoutRowAmount(html, name) {
   const idx = html.indexOf(`payout-row-name">${name}<`);
   if (idx === -1) return null;
   const chunk = html.slice(idx, idx + 600);
-  const m = chunk.match(/payout-row-amount">(\d+) ₽/);
-  return m ? Number(m[1]) : null;
+  const m = chunk.match(/payout-row-amount">([^<]+)</);
+  return m ? parseMoneyTextToMinor(m[1]) : null;
 }
 function statusToneBadge(html, name) {
   const idx = html.indexOf(`payout-row-name">${name}<`);
@@ -258,42 +270,60 @@ test('Живой обзор HQ-экранов: Обзор/Финансы/рес�
     await deliverRealOrder(orderService, db, restB, itemB1.id);
 
     // ---- Ручная арифметика (источник истины №4) ----
+    // Stage 38: комиссия считается ПО КАЖДОМУ ЗАКАЗУ ОТДЕЛЬНО (см.
+    // orderService.js:createOrder — resolveCommissionBps+round применяются
+    // к itemsTotal ОДНОГО заказа), а не на объединённой сумме нескольких
+    // заказов — сумма двух независимо округлённых комиссий НЕ обязана
+    // совпадать с округлением суммы (классический "round(a)+round(b) ≠
+    // round(a+b)"). Поэтому ручная арифметика ниже честно повторяет ЭТУ ЖЕ
+    // формулу для каждого заказа отдельно в minor units, а не одной
+    // комбинированной операцией над рублями, как было до Stage 38 (там
+    // рублёвая грануляция случайно маскировала разницу).
+    const commissionMinor = (rub) => Math.round(rub * 100 * 700 / 10000);
     const expected = {
-      A: { turnover: 850 + 1230, commission: Math.round(2080 * 700 / 10000), get earnings() { return this.turnover - this.commission; } },
-      B: { turnover: 600, commission: Math.round(600 * 700 / 10000), get earnings() { return this.turnover - this.commission; } },
-      refundA: 600,
+      A: {
+        turnoverMinor: (850 + 1230) * 100,
+        commissionMinor: commissionMinor(850) + commissionMinor(1230),
+        get earningsMinor() { return this.turnoverMinor - this.commissionMinor; },
+      },
+      B: {
+        turnoverMinor: 600 * 100,
+        commissionMinor: commissionMinor(600),
+        get earningsMinor() { return this.turnoverMinor - this.commissionMinor; },
+      },
+      refundAMinor: 600 * 100,
     };
-    assert.equal(expected.A.commission, 146);
-    assert.equal(expected.A.earnings, 1934);
-    assert.equal(expected.B.commission, 42);
-    assert.equal(expected.B.earnings, 558);
+    assert.equal(expected.A.commissionMinor, 14560); // 59,50 ₽ + 86,10 ₽
+    assert.equal(expected.A.earningsMinor, 193440);
+    assert.equal(expected.B.commissionMinor, 4200); // 42,00 ₽
+    assert.equal(expected.B.earningsMinor, 55800);
 
-    // ---- Источник истины №2: restaurantFinanceService напрямую ----
+    // ---- Источник истины №2: restaurantFinanceService напрямую (minor units) ----
     const posA = await financeService.getRestaurantFinancialPosition(restA);
     const posB = await financeService.getRestaurantFinancialPosition(restB);
-    assert.equal(posA.turnover, expected.A.turnover);
-    assert.equal(posA.commission, expected.A.commission);
-    assert.equal(posA.restaurantEarnings, expected.A.earnings);
-    assert.equal(posA.successfulRefunds, expected.refundA);
+    assert.equal(posA.turnover, expected.A.turnoverMinor);
+    assert.equal(posA.commission, expected.A.commissionMinor);
+    assert.equal(posA.restaurantEarnings, expected.A.earningsMinor);
+    assert.equal(posA.successfulRefunds, expected.refundAMinor);
     assert.equal(posA.successfulRefundsCount, 1);
-    assert.equal(posB.turnover, expected.B.turnover);
-    assert.equal(posB.commission, expected.B.commission);
+    assert.equal(posB.turnover, expected.B.turnoverMinor);
+    assert.equal(posB.commission, expected.B.commissionMinor);
 
-    // ---- Источник истины №3: сырая БД, независимый пересчёт ----
+    // ---- Источник истины №3: сырая БД, независимый пересчёт (minor units) ----
     const rawA = (await db.query(
       `SELECT COALESCE(SUM(items_total),0)::int AS turnover, COALESCE(SUM(commission_amount),0)::int AS commission
        FROM orders WHERE restaurant_id = $1 AND earned_at IS NOT NULL`,
       [restA],
     ))[0];
-    assert.equal(rawA.turnover, expected.A.turnover);
-    assert.equal(rawA.commission, expected.A.commission);
+    assert.equal(rawA.turnover, expected.A.turnoverMinor);
+    assert.equal(rawA.commission, expected.A.commissionMinor);
     const rawRefundA = (await db.query(
       `SELECT COALESCE(SUM(rf.amount),0)::int AS refunded FROM refunds rf
        JOIN payments p ON p.id = rf.payment_id JOIN orders o ON o.id = p.order_id
        WHERE o.restaurant_id = $1 AND rf.status = 'succeeded'`,
       [restA],
     ))[0];
-    assert.equal(rawRefundA.refunded, expected.refundA);
+    assert.equal(rawRefundA.refunded, expected.refundAMinor);
 
     // ---- Закрыть период, подготовить и подтвердить выплату ТОЛЬКО ресторану А ----
     const pad = (n) => String(n).padStart(2, '0');
@@ -304,8 +334,8 @@ test('Живой обзор HQ-экранов: Обзор/Финансы/рес�
     const closed = await settlementService.closeSettlementPeriod(draft.id);
     const lineA = closed.lines.find((l) => l.restaurant_id === restA);
     const lineB = closed.lines.find((l) => l.restaurant_id === restB);
-    assert.equal(lineA.payable_amount, expected.A.earnings);
-    assert.equal(lineB.payable_amount, expected.B.earnings);
+    assert.equal(lineA.payable_amount, expected.A.earningsMinor);
+    assert.equal(lineB.payable_amount, expected.B.earningsMinor); // 558 ₽ ровно, без копеек
 
     const payoutA = await payoutService.prepareRestaurantPayout(draft.id, restA);
     await payoutService.confirmManualBankTransfer(payoutA.id, {
@@ -322,26 +352,28 @@ test('Живой обзор HQ-экранов: Обзор/Финансы/рес�
     // "Сегодня" (дефолтный период Обзора) должен включать все 3 earned-заказа
     // (2 в А + 1 в Б), созданных и доставленных в момент выполнения теста.
     assert.equal(Number(overviewValues[0]), 3, 'Обзор: 3 заработанных заказа сегодня (2×А + 1×Б)');
-    assert.equal(Number(overviewValues[1].replace(/\D/g, '')), expected.A.turnover + expected.B.turnover, 'Обзор: суммарный оборот');
-    assert.equal(Number(overviewValues[2].replace(/\D/g, '')), expected.A.commission + expected.B.commission, 'Обзор: суммарный доход YAAM');
+    // HTML отображает через formatMinorRub — разбираем ЧЕРЕЗ parseMoneyTextToMinor
+    // (учитывает копейки), не наивным вырезанием нецифровых символов.
+    assert.equal(parseMoneyTextToMinor(overviewValues[1]), expected.A.turnoverMinor + expected.B.turnoverMinor, 'Обзор: суммарный оборот');
+    assert.equal(parseMoneyTextToMinor(overviewValues[2]), expected.A.commissionMinor + expected.B.commissionMinor, 'Обзор: суммарный доход YAAM');
     assert.equal(Number(overviewValues[3]), 2, 'Обзор: 2 ресторана с активностью');
 
     const finance = await getPage(base, cookie, '/hq/finance');
     assert.equal(finance.status, 200);
     const financeValues = metricValues(finance.html); // [заказы, оборот, доход YAAM, сумма ресторанов, (возвраты — опционально)]
-    assert.equal(Number(financeValues[1].replace(/\D/g, '')), expected.A.turnover + expected.B.turnover, 'Финансы: оборот совпадает с Обзором и ручным расчётом');
-    assert.equal(Number(financeValues[2].replace(/\D/g, '')), expected.A.commission + expected.B.commission, 'Финансы: доход YAAM совпадает');
-    assert.equal(Number(financeValues[3].replace(/\D/g, '')), expected.A.earnings + expected.B.earnings, 'Финансы: сумма ресторанов совпадает');
+    assert.equal(parseMoneyTextToMinor(financeValues[1]), expected.A.turnoverMinor + expected.B.turnoverMinor, 'Финансы: оборот совпадает с Обзором и ручным расчётом');
+    assert.equal(parseMoneyTextToMinor(financeValues[2]), expected.A.commissionMinor + expected.B.commissionMinor, 'Финансы: доход YAAM совпадает');
+    assert.equal(parseMoneyTextToMinor(financeValues[3]), expected.A.earningsMinor + expected.B.earningsMinor, 'Финансы: сумма ресторанов совпадает');
     assert.ok(finance.html.includes(`Возвраты · 1 шт`), 'Финансы: возврат по А виден в сводке');
 
     // «Статус выплат» — ИМЕННО та секция, где был найден и исправлен дефект
     // (Task #36): ресторан А теперь должен показывать «Выплачено» С СУММОЙ,
     // ресторан Б — статус готовности к выплате БЕЗ пометки "Выплачено".
     assert.equal(statusToneBadge(finance.html, 'Живой Обзор Хачапурная'), 'Выплачено');
-    assert.equal(payoutRowAmount(finance.html, 'Живой Обзор Хачапурная'), expected.A.earnings, 'после фикса Task #36 сумма выплаты видна на сводном экране');
+    assert.equal(payoutRowAmount(finance.html, 'Живой Обзор Хачапурная'), expected.A.earningsMinor, 'после фикса Task #36 сумма выплаты видна на сводном экране');
     const statusB = statusToneBadge(finance.html, 'Живой Обзор Пиццерия');
     assert.notEqual(statusB, 'Выплачено', 'ресторан Б не был выплачен в этом тесте');
-    assert.equal(payoutRowAmount(finance.html, 'Живой Обзор Пиццерия'), expected.B.earnings, 'сумма к выплате ресторана Б видна и совпадает с payable_amount');
+    assert.equal(payoutRowAmount(finance.html, 'Живой Обзор Пиццерия'), expected.B.earningsMinor, 'сумма к выплате ресторана Б видна и совпадает с payable_amount');
 
     // Секция «Расчётные периоды» на том же экране — сумма ресторанов там же
     // берётся из snapshot закрытого периода (settlementService), не из
@@ -357,7 +389,8 @@ test('Живой обзор HQ-экранов: Обзор/Финансы/рес�
     // Страница деталей выплаты — сумма/статус/метод/номер операции видны и совпадают.
     const payoutDetail = await getPage(base, cookie, `/hq/payouts/${payoutA.id}`);
     assert.equal(payoutDetail.status, 200);
-    assert.ok(payoutDetail.html.includes(`${expected.A.earnings} ₽`), 'страница выплаты показывает верную сумму');
+    const { formatMinorRub } = require('../../services/money');
+    assert.ok(payoutDetail.html.includes(formatMinorRub(expected.A.earningsMinor)), 'страница выплаты показывает верную сумму');
     assert.ok(payoutDetail.html.includes('TEST-LIVE-001'), 'номер операции ручного перевода виден на карточке выплаты');
     assert.ok(!payoutDetail.html.includes(FICT.RS), 'сырой номер счёта не должен утекать в HTML без маскировки (см. Stage 9.6 маскировка в payoutViews.js)');
   } finally {

@@ -11,9 +11,16 @@ const { toMskDate, MSK_SUFFIX } = require('./dateFormat');
 
 const STATUS_LABELS = { draft: 'Черновик', closed: 'Закрыт' };
 const { PERIOD_PAYOUT_STATUS_LABELS } = require('../services/hq/settlementService');
+const moneyLib = require('../services/money');
 
+// Stage 38 — денежные суммы из БД теперь integer minor units (копейки), не
+// рубли. money() остаётся единственной точкой форматирования для owner-
+// facing HTML этого файла (все существующие вызовы money(n) — без
+// изменений), но теперь делегирует канонической moneyLib.formatMinorRub()
+// вместо наивного "${n} ₽" — та же граница, что и everywhere else (services/
+// money.js), не второе параллельное форматирование.
 function money(n) {
-  return `${Number(n) || 0} ₽`;
+  return moneyLib.formatMinorRub(Number(n) || 0);
 }
 
 function formatDateOnly(date) {

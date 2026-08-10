@@ -361,8 +361,9 @@ CREATE TABLE IF NOT EXISTS restaurant_bank_details (
 -- Договор ресторана с YAAM (задание, раздел 5). commission_bps — basis
 -- points (700 = 7%, текущая базовая модель YAAM), НЕ float — то же
 -- целочисленное представление денег/долей, что уже используется во всей
--- остальной схеме (items_total/commission_amount на orders — целые рубли,
--- не float). YAAM HQ Stage 7 подключил это поле к реальному расчёту:
+-- остальной схеме (items_total/commission_amount на orders — integer minor
+-- units с миграции 0014/Stage 38, не float). YAAM HQ Stage 7 подключил это
+-- поле к реальному расчёту:
 -- services/postgresql/orderService.js:resolveCommissionBps() читает его для
 -- ресторана с подписанным (status='signed') и действующим на сегодня
 -- договором, иначе используется FALLBACK_COMMISSION_BPS=700 (та же 7%,
@@ -398,8 +399,8 @@ CREATE TABLE IF NOT EXISTS orders (
   address TEXT NOT NULL,
   fulfillment_type TEXT NOT NULL DEFAULT 'delivery', -- 'delivery' | 'pickup' — выбор клиента при оформлении
   comment TEXT NOT NULL DEFAULT '',
-  items_total INTEGER NOT NULL,              -- сумма блюд, руб. Комиссия YAAM считается от неё.
-  commission_amount INTEGER NOT NULL,        -- 7% на момент создания заказа (фиксируем, а не пересчитываем задним числом)
+  items_total INTEGER NOT NULL,              -- сумма блюд, integer minor units (копейки) с миграции 0014/Stage 38 — 1 ₽ = 100. Комиссия YAAM считается от неё.
+  commission_amount INTEGER NOT NULL,        -- integer minor units (копейки) с миграции 0014/Stage 38. 7% на момент создания заказа (фиксируем, а не пересчитываем задним числом)
   -- Stage 33, миграция 0012: было 10 значений (идентично CHECK в
   -- SQLite-версии), добавлено 11-е — 'ready' ("Заказ готов, ожидает
   -- курьера") — сознательное расхождение ТОЛЬКО на PostgreSQL-стороне
@@ -2782,3 +2783,58 @@ CREATE INDEX IF NOT EXISTS ix_bot_notifications_pending
   WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS ix_bot_notifications_order
   ON bot_notifications (order_id);
+
+-- =========================================================================
+-- YAAM Stage 38 — денежное представление финансового ядра: integer minor
+-- units (копейки), НЕ рубли, НЕ float (миграция 0014_financial_core_
+-- minor_units.sql). Продуктовый слой (menu_items.price/order_items.price/
+-- restaurants.min_order) остаётся целыми рублями — граница ровно одна,
+-- внутри services/postgresql/orderService.js:createOrder(). Комментарии
+-- ниже — те же COMMENT ON COLUMN, что и в самой миграции 0014 (schema.sql
+-- в применении схемы не участвует, только справочник для человека — см.
+-- services/postgresql/migrator.js — поэтому текст продублирован явно,
+-- чтобы свежая и мигрированная база документировали одно и то же).
+-- =========================================================================
+COMMENT ON COLUMN orders.items_total IS
+  'Финансовый снимок суммы заказа в minor units (копейках) — 1 ₽ = 100. '
+  'НЕ рубли с миграции 0014 (Stage 38). Продуктовая цена блюда '
+  '(menu_items.price/order_items.price) по-прежнему целые рубли — граница '
+  'единственная, внутри orderService.js:createOrder().';
+COMMENT ON COLUMN orders.commission_amount IS
+  'Комиссия YAAM в minor units (копейках) с миграции 0014 (Stage 38). '
+  'round(items_total_minor * commission_bps / 10000).';
+COMMENT ON COLUMN payments.amount IS
+  'Сумма платежа в minor units (копейках) с миграции 0014 (Stage 38). '
+  'Провайдерский адаптер (services/paymentProviders/*) по-прежнему '
+  'работает в рублях — конвертация minor<->рубли выполняется ИСКЛЮЧИТЕЛЬНО '
+  'в services/postgresql/orderService.js на границе вызова (services/money.js).';
+COMMENT ON COLUMN refunds.amount IS
+  'Сумма возврата в minor units (копейках) с миграции 0014 (Stage 38). '
+  'trg_refunds_amount_matches_payment сравнивает с payments.amount — обе '
+  'колонки мигрированы в одной транзакции, тождество сохраняется.';
+COMMENT ON COLUMN settlement_restaurant_lines.turnover IS 'Minor units (копейки) с миграции 0014 (Stage 38).';
+COMMENT ON COLUMN settlement_restaurant_lines.yaam_commission IS 'Minor units (копейки) с миграции 0014 (Stage 38).';
+COMMENT ON COLUMN settlement_restaurant_lines.restaurant_earnings IS 'Minor units (копейки) с миграции 0014 (Stage 38).';
+COMMENT ON COLUMN settlement_restaurant_lines.successful_refunds_amount IS 'Minor units (копейки) с миграции 0014 (Stage 38).';
+COMMENT ON COLUMN settlement_restaurant_lines.payable_amount IS 'Minor units (копейки) с миграции 0014 (Stage 38).';
+COMMENT ON COLUMN settlement_restaurant_lines.refund_adjustment_restaurant_amount IS 'Minor units (копейки) с миграции 0014 (Stage 38).';
+COMMENT ON COLUMN settlement_restaurant_lines.refund_adjustment_commission IS 'Minor units (копейки) с миграции 0014 (Stage 38).';
+COMMENT ON COLUMN settlement_restaurant_lines.carry_forward_applied IS 'Minor units (копейки) с миграции 0014 (Stage 38).';
+COMMENT ON COLUMN settlement_restaurant_lines.carry_forward_remaining IS 'Minor units (копейки) с миграции 0014 (Stage 38).';
+COMMENT ON COLUMN settlement_order_lines.items_total_snapshot IS 'Minor units (копейки) с миграции 0014 (Stage 38).';
+COMMENT ON COLUMN settlement_order_lines.commission_amount_snapshot IS 'Minor units (копейки) с миграции 0014 (Stage 38).';
+COMMENT ON COLUMN settlement_order_lines.restaurant_amount_snapshot IS 'Minor units (копейки) с миграции 0014 (Stage 38).';
+COMMENT ON COLUMN settlement_refunds.amount_snapshot IS 'Minor units (копейки) с миграции 0014 (Stage 38).';
+COMMENT ON COLUMN settlement_adjustments.restaurant_amount IS 'Minor units (копейки) с миграции 0014 (Stage 38).';
+COMMENT ON COLUMN settlement_adjustments.commission_amount IS 'Minor units (копейки) с миграции 0014 (Stage 38).';
+COMMENT ON COLUMN restaurant_settlement_balances.debt_amount IS 'Minor units (копейки) с миграции 0014 (Stage 38).';
+COMMENT ON COLUMN restaurant_balance_entries.amount IS 'Minor units (копейки) с миграции 0014 (Stage 38).';
+COMMENT ON COLUMN restaurant_balance_entries.balance_after IS 'Minor units (копейки) с миграции 0014 (Stage 38).';
+COMMENT ON COLUMN restaurant_payouts.amount IS
+  'Сумма выплаты в minor units (копейках) с миграции 0014 (Stage 38). '
+  'Копируется РОВНО ОДИН РАЗ из settlement_restaurant_lines.payable_amount '
+  '(уже в minor units) при подготовке выплаты — не пересчитывается.';
+COMMENT ON COLUMN payout_attempt_requisites.amount IS
+  'Неизменяемый снимок суммы попытки выплаты в minor units (копейках) с '
+  'миграции 0014 (Stage 38) — должен совпадать с restaurant_payouts.amount '
+  '(checkPayoutInvariants проверяет это тождество явно).';

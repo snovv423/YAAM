@@ -181,11 +181,15 @@ test('A: полная сквозная проводка одного заказ�
     };
     const { order } = await orderService.createOrderAndResolve(payload);
 
-    // РУЧНАЯ СВЕРКА 1 — фиксация на создании.
+    // РУЧНАЯ СВЕРКА 1 — фиксация на создании. Stage 38: items_total/
+    // commission_amount теперь integer minor units — 1247 ₽ = 124700 minor,
+    // комиссия 6.5% считается с точностью до копейки (тот же контрольный
+    // пример, что и в итоговом отчёте Stage 38: 124700×650/10000=8105.5 ->
+    // round -> 8106 minor = 81,06 ₽).
     const created = (await db.query('SELECT * FROM orders WHERE id = $1', [order.id]))[0];
-    assert.equal(created.items_total, 1247);
-    assert.equal(created.commission_amount, Math.round(1247 * 650 / 10000)); // 81
-    assert.equal(created.commission_amount, 81);
+    assert.equal(created.items_total, 124700);
+    assert.equal(created.commission_amount, Math.round(124700 * 650 / 10000)); // 8106
+    assert.equal(created.commission_amount, 8106);
     assert.equal(created.earned_at, null, 'ещё не earned — заказ даже не оплачен');
 
     const paymentRow = (await db.query(`SELECT id FROM payments WHERE order_id = $1 ORDER BY id DESC LIMIT 1`, [order.id]))[0];
@@ -210,10 +214,12 @@ test('A: полная сквозная проводка одного заказ�
     await assert.rejects(() => orderService.cancelByCustomer(order.id), /заказ уже готовится/);
 
     // РУЧНАЯ СВЕРКА 3 — live-позиция (restaurantFinanceService), turnover=commission+earnings.
+    // 124700 − 8106 = 116594 minor (1165,94 ₽) — тот же контрольный пример,
+    // что и в итоговом отчёте Stage 38.
     const position = await financeService.getRestaurantFinancialPosition(restaurantId);
-    assert.equal(position.turnover, 1247);
-    assert.equal(position.commission, 81);
-    assert.equal(position.restaurantEarnings, 1166);
+    assert.equal(position.turnover, 124700);
+    assert.equal(position.commission, 8106);
+    assert.equal(position.restaurantEarnings, 116594);
     assert.equal(position.turnover, position.commission + position.restaurantEarnings);
     assert.equal(position.deliveredPaidOrders, 1);
 
@@ -223,10 +229,10 @@ test('A: полная сквозная проводка одного заказ�
     const closed = await settlementService.closeSettlementPeriod(draft.id);
     assert.equal(closed.alreadyClosed, false);
     const line = closed.lines.find((l) => l.restaurant_id === restaurantId);
-    assert.equal(line.turnover, 1247);
-    assert.equal(line.yaam_commission, 81);
-    assert.equal(line.restaurant_earnings, 1166);
-    assert.equal(line.payable_amount, 1166, 'нет долга и нет поздних возвратов — к выплате равно заработку');
+    assert.equal(line.turnover, 124700);
+    assert.equal(line.yaam_commission, 8106);
+    assert.equal(line.restaurant_earnings, 116594);
+    assert.equal(line.payable_amount, 116594, 'нет долга и нет поздних возвратов — к выплате равно заработку');
     assert.equal(line.refund_adjustment_restaurant_amount, 0);
     assert.equal(line.carry_forward_applied, 0);
 
@@ -234,9 +240,9 @@ test('A: полная сквозная проводка одного заказ�
       'SELECT * FROM settlement_order_lines WHERE settlement_period_id = $1 AND order_id = $2',
       [draft.id, order.id],
     ))[0];
-    assert.equal(orderLine.items_total_snapshot, 1247);
-    assert.equal(orderLine.commission_amount_snapshot, 81);
-    assert.equal(orderLine.restaurant_amount_snapshot, 1166);
+    assert.equal(orderLine.items_total_snapshot, 124700);
+    assert.equal(orderLine.commission_amount_snapshot, 8106);
+    assert.equal(orderLine.restaurant_amount_snapshot, 116594);
 
     // Идемпотентность закрытия — повторный вызов не дублирует строки.
     const closedAgain = await settlementService.closeSettlementPeriod(draft.id);
@@ -249,19 +255,19 @@ test('A: полная сквозная проводка одного заказ�
 
     // РУЧНАЯ СВЕРКА 5 — выплата, до "Выплачено".
     const payout = await payoutService.prepareRestaurantPayout(draft.id, restaurantId);
-    assert.equal(payout.amount, 1166);
+    assert.equal(payout.amount, 116594);
     const confirmed = await payoutService.confirmManualBankTransfer(payout.id, {
       operationReference: 'TEST-STAGE37-A-001', paidAt: new Date(), confirmedBy: 'stage37-test',
     });
     assert.equal(confirmed.payout.status, 'succeeded');
-    assert.equal(confirmed.payout.amount, 1166);
+    assert.equal(confirmed.payout.amount, 116594);
 
     // РУЧНАЯ СВЕРКА 6 — то, что реально видит владелец на "Финансы"
     // (payoutStatusService, НЕ мёртвый payableBalance) отражает "Выплачено".
     const statuses = await payoutStatusService.listPayoutStatuses();
     const row = statuses.find((s) => s.restaurantId === restaurantId);
     assert.equal(row.status, 'paid');
-    assert.equal(row.amount, 1166);
+    assert.equal(row.amount, 116594);
 
     // Инвариант-проверки трёх слоёв не находят расхождений после полного цикла.
     const finInv = await financeService.checkFinancialInvariants();
@@ -294,10 +300,12 @@ test('B: заказ самовывоза — earned_at фиксируется н
       createIdempotencyKey: `yaam_create_v1_${crypto.randomBytes(32).toString('base64url')}`,
     };
     const { order } = await orderService.createOrderAndResolve(payload);
-    // Нет подписанного договора — fallback 700 bps (7%).
+    // Нет подписанного договора — fallback 700 bps (7%). Stage 38: 999 ₽ =
+    // 99900 minor, комиссия с точностью до копейки: round(99900*700/10000)
+    // = round(6993) = 6993 minor (точно 69,93 ₽, без остатка округления).
     const created = (await db.query('SELECT * FROM orders WHERE id = $1', [order.id]))[0];
-    assert.equal(created.commission_amount, Math.round(999 * 700 / 10000)); // 70
-    assert.equal(created.commission_amount, 70);
+    assert.equal(created.commission_amount, Math.round(99900 * 700 / 10000)); // 6993
+    assert.equal(created.commission_amount, 6993);
 
     const paymentRow = (await db.query(`SELECT id FROM payments WHERE order_id = $1 ORDER BY id DESC LIMIT 1`, [order.id]))[0];
     await orderService.markPaid(order.id, paymentRow.id);
@@ -314,9 +322,9 @@ test('B: заказ самовывоза — earned_at фиксируется н
     assert.ok(after.earned_at, 'pickup: earned_at должен зафиксироваться на preparing->delivered');
 
     const position = await financeService.getRestaurantFinancialPosition(restaurantId);
-    assert.equal(position.turnover, 999);
-    assert.equal(position.commission, 70);
-    assert.equal(position.restaurantEarnings, 929);
+    assert.equal(position.turnover, 99900);
+    assert.equal(position.commission, 6993);
+    assert.equal(position.restaurantEarnings, 92907);
   } finally {
     await db.close();
     delete process.env.DATABASE_URL;

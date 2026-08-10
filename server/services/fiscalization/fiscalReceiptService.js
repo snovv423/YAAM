@@ -23,6 +23,7 @@ const crypto = require('node:crypto');
 const db = require('../../db/postgresql');
 const { logAuditEvent } = require('../hq/auditLog');
 const { FiscalProviderError } = require('./fiscalProviderInterface');
+const money = require('../money');
 
 // Максимум попыток до перевода чека в failed. Бесконечный повтор скрыл бы
 // системную проблему, а один шанс не переживёт обычного сетевого сбоя.
@@ -103,7 +104,14 @@ async function buildPaymentReceiptPayload(orderId, { client = null } = {}) {
     order: {
       id: order.id,
       publicCode: order.public_code,
-      itemsTotal: order.items_total,
+      // Stage 38 — orders.items_total хранится в integer minor units, но
+      // items[].amount ниже построен из order_items.price/qty (продуктовый
+      // слой, ОСТАЁТСЯ целыми рублями — граница минора не затрагивает
+      // order_items). Единственный способ не смешать две единицы в ОДНОМ
+      // payload — привести ВЕСЬ документ к рублям здесь, на границе сборки
+      // (заодно совпадает с фактическим требованием 54-ФЗ: фискальный чек
+      // денежно исчисляется в рублях с копейками, не в "сырых" minor units).
+      itemsTotal: money.minorToRublesNumber(order.items_total),
       // Доставка на старте выполняется рестораном и через YAAM не
       // оплачивается (CLAUDE.md), поэтому строки доставки в чеке нет.
       // Появится оплата доставки — появится и позиция.
@@ -128,8 +136,9 @@ async function buildPaymentReceiptPayload(orderId, { client = null } = {}) {
       quantity: i.qty,
       amount: i.price * i.qty,
     })),
-    agentCommission: order.commission_amount,
-    total: order.items_total,
+    // Stage 38 — та же граница рублей, что и itemsTotal выше.
+    agentCommission: money.minorToRublesNumber(order.commission_amount),
+    total: money.minorToRublesNumber(order.items_total),
     // Явно фиксируем, что признаки 54-ФЗ не проставлены и почему.
     pendingLegal: {
       paymentSubjectSign: 'не согласован',
@@ -166,11 +175,14 @@ async function buildRefundReceiptPayload(refundId, { client = null } = {}) {
     kind: 'refund',
     refund: {
       id: refund.refund_id,
-      amount: refund.amount,
+      // Stage 38 — та же граница рублей, что и в buildPaymentReceiptPayload:
+      // refunds.amount хранится в minor units, весь остальной payload (base)
+      // уже приведён к рублям выше по стеку.
+      amount: money.minorToRublesNumber(refund.amount),
       isFull,
     },
     items: isFull ? base.items : [],
-    total: refund.amount,
+    total: money.minorToRublesNumber(refund.amount),
     pendingLegal: {
       ...base.pendingLegal,
       ...(isFull ? {} : {

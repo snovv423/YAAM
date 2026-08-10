@@ -190,16 +190,22 @@ test('L2-L6: обновление применяет 0002 и 0003, схема с
   client.release();
   assert.equal(fp.compatible, true, `после обновления схема обязана быть совместимой: ${fp.missing}`);
 
-  // L6 — все исходные данные сохранены.
+  // L6 — все исходные данные сохранены, КРОМЕ денежных величин, которые
+  // Stage 38 (миграция 0014, теперь тоже часть этого обновления) законно
+  // переводит в minor units (×100) — единственное осознанное расхождение,
+  // не потеря данных.
   const after = await snapshotData(db);
-  assert.deepEqual(after, before, 'обновление не должно изменять данные');
+  assert.deepEqual({ ...after, payable: undefined }, { ...before, payable: undefined },
+    'обновление не должно изменять НЕ-денежные данные');
+  assert.equal(after.payable, before.payable * 100,
+    'payable_amount обязан быть переведён в minor units миграцией 0014, не потерян и не задвоен');
 
   // Новые колонки получили корректные значения на СУЩЕСТВУЮЩЕЙ строке.
   const line = (await db.query('SELECT * FROM settlement_restaurant_lines LIMIT 1'))[0];
   assert.equal(line.carry_forward_applied, 0);
   assert.equal(line.carry_forward_remaining, 0);
   assert.equal(line.refund_adjustment_restaurant_amount, 0);
-  assert.equal(line.yaam_commission_net, 70, 'вычисляемая колонка посчитана на старой строке');
+  assert.equal(line.yaam_commission_net, 7000, 'вычисляемая колонка посчитана на старой строке (Stage 38: minor units)');
   assert.equal(line.payout_blocked_reason, null, 'payable_amount>0 и долга нет');
 
   // Новые audit-действия теперь принимаются базой (раньше CHECK их отвергал).
@@ -217,12 +223,12 @@ test('L7: повторный запуск ничего не применяет',
   const first = await migrator.migrate({ logger: quiet });
   // Stage 25: аддитивная миграция 0006 расширяет счёт с 5 до 6 — сам факт
   // "повторный запуск ничего не применяет" ниже это не меняет. Stage 33
-  // добавила 0012 (было 11); Stage 33.1 — 0013.
-  assert.equal(first.applied.length, 13);
+  // добавила 0012 (было 11); Stage 33.1 — 0013; Stage 38 — 0014.
+  assert.equal(first.applied.length, 14);
   const second = await migrator.migrate({ logger: quiet });
   assert.deepEqual(second.applied, []);
   const rows = await db.query('SELECT version FROM schema_migrations ORDER BY version');
-  assert.deepEqual(rows.map((r) => r.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+  assert.deepEqual(rows.map((r) => r.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
   await db.close();
 });
 
@@ -431,9 +437,9 @@ test('L13: конкурентный запуск применяет каждую
   const total = results.reduce((n, r) => n + r.applied.length, 0);
 
   const rows = await db.query('SELECT version, count(*)::int n FROM schema_migrations GROUP BY version ORDER BY version');
-  assert.deepEqual(rows.map((r) => r.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+  assert.deepEqual(rows.map((r) => r.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
   assert.ok(rows.every((r) => r.n === 1), 'каждая версия записана ровно один раз');
-  assert.equal(total, 13, 'суммарно применено ровно тринадцать миграций (Stage 31 добавила 0010, 0011; Stage 33 — 0012; Stage 33.1 — 0013)');
+  assert.equal(total, 14, 'суммарно применено ровно четырнадцать миграций (Stage 31 добавила 0010, 0011; Stage 33 — 0012; Stage 33.1 — 0013; Stage 38 — 0014)');
   await db.close();
 });
 
@@ -441,13 +447,13 @@ test('L13: конкурентный запуск применяет каждую
 // 14-15. Пустая база и согласованность справочника
 // ===========================================================================
 
-test('L14: пустая база проходит строго 0001 -> 0002 -> ... -> 0012 -> 0013', async () => {
+test('L14: пустая база проходит строго 0001 -> 0002 -> ... -> 0013 -> 0014', async () => {
   await cluster.createDatabase('lg_empty');
   process.env.DATABASE_URL = cluster.connectionString('lg_empty');
   const { db, migrator } = requireFresh();
 
   const result = await migrator.migrate({ logger: quiet });
-  assert.deepEqual(result.applied.map((a) => a.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+  assert.deepEqual(result.applied.map((a) => a.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
   // На пустой базе НИЧЕГО не отмечается — всё выполняется.
   assert.ok(result.applied.every((a) => a.adopted === false));
 
@@ -517,7 +523,7 @@ test('L16: 0003 не содержит разрушающих операций и
 
   const { migrator } = requireFresh();
   const files = migrator.listMigrationFiles();
-  assert.deepEqual(files.map((f) => f.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+  assert.deepEqual(files.map((f) => f.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
   const m3 = files.find((f) => f.version === 3);
   assert.doesNotThrow(() => migrator.assertNotSilentlyDestructive(m3));
   // 0004 (Stage 19.1) — только расширение CHECK-списка аудита: ни одной

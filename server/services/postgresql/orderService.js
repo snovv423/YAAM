@@ -234,6 +234,12 @@ const db = require('../../db/postgresql');
 // эти функции вызывают, но НЕ изменяют provider layer, тем же принципом,
 // что SQLite-оригинал.
 const payments = require('../paymentService');
+// Stage 38 — единственное место, где PostgreSQL-путь конвертирует
+// integer minor units (money-колонки этого файла) <-> рубли для вызова
+// paymentService.js/провайдеров (те СОЗНАТЕЛЬНО не переведены на minor
+// units — общий с legacy SQLite-путём файл, см. services/money.js за
+// полным обоснованием границы).
+const money = require('../money');
 
 // PostgreSQL-эквивалент SQLite orderEvents (см. "Production Switch — Stage 2"
 // выше) — структурно независимый инстанс, те же имена событий/форма payload.
@@ -713,18 +719,29 @@ async function createOrder({
     trustedItems.push({ menuItemId, name: real.name, price: real.price, qty });
   }
 
-  const itemsTotal = trustedItems.reduce((sum, i) => sum + i.price * i.qty, 0);
-  if (itemsTotal < restaurant.min_order) {
-    throw new OrderCreationInputError(`сумма заказа ${itemsTotal} меньше минимальной ${restaurant.min_order}`);
+  // ГРАНИЦА (Stage 38, единственная во всей системе): продуктовые целые
+  // рубли (menu_items.price, доверенно прочитанные выше в trustedItems)
+  // суммируются и ЗДЕСЬ ЖЕ, один раз, переводятся в integer minor units —
+  // с этой строки itemsTotal является ФИНАНСОВЫМ значением (копейки), а не
+  // продуктовым (рубли). restaurant.min_order остаётся продуктовой
+  // настройкой в целых рублях (владелец вводит её как рубли) — сравнение
+  // поэтому явно переводит min_order на ту же сторону границы, а не
+  // наоборот (round-trip через money.rublesToMinor исключает дробные рубли
+  // на входе структурно, см. services/money.js).
+  const itemsTotalRubles = trustedItems.reduce((sum, i) => sum + i.price * i.qty, 0);
+  const itemsTotal = money.rublesToMinor(itemsTotalRubles);
+  if (itemsTotal < money.rublesToMinor(restaurant.min_order)) {
+    throw new OrderCreationInputError(`сумма заказа ${itemsTotalRubles} меньше минимальной ${restaurant.min_order}`);
   }
   // YAAM HQ Stage 7 — комиссия из подписанного активного договора ресторана
   // (см. resolveCommissionBps выше за полным обоснованием момента фиксации),
   // fallback 700 bps (7%), если договора нет/не подписан/вне срока действия.
-  // Integer math — Math.round(itemsTotal * commissionBps / 10000), НЕ float
-  // 0.07 (задание, раздел 9) — численно идентично для fallback-случая,
-  // проверено server/test/postgresql/resolveCommissionBpsStage7.test.js.
+  // Integer math — Math.round(itemsTotal_minor * commissionBps / 10000), НЕ
+  // float 0.07 (задание, раздел 9) — теперь с точностью до копейки (Stage
+  // 38), не до рубля, проверено server/test/postgresql/
+  // resolveCommissionBpsStage7.test.js и stage38MoneyUnit.test.js.
   const commissionBps = await resolveCommissionBps(restaurantId);
-  const commission = Math.round(itemsTotal * commissionBps / 10000);
+  const commission = money.computeCommissionMinor(itemsTotal, commissionBps);
 
   return db.serializableTransaction(async (client) => {
     const exactReplay = await initialAttemptRowByCredentials(tokenHash, createKeyHash, client);
@@ -1337,7 +1354,10 @@ async function reportDuplicatePaymentEvent(payment, canonicalId, { blocked }) {
       restaurantName: row.restaurant_name || null,
       orderId: payment.order_id,
       orderPublicCode: row.public_code || null,
-      message: `Двойное списание по заказу: подтверждён лишний платёж на ${payment.amount} ₽ `
+      // Stage 38 — payment.amount теперь integer minor units, владельцу
+      // показываем человеческую сумму в рублях (money.formatMinorRub), не
+      // сырое значение колонки.
+      message: `Двойное списание по заказу: подтверждён лишний платёж на ${money.formatMinorRub(payment.amount)} `
         + `(учитываемый платёж #${canonicalId}). ${tail}`,
     });
   } catch (err) {
@@ -2453,7 +2473,12 @@ function toPublicOrderDTO(order) {
     restaurant_response_deadline_at, address, comment,
   } = order;
   return {
-    public_code, status, status_updated_at, items_total,
+    public_code, status, status_updated_at,
+    // Stage 38 — items_total хранится в minor units (копейках); клиент
+    // продолжает получать целое число рублей, как и раньше (items_total
+    // всегда кратен 100 minor units — продуктовые цены целые рубли), без
+    // единой правки на стороне client/js/*.js.
+    items_total: money.minorToRublesNumber(items_total),
     estimated_ready_minutes, restaurant_phone, fulfillment_type, rating,
     // Stage 35.1 — владелец заказа (только этот DTO, требует order access
     // token — см. requireOrderAccess) обязан видеть собственный адрес/
@@ -2527,7 +2552,8 @@ function toSharedOrderDTO(order) {
     is_paid: SHARED_ORDER_PAID_STATUSES.has(status),
     estimated_ready_minutes,
     items: (items || []).map((item) => ({ name: item.name, price: item.price, qty: item.qty })),
-    items_total,
+    // Stage 38 — та же граница, что и в toPublicOrderDTO выше.
+    items_total: money.minorToRublesNumber(items_total),
   };
 }
 
@@ -2650,7 +2676,7 @@ async function ensureInitialAttemptReady(attempt) {
     try {
       payment = await createPaymentWithTimeout({
         orderId: attempt.order_id,
-        amount: attempt.amount,
+        amount: money.minorToRublesNumber(attempt.amount),
         description: `Заказ ${order.public_code}`,
         idempotencyKey: attempt.provider_idempotency_key,
       });
@@ -2767,7 +2793,7 @@ async function ensureRetryAttemptReady(attempt) {
     try {
       payment = await createPaymentWithTimeout({
         orderId: attempt.order_id,
-        amount: attempt.amount,
+        amount: money.minorToRublesNumber(attempt.amount),
         description: `Заказ ${order.public_code} (повторная попытка)`,
         idempotencyKey: attempt.provider_idempotency_key,
       });
@@ -3122,13 +3148,13 @@ async function processClaimedRefund(claimedRefund) {
         refundId: claimedRefund.provider_refund_id,
         status: await payments.getRefundStatus(claimedRefund.provider_refund_id, {
           providerPaymentId: payment.provider_payment_id,
-          amount: claimedRefund.amount,
+          amount: money.minorToRublesNumber(claimedRefund.amount),
         }),
       };
     } else {
       result = await refundPaymentWithTimeout({
         providerPaymentId: payment.provider_payment_id,
-        amount: claimedRefund.amount,
+        amount: money.minorToRublesNumber(claimedRefund.amount),
         idempotencyKey: claimedRefund.provider_idempotency_key,
       });
     }

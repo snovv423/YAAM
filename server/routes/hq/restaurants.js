@@ -33,6 +33,7 @@ const { layout } = require('../../hq/layout');
 const views = require('../../hq/restaurantsViews');
 const menuViews = require('../../hq/menuViews');
 const financeViews = require('../../hq/restaurantFinanceViews');
+const { formatMinorRub } = require('../../services/money');
 
 function notFoundBody(linkBasePath) {
   return `<h1>Ресторан не найден</h1><div class="panel"><div class="empty-state">Проверьте адрес или вернитесь к списку.</div></div><a class="btn ghost" href="${linkBasePath}/restaurants">← К списку ресторанов</a>`;
@@ -273,7 +274,7 @@ function createRestaurantsRouter({ linkBasePath, mediaProvider = null }) {
       const payout = await payoutStateService.payRestaurantNow(req.restaurant.id);
       await logAuditEvent({
         action: 'restaurant_payout_prepared', restaurantId: req.restaurant.id,
-        details: `выплата #${payout.id}: ${payout.amount} ₽`, ip: req.ip,
+        details: `выплата #${payout.id}: ${formatMinorRub(payout.amount)}`, ip: req.ip,
       });
       res.redirect(`${base}?notice=${encodeURIComponent('Выплата подготовлена. Деньги будут отправлены после подключения банка.')}`);
     } catch (err) {

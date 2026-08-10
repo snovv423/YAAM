@@ -35,6 +35,10 @@ const { ValidationError } = require('../../services/hq/restaurantAdminService');
 const yaamBankDetailsService = require('../../services/hq/yaamBankDetailsService');
 const { logAuditEvent, summarizeYaamBankDetailsDiff } = require('../../services/hq/auditLog');
 const { maskAccountForUi } = require('../../services/hq/ruRequisites');
+// Stage 38 — turnover/commission/restaurantEarnings/successfulRefunds/
+// payout.amount ниже все теперь integer minor units; formatMinorRub()
+// единственное место, форматирующее их владельцу.
+const { formatMinorRub } = require('../../services/money');
 
 const STATUS_LABELS = {
   awaiting_payment: 'Ожидают оплаты',
@@ -71,8 +75,8 @@ function renderOverviewMetrics(metrics) {
   return `
     <div class="metric-grid compact">
       <div class="metric"><div class="value">${metrics.ordersCount}</div><div class="label">Заказы</div></div>
-      <div class="metric"><div class="value">${metrics.turnover} ₽</div><div class="label">Оборот</div></div>
-      <div class="metric"><div class="value">${metrics.commission} ₽</div><div class="label">Доход YAAM</div></div>
+      <div class="metric"><div class="value">${formatMinorRub(metrics.turnover)}</div><div class="label">Оборот</div></div>
+      <div class="metric"><div class="value">${formatMinorRub(metrics.commission)}</div><div class="label">Доход YAAM</div></div>
       <div class="metric"><div class="value">${metrics.restaurantsCount}</div><div class="label">Рестораны</div></div>
     </div>`;
 }
@@ -200,12 +204,12 @@ function renderCustomPeriodForm({ periodOptions, baseUrl }) {
 function renderFinanceSummary(overall) {
   const cards = [
     [`${overall.deliveredPaidOrders}`, 'Выполненные заказы'],
-    [`${overall.turnover} ₽`, 'Оборот'],
-    [`${overall.commission} ₽`, 'Доход YAAM'],
-    [`${overall.restaurantEarnings} ₽`, 'Сумма ресторанов'],
+    [formatMinorRub(overall.turnover), 'Оборот'],
+    [formatMinorRub(overall.commission), 'Доход YAAM'],
+    [formatMinorRub(overall.restaurantEarnings), 'Сумма ресторанов'],
   ];
   if (overall.successfulRefundsCount > 0) {
-    cards.push([`${overall.successfulRefunds} ₽`, `Возвраты · ${overall.successfulRefundsCount} шт`]);
+    cards.push([formatMinorRub(overall.successfulRefunds), `Возвраты · ${overall.successfulRefundsCount} шт`]);
   }
   return `<div class="metric-grid compact">${cards.map(([value, label]) => `
     <div class="metric"><div class="value">${esc(value)}</div><div class="label">${esc(label)}</div></div>`).join('')}</div>`;
@@ -224,7 +228,7 @@ function renderPayoutStatusSection({ statuses, csrfToken, linkBasePath }) {
           ? `${linkBasePath}/payouts/${s.payoutId}`
           : `${linkBasePath}/restaurants/${s.restaurantId}`;
         const payButton = s.canPay
-          ? `<form method="post" action="${linkBasePath}/finance/payouts/${s.restaurantId}/pay" onsubmit="return confirm('${esc(`Подготовить выплату «${s.name}» на ${s.amount} ₽?`)}')" style="margin:0">
+          ? `<form method="post" action="${linkBasePath}/finance/payouts/${s.restaurantId}/pay" onsubmit="return confirm('${esc(`Подготовить выплату «${s.name}» на ${formatMinorRub(s.amount)}?`)}')" style="margin:0">
                <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
                <button type="submit" class="compact">Подготовить выплату</button>
              </form>`
@@ -235,7 +239,7 @@ function renderPayoutStatusSection({ statuses, csrfToken, linkBasePath }) {
               <div class="payout-row-name">${esc(s.name)}</div>
               <div class="payout-row-meta">
                 <span class="status-badge ${s.statusTone}">${esc(s.statusLabel)}</span>
-                ${s.amount > 0 ? `<span class="payout-row-amount">${s.amount} ₽</span>` : ''}
+                ${s.amount > 0 ? `<span class="payout-row-amount">${formatMinorRub(s.amount)}</span>` : ''}
               </div>
             </div>
             <div class="payout-row-actions">
@@ -505,7 +509,7 @@ function createPagesRouter({ linkBasePath, mediaProvider = null }) {
         return res.redirect(`${base}?error=${encodeURIComponent('Некорректный ресторан.')}`);
       }
       const payout = await payoutStatusService.payRestaurant(restaurantId, { ip: req.ip });
-      res.redirect(`${base}?notice=${encodeURIComponent(`Выплата подготовлена: ${payout.amount} ₽. Деньги будут отправлены после подключения банка.`)}`);
+      res.redirect(`${base}?notice=${encodeURIComponent(`Выплата подготовлена: ${formatMinorRub(payout.amount)}. Деньги будут отправлены после подключения банка.`)}`);
     } catch (err) {
       if (err instanceof payoutRecordService.ValidationError) {
         return res.redirect(`${base}?error=${encodeURIComponent(err.message)}`);

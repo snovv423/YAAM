@@ -211,20 +211,23 @@ test('createOrder: старый заказ сохраняет snapshot коми�
       };
     }
 
+    // Stage 38 — items_total/commission_amount теперь integer minor units
+    // (копейки): 1000 ₽ товара -> 100000 minor, комиссия считается от него.
     const first = await orderService.createOrder(makeParams('+79001234567'));
     const firstOrder = (await db.query('SELECT * FROM orders WHERE id = $1', [first.orderId]))[0];
-    assert.equal(firstOrder.commission_amount, Math.round(1000 * 500 / 10000)); // 50
+    assert.equal(firstOrder.items_total, 100000);
+    assert.equal(firstOrder.commission_amount, Math.round(100000 * 500 / 10000)); // 5000 minor = 50 ₽
 
     // Комиссия договора меняется ПОСЛЕ создания первого заказа.
     await db.execute('UPDATE restaurant_contracts SET commission_bps = $1 WHERE restaurant_id = $2', [900, restaurantId]);
 
     const second = await orderService.createOrder(makeParams('+79007654321'));
     const secondOrder = (await db.query('SELECT * FROM orders WHERE id = $1', [second.orderId]))[0];
-    assert.equal(secondOrder.commission_amount, Math.round(1000 * 900 / 10000)); // 90
+    assert.equal(secondOrder.commission_amount, Math.round(100000 * 900 / 10000)); // 9000 minor = 90 ₽
 
     // Старый заказ НЕ пересчитан задним числом.
     const firstOrderAfter = (await db.query('SELECT * FROM orders WHERE id = $1', [first.orderId]))[0];
-    assert.equal(firstOrderAfter.commission_amount, 50, 'старый заказ должен сохранить исходный snapshot комиссии');
+    assert.equal(firstOrderAfter.commission_amount, 5000, 'старый заказ должен сохранить исходный snapshot комиссии');
   } finally {
     await db.close();
     delete process.env.DATABASE_URL;
