@@ -26,6 +26,7 @@ const payments = require('../paymentService');
 const orderService = require('./orderService');
 const { logAuditEvent } = require('../hq/auditLog');
 const { CATEGORIES } = require('../paymentProviders/providerErrorTaxonomy');
+const { minorToRublesNumber } = require('../money');
 
 // Платёж моложе этого возраста не сверяется: покупатель может всё ещё стоять
 // на форме оплаты, а webhook — быть в пути. Сверка нужна для ЗАБЫТЫХ
@@ -116,7 +117,10 @@ async function recordAttempt(paymentId, { nextCheckAt = null, errorCode = null, 
 async function reconcileOne(payment, { now = new Date() } = {}) {
   let providerStatus;
   try {
-    providerStatus = await payments.getPaymentStatus(payment.provider_payment_id);
+    providerStatus = await payments.getPaymentStatus(payment.provider_payment_id, {
+      amount: minorToRublesNumber(payment.amount),
+      currency: 'RUB',
+    });
   } catch (err) {
     const code = errorCategory(err);
     const safe = safeErrorText(err);

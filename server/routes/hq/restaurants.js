@@ -276,7 +276,7 @@ function createRestaurantsRouter({ linkBasePath, mediaProvider = null }) {
         action: 'restaurant_payout_prepared', restaurantId: req.restaurant.id,
         details: `выплата #${payout.id}: ${formatMinorRub(payout.amount)}`, ip: req.ip,
       });
-      res.redirect(`${base}?notice=${encodeURIComponent('Выплата подготовлена. Деньги будут отправлены после подключения банка.')}`);
+      res.redirect(`${base}?notice=${encodeURIComponent('Выплата подготовлена. Переведите деньги вручную в банковском клиенте, затем отметьте выплату выполненной.')}`);
     } catch (err) {
       if (err instanceof payoutRecordService.ValidationError) {
         return res.redirect(`${base}?error=${encodeURIComponent(err.message)}`);

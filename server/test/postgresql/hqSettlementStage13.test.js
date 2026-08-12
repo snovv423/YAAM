@@ -161,6 +161,13 @@ async function getPage(base, cookie, urlPath) {
   const html = await res.text();
   return { res, html, status: res.status, csrf: html.includes('name="_csrf"') ? extractCsrf(html) : null };
 }
+async function postForm(base, cookie, urlPath, csrf, fields = {}) {
+  return fetch(`${base}${urlPath}`, {
+    method: 'POST', redirect: 'manual',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie },
+    body: new URLSearchParams({ _csrf: csrf, ...fields }).toString(),
+  });
+}
 
 // --- Фикстуры ---
 async function createRestaurant(db, name) {
@@ -705,7 +712,7 @@ test('H2: после подтверждённой выплаты сообщен�
     await seedYaam(db);
     await seedRestaurantLegal(db, restId);
     await db.execute("UPDATE restaurants SET telegram_chat_id = 'chat-h2' WHERE id = $1", [restId]);
-    await createEarnedOrder(db, restId, { itemsTotal: 1000, commissionAmount: 70, deliveredAt: utcFromMoscow(2026, 7, 29, 12, 0) });
+    await createEarnedOrder(db, restId, { itemsTotal: 41800, commissionAmount: 7350, deliveredAt: utcFromMoscow(2026, 7, 29, 12, 0) });
     await weekly.runWeeklySettlementJob({ now: utcFromMoscow(2026, 8, 9, 7, 5) });
 
     const payout = await payoutStatusService.payRestaurant(restId);
@@ -724,9 +731,9 @@ test('H2: после подтверждённой выплаты сообщен�
     assert.equal(sent.length, 1);
     assert.equal(sent[0].chatId, 'chat-h2', 'сообщение ушло в группу своего ресторана');
     assert.match(sent[0].text, /Выплата за/);
-    assert.match(sent[0].text, /Продажи: 1000 ₽/);
-    assert.match(sent[0].text, /Комиссия YAAM: 70 ₽/);
-    assert.match(sent[0].text, /Перечислено: 930 ₽/);
+    assert.match(sent[0].text, /Продажи: 418 ₽/);
+    assert.match(sent[0].text, /Комиссия YAAM: 73,50 ₽/);
+    assert.match(sent[0].text, /Перечислено: 344,50 ₽/);
     // Банковские реквизиты в чат не уходят.
     assert.ok(!sent[0].text.includes(FICTITIOUS_RS));
     assert.ok(!sent[0].text.includes(FICTITIOUS_BIK));
@@ -888,6 +895,104 @@ test('I: карточки периодов и детальная страниц�
     // Ручных маршрутов больше нет.
     const removedNew = await fetch(`${base}/hq/finance/settlements/new`, { headers: { Cookie: cookie } });
     assert.equal(removedNew.status, 404, 'GET /finance/settlements/new удалён');
+  } finally {
+    await stopApp(instance);
+  }
+});
+
+test('I1: прямой POST prepare применяет canonical readiness, FIFO и duplicate guard', async () => {
+  const databaseUrl = await freshDatabase('settle13_prepare_readiness');
+  process.env.DATABASE_URL = databaseUrl;
+  const { db, weekly } = requireFreshModules();
+  const cases = [
+    ['Нет legal', 'legal'],
+    ['Нет банка', 'bank'],
+    ['Нет договора', 'contract'],
+    ['Нет контакта', 'contact'],
+    ['Полностью готов', 'ready'],
+  ];
+  const restaurants = [];
+  await seedYaam(db);
+  for (const [name, kind] of cases) {
+    // eslint-disable-next-line no-await-in-loop
+    const restaurantId = await createRestaurant(db, name);
+    // eslint-disable-next-line no-await-in-loop
+    await seedRestaurantLegal(db, restaurantId, `ИП ${name}`);
+    // eslint-disable-next-line no-await-in-loop
+    await createEarnedOrder(db, restaurantId, {
+      itemsTotal: 41800, commissionAmount: 7350,
+      deliveredAt: utcFromMoscow(2026, 7, 29, 12, 0),
+    });
+    restaurants.push({ restaurantId, kind });
+  }
+  await weekly.runWeeklySettlementJob({
+    now: utcFromMoscow(2026, 8, 9, 7, 5), generateDocuments: false, notifyRestaurants: false,
+  });
+  const periodId = (await db.query('SELECT id FROM settlement_periods'))[0].id;
+
+  for (const row of restaurants) {
+    if (row.kind === 'legal') {
+      // eslint-disable-next-line no-await-in-loop
+      await db.execute('DELETE FROM restaurant_legal_details WHERE restaurant_id=$1', [row.restaurantId]);
+    } else if (row.kind === 'bank') {
+      // eslint-disable-next-line no-await-in-loop
+      await db.execute('DELETE FROM restaurant_bank_details WHERE restaurant_id=$1', [row.restaurantId]);
+    } else if (row.kind === 'contract') {
+      // eslint-disable-next-line no-await-in-loop
+      await db.execute('DELETE FROM restaurant_contracts WHERE restaurant_id=$1', [row.restaurantId]);
+    } else if (row.kind === 'contact') {
+      // eslint-disable-next-line no-await-in-loop
+      await db.execute("UPDATE restaurant_legal_details SET director_name='' WHERE restaurant_id=$1", [row.restaurantId]);
+    }
+  }
+  await db.close();
+
+  const { instance, base } = await startApp(databaseUrl);
+  try {
+    const cookie = await loginHq(base);
+    const detail = await getPage(base, cookie, `/hq/finance/settlements/${periodId}`);
+    assert.equal(detail.status, 200);
+
+    for (const row of restaurants.filter((r) => r.kind !== 'ready')) {
+      // eslint-disable-next-line no-await-in-loop
+      const response = await postForm(
+        base, cookie,
+        `/hq/finance/settlements/${periodId}/payouts/${row.restaurantId}/prepare`,
+        detail.csrf,
+      );
+      assert.equal(response.status, 302);
+      assert.match(response.headers.get('location'), /\?error=/);
+    }
+
+    const ready = restaurants.find((r) => r.kind === 'ready');
+    const created = await postForm(
+      base, cookie,
+      `/hq/finance/settlements/${periodId}/payouts/${ready.restaurantId}/prepare`,
+      detail.csrf,
+    );
+    assert.equal(created.status, 302);
+    assert.match(created.headers.get('location'), /\/hq\/payouts\/\d+$/);
+
+    const duplicate = await postForm(
+      base, cookie,
+      `/hq/finance/settlements/${periodId}/payouts/${ready.restaurantId}/prepare`,
+      detail.csrf,
+    );
+    assert.equal(duplicate.status, 302);
+    assert.match(duplicate.headers.get('location'), /\?error=/);
+
+    process.env.DATABASE_URL = databaseUrl;
+    const verify = requireFreshModules().db;
+    const payouts = await verify.query('SELECT restaurant_id, amount FROM restaurant_payouts');
+    // startApp() выполняет historical 0014 над legacy-style test fixture:
+    // 34 450 рублей становятся 3 445 000 minor units ровно один раз.
+    assert.deepEqual(payouts, [{ restaurant_id: ready.restaurantId, amount: 3445000 }]);
+    const audit = await verify.query(
+      "SELECT details FROM hq_audit_log WHERE action='payout_created' AND restaurant_id=$1 ORDER BY id DESC LIMIT 1",
+      [ready.restaurantId],
+    );
+    assert.match(audit[0].details, /amount=34450 ₽/);
+    await verify.close();
   } finally {
     await stopApp(instance);
   }

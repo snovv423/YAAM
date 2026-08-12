@@ -320,7 +320,9 @@ async function listWeeksWithFinancialActivity(client = null) {
          FROM refunds rf
          JOIN payments p ON p.id = rf.payment_id
          JOIN orders o2 ON o2.id = p.order_id
-        WHERE rf.status = 'succeeded' AND rf.completed_at IS NOT NULL
+        WHERE rf.status = 'succeeded'
+          AND rf.reason IN (${financeService.SALE_REVERSING_REFUND_REASONS_SQL})
+          AND rf.completed_at IS NOT NULL
      )
      SELECT week_start FROM activity ORDER BY week_start`,
     [PROJECT_TIMEZONE_OFFSET_MINUTES],

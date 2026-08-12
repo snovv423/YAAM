@@ -154,13 +154,32 @@ test('getStatus(): sandbox отклоняет канонический Payment �
   await assert.rejects(() => provider.getStatus('x'), (err) => err.name === 'ProviderResultUnknownError');
 });
 
-test('getStatus(): ожидаемая сумма/валюта сверяются с каноническим Payment', async () => {
+test('getStatus(): правильные expected amount/currency допускают canonical succeeded', async () => {
+  setFakeTestCredentials();
+  global.fetch = async () => ({ ok: true, status: 200, json: async () => sandboxPaymentBody('x', 'succeeded') });
+  const YookassaProvider = freshProviderClass();
+  const provider = new YookassaProvider();
+  assert.equal(await provider.getStatus('x', { amount: 300, currency: 'RUB' }), 'succeeded');
+});
+
+test('getStatus(): неправильная expected amount отклоняется fail-closed', async () => {
   setFakeTestCredentials();
   global.fetch = async () => ({ ok: true, status: 200, json: async () => sandboxPaymentBody('x', 'succeeded') });
   const YookassaProvider = freshProviderClass();
   const provider = new YookassaProvider();
   await assert.rejects(
     () => provider.getStatus('x', { amount: 299, currency: 'RUB' }),
+    (err) => err.name === 'ProviderResultUnknownError',
+  );
+});
+
+test('getStatus(): неправильная expected currency отклоняется fail-closed', async () => {
+  setFakeTestCredentials();
+  global.fetch = async () => ({ ok: true, status: 200, json: async () => sandboxPaymentBody('x', 'succeeded') });
+  const YookassaProvider = freshProviderClass();
+  const provider = new YookassaProvider();
+  await assert.rejects(
+    () => provider.getStatus('x', { amount: 300, currency: 'USD' }),
     (err) => err.name === 'ProviderResultUnknownError',
   );
 });

@@ -27,8 +27,8 @@ async function createPayment({ orderId, amount, description, idempotencyKey }) {
   return provider.createPayment({ orderId, amount, description, idempotencyKey });
 }
 
-async function getPaymentStatus(providerPaymentId) {
-  return provider.getStatus(providerPaymentId);
+async function getPaymentStatus(providerPaymentId, expected) {
+  return provider.getStatus(providerPaymentId, expected);
 }
 
 async function refundPayment(providerPaymentId, amount, idempotencyKey) {

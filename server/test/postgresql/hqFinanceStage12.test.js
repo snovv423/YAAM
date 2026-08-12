@@ -638,6 +638,10 @@ test('G: экран «Финансы» — сводка, «Статус выпл
     const payRes = await postForm(base, cookie, `/hq/finance/payouts/${restId}/pay`, { _csrf: finance.csrf });
     assert.equal(payRes.status, 302);
     assert.match(payRes.headers.get('location'), /notice=/);
+    const payNotice = decodeURIComponent(payRes.headers.get('location'));
+    assert.match(payNotice, /Переведите деньги вручную в банковском клиенте/);
+    assert.match(payNotice, /отметьте выплату выполненной/);
+    assert.doesNotMatch(payNotice, /Деньги будут отправлены/);
 
     // Реестр выплат — разделы, без технической таблицы.
     const registry = await getPage(base, cookie, '/hq/payouts');
@@ -764,14 +768,14 @@ test('H: подготовка выплаты фиксируется в ауди�
   try {
     const restId = await createRestaurant(db, 'Аудит');
     await seedFullyReady(db, restId);
-    await createEarnedOrder(db, restId);
+    await createEarnedOrder(db, restId, { itemsTotal: 41800, commissionAmount: 7350 });
     await closePeriod(settlementService);
 
     await payoutStatusService.payRestaurant(restId, { ip: '127.0.0.1' });
 
     const audit = await db.query("SELECT action, details FROM hq_audit_log WHERE action = 'payout_created'");
     assert.equal(audit.length, 1);
-    assert.match(audit[0].details, /выплата #\d+: 930 ₽/);
+    assert.match(audit[0].details, /выплата #\d+: 344,50 ₽/);
   } finally {
     await db.close();
     delete process.env.DATABASE_URL;

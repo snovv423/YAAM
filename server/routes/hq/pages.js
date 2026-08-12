@@ -509,7 +509,7 @@ function createPagesRouter({ linkBasePath, mediaProvider = null }) {
         return res.redirect(`${base}?error=${encodeURIComponent('Некорректный ресторан.')}`);
       }
       const payout = await payoutStatusService.payRestaurant(restaurantId, { ip: req.ip });
-      res.redirect(`${base}?notice=${encodeURIComponent(`Выплата подготовлена: ${formatMinorRub(payout.amount)}. Деньги будут отправлены после подключения банка.`)}`);
+      res.redirect(`${base}?notice=${encodeURIComponent(`Выплата подготовлена: ${formatMinorRub(payout.amount)}. Переведите деньги вручную в банковском клиенте, затем отметьте выплату выполненной.`)}`);
     } catch (err) {
       if (err instanceof payoutRecordService.ValidationError) {
         return res.redirect(`${base}?error=${encodeURIComponent(err.message)}`);

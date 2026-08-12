@@ -16,6 +16,7 @@
 // большой бухгалтерский текст в чат не уходят — только итоговые суммы и
 // ссылки на документы в HQ.
 const db = require('../../db/postgresql');
+const { formatMinorRub } = require('../money');
 const { logAuditEvent } = require('./auditLog');
 const documentService = require('./settlementDocumentService');
 const accessService = require('./settlementDocumentAccessService');
@@ -43,18 +44,18 @@ function buildPayoutMessage({ line, period, payout, documentLinks = [] }) {
   const lines = [
     `Выплата за ${formatDate(period.period_from)} — ${formatDate(period.period_to)}`,
     '',
-    `Продажи: ${sales} ₽`,
+    `Продажи: ${formatMinorRub(sales)}`,
   ];
-  if (refunds > 0) lines.push(`Возвраты: ${refunds} ₽`);
-  lines.push(`Комиссия YAAM: ${commission} ₽`);
+  if (refunds > 0) lines.push(`Возвраты: ${formatMinorRub(refunds)}`);
+  lines.push(`Комиссия YAAM: ${formatMinorRub(commission)}`);
   // Удержание долга прошлых периодов — ресторан обязан понимать, почему
   // перечислено меньше, чем начислено, без звонка в поддержку.
   if (line.carry_forward_applied > 0) {
-    lines.push(`Удержано за прошлые периоды: ${line.carry_forward_applied} ₽`);
+    lines.push(`Удержано за прошлые периоды: ${formatMinorRub(line.carry_forward_applied)}`);
   }
-  lines.push(`Перечислено: ${paid} ₽`);
+  lines.push(`Перечислено: ${formatMinorRub(paid)}`);
   if (line.carry_forward_remaining > 0) {
-    lines.push(`Остаток долга: ${line.carry_forward_remaining} ₽`);
+    lines.push(`Остаток долга: ${formatMinorRub(line.carry_forward_remaining)}`);
   }
   if (payout.completed_at) lines.push(`Дата выплаты: ${formatDate(payout.completed_at)}`);
 
@@ -69,16 +70,16 @@ function buildDocumentsMessage({ line, period, documentLinks = [] }) {
   const lines = [
     `Расчёт за ${formatDate(period.period_from)} — ${formatDate(period.period_to)}`,
     '',
-    `Продажи: ${line.turnover} ₽`,
+    `Продажи: ${formatMinorRub(line.turnover)}`,
   ];
-  if (line.successful_refunds_amount > 0) lines.push(`Возвраты: ${line.successful_refunds_amount} ₽`);
-  lines.push(`Комиссия YAAM: ${line.yaam_commission} ₽`);
+  if (line.successful_refunds_amount > 0) lines.push(`Возвраты: ${formatMinorRub(line.successful_refunds_amount)}`);
+  lines.push(`Комиссия YAAM: ${formatMinorRub(line.yaam_commission)}`);
   if (line.carry_forward_applied > 0) {
-    lines.push(`Удержано за прошлые периоды: ${line.carry_forward_applied} ₽`);
+    lines.push(`Удержано за прошлые периоды: ${formatMinorRub(line.carry_forward_applied)}`);
   }
-  lines.push(`К выплате: ${line.payable_amount} ₽`);
+  lines.push(`К выплате: ${formatMinorRub(line.payable_amount)}`);
   if (line.carry_forward_remaining > 0) {
-    lines.push(`Остаток долга: ${line.carry_forward_remaining} ₽`);
+    lines.push(`Остаток долга: ${formatMinorRub(line.carry_forward_remaining)}`);
   }
   lines.push('');
   lines.push('Документы за период сформированы. Выплата будет подтверждена отдельным сообщением.');

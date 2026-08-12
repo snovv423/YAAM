@@ -568,13 +568,24 @@ test('E8: два конкурентных создания блюда для О�
 
 test('F1: список заказов — GET /admin/orders показывает созданный заказ с корректным форматированием даты', async () => {
   const r = await pgCreateRestaurant();
-  const o = await pgCreateOrder(r.id, { status: 'delivered', itemsTotal: 800, commission: 56 });
+  const o = await pgCreateOrder(r.id, { status: 'delivered', itemsTotal: 41800, commission: 7350 });
   const res = await getPage('/admin/orders');
   assert.equal(res.status, 200);
   const html = await res.text();
   assert.match(html, new RegExp(o.public_code));
-  assert.match(html, /800 ₽/);
-  assert.match(html, /56 ₽/);
+  assert.match(html, /418 ₽/);
+  assert.match(html, /73,50 ₽/);
+  const totals = (await db.query(`
+    SELECT COALESCE(SUM(items_total),0)::int AS revenue,
+           COALESCE(SUM(commission_amount),0)::int AS commission
+      FROM orders
+     WHERE (created_at AT TIME ZONE 'UTC')::date = (NOW() AT TIME ZONE 'UTC')::date
+       AND status NOT IN ('cancelled','declined','timed_out','payment_failed')
+  `))[0];
+  const { formatMinorRub } = require('../../services/money');
+  const dashboardHtml = await (await getPage('/admin/')).text();
+  assert.ok(dashboardHtml.includes(formatMinorRub(totals.revenue)));
+  assert.ok(dashboardHtml.includes(formatMinorRub(totals.commission)));
   // formatDateTime отдаёт "YYYY-MM-DD HH:MM:SS" — та же визуальная форма,
   // что SQLite хранит как TEXT.
   assert.match(html, /\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/);

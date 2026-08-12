@@ -39,6 +39,7 @@
 const db = require('../../db/postgresql');
 const crypto = require('node:crypto');
 const { ValidationError } = require('./restaurantLifecycle');
+const { formatMinorRub } = require('../money');
 // Stage 9.6 — снимок реквизитов на попытку (задание, раздел 5). Требуются
 // ДО создания любой попытки (не только для readiness-предпросмотра — сама
 // попытка физически не может быть создана без готового снимка, начиная с
@@ -667,7 +668,7 @@ async function logPayoutBlockedEvent(payout) {
     category: 'payout_issue',
     restaurantId: payout.restaurant_id,
     restaurantName: row ? row.name : null,
-    message: `Выплата ресторану на сумму ${payout.amount} ₽ заблокирована: ${payout.failure_reason}. Требует решения.`,
+    message: `Выплата ресторану на сумму ${formatMinorRub(payout.amount)} заблокирована: ${payout.failure_reason}. Требует решения.`,
   });
 }
 

@@ -538,17 +538,19 @@ async function main() {
         await orderService.restaurantAccept(orderIdForB);
         await orderService.restaurantAdvance(orderIdForB, 'preparing', { estimatedMinutes: 20 });
         await orderService.restaurantAdvance(orderIdForB, 'ready');
-        await orderService.restaurantAdvance(orderIdForB, 'courier');
+        // Historical seed fixture: first and only earned_at assignment is
+        // made atomically with ready->courier. Migration 0015 deliberately
+        // forbids rewriting that financial fact afterwards.
+        const earnedAtB = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        const earned = await db.execute(
+          `UPDATE orders
+              SET status = 'courier', status_updated_at = $2, earned_at = $2
+            WHERE id = $1 AND status = 'ready' AND earned_at IS NULL`,
+          [orderIdForB, earnedAtB],
+        );
+        if (earned.rowCount !== 1) throw new Error('YAAM-HQT013: initial earned_at assignment failed');
         await orderService.confirmReceiptByCustomer(orderIdForB);
       }
-      // Stage 33.1 — earned_at (зафиксирован restaurantAdvance на ready->courier,
-      // ДО confirmReceiptByCustomer) тоже нужно сдвинуть на вчера — иначе
-      // заказ физически не попадёт в закрываемый ниже период (расчёт теперь
-      // ключуется на earned_at, не на status_updated_at).
-      await db.execute(
-        `UPDATE orders SET status_updated_at = NOW() - INTERVAL '1 day', earned_at = NOW() - INTERVAL '1 day' WHERE id = $1`,
-        [orderIdForB],
-      );
       const periodB = await settlementService.createDraftSettlementPeriod({ periodFrom: todayStr(-1), periodTo: todayStr(-1) });
       await settlementService.closeSettlementPeriod(periodB.id);
       periodBId = periodB.id;

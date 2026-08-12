@@ -21,9 +21,11 @@
  *   серверный ключ конкретной попытки, который реальный провайдер обязан передать
  *   в свой idempotency-заголовок, чтобы повтор не создавал второй внешний платёж.
  *
- * getStatus(providerPaymentId)
+ * getStatus(providerPaymentId, expected?)
  *   -> 'pending' | 'succeeded' | 'failed'
  *   Опрос статуса (используется как запасной путь, если webhook не пришёл).
+ *   expected может содержать amount/currency для fail-closed сверки
+ *   канонического provider object с локальной financial row.
  *
  * refund(providerPaymentId, amount, idempotencyKey)
  *   -> { refundId, status: 'pending' | 'succeeded' | 'failed' }

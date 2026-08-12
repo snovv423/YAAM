@@ -40,6 +40,8 @@ const HQ_MODULE_PATHS = [
   require.resolve('../../services/hq/restaurantFinanceService.js'),
   require.resolve('../../services/hq/settlementService.js'),
   require.resolve('../../services/hq/payoutService.js'),
+  require.resolve('../../services/hq/payoutStatusService.js'),
+  require.resolve('../../services/hq/restaurantPayoutStateService.js'),
   // Stage 9.6 — T-Bank integration readiness.
   require.resolve('../../services/hq/yaamBankDetailsService.js'),
   require.resolve('../../services/hq/tbankPayoutReadiness.js'),
@@ -1033,6 +1035,24 @@ test('Stage9.5 #13: провал с retryable=false переводит обяз�
     const { payout: afterFail } = await payoutService.markAttemptFailed(attempt.id, { errorMessage: 'реквизиты получателя некорректны', retryable: false });
     assert.equal(afterFail.status, 'blocked');
 
+    let blockedEvent = null;
+    for (let poll = 0; poll < 20 && !blockedEvent; poll += 1) {
+      // logPayoutBlockedEvent intentionally runs after the financial transaction.
+      // eslint-disable-next-line no-await-in-loop
+      const rows = await db.query(
+        "SELECT message FROM hq_events WHERE category='payout_issue' AND restaurant_id=$1 ORDER BY id DESC LIMIT 1",
+        [restaurantId],
+      );
+      [blockedEvent] = rows;
+      if (!blockedEvent) {
+        // eslint-disable-next-line no-await-in-loop
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    }
+    assert.ok(blockedEvent, 'blocked payout обязан материализоваться в HQ event');
+    assert.match(blockedEvent.message, /9,30 ₽/);
+    assert.doesNotMatch(blockedEvent.message, /930 ₽/);
+
     await assert.rejects(() => payoutService.createPayoutAttempt(payout.id), /retryable|решения оператора/i);
   } finally {
     await db.close();
@@ -1401,6 +1421,13 @@ test('Stage9.5 audit: payout_created пишется реальным маршр�
     const db = require('../../db/postgresql');
     const settlementService = require('../../services/hq/settlementService');
     const restaurantId = await createRestaurant(db, 'Audit95');
+    await db.execute(
+      `INSERT INTO restaurant_legal_details
+         (restaurant_id, legal_form, legal_name, inn, ogrn, legal_address, director_name, contact_phone)
+       VALUES ($1,'ip','ИП Тестов Тест Тестович',$2,'312770012345008','Тестовый адрес','Ответственный','+79280000001')`,
+      [restaurantId, FICTITIOUS_INN12],
+    );
+    await seedRestaurantPayoutReadiness(db, restaurantId);
     const orderId = await createOrderRow(db, { restaurantId, status: 'delivered', itemsTotal: 1000, commissionAmount: 70 });
     await addSucceededPayment(db, orderId, 1000);
     const period = await settlementService.createDraftSettlementPeriod({ periodFrom: todayStr(), periodTo: todayStr() });
@@ -1414,6 +1441,7 @@ test('Stage9.5 audit: payout_created пишется реальным маршр�
       body: new URLSearchParams({ _csrf: csrf }).toString(),
     });
     assert.equal(prepareRes.status, 302);
+    assert.match(prepareRes.headers.get('location'), /\/hq\/payouts\/\d+$/);
 
     const auditRows = await db.query(`SELECT action, restaurant_id FROM hq_audit_log WHERE action = 'payout_created'`);
     assert.equal(auditRows.length, 1);

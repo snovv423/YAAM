@@ -32,6 +32,7 @@ const MODULE_PATHS = [
   require.resolve('../../services/hq/eventLogService.js'),
   require.resolve('../../services/fiscalization/fiscalReceiptService.js'),
   require.resolve('../../services/paymentService.js'),
+  require.resolve('../../services/paymentProviders/yookassaProvider.js'),
 ];
 
 let cluster;
@@ -69,7 +70,7 @@ function stubProviderStatus(paymentService, impl) {
 }
 
 let seq = 0;
-async function seedOrderWithPendingPayment(db, { ageMinutes = 30, providerPaymentId = null } = {}) {
+async function seedOrderWithPendingPayment(db, { ageMinutes = 30, providerPaymentId = null, amount = 1000 } = {}) {
   seq += 1;
   const r = await db.execute(
     `INSERT INTO restaurants (name, cities, is_open, published_at)
@@ -80,16 +81,16 @@ async function seedOrderWithPendingPayment(db, { ageMinutes = 30, providerPaymen
   const o = await db.execute(
     `INSERT INTO orders (public_code, restaurant_id, city, customer_name, customer_phone, address, comment,
                          items_total, commission_amount, status, status_updated_at)
-     VALUES ($1,$2,'Грозный','Тест','+7900000000${seq % 10}','ул. Тестовая, 1','',1000,70,'awaiting_payment',NOW())
+     VALUES ($1,$2,'Грозный','Тест','+7900000000${seq % 10}','ул. Тестовая, 1','',$3,0,'awaiting_payment',NOW())
      RETURNING id`,
-    [`YAAM-S22${String(seq).padStart(3, '0')}`, restaurantId],
+    [`YAAM-S22${String(seq).padStart(3, '0')}`, restaurantId, amount],
   );
   const orderId = o.rows[0].id;
   const pid = providerPaymentId || `prov-${seq}-${Math.random().toString(36).slice(2, 8)}`;
   const p = await db.execute(
     `INSERT INTO payments (order_id, provider, provider_payment_id, amount, status, created_at)
-     VALUES ($1,'mock',$2,1000,'pending', NOW() - make_interval(mins => $3)) RETURNING id`,
-    [orderId, pid, ageMinutes],
+     VALUES ($1,'mock',$2,$4,'pending', NOW() - make_interval(mins => $3)) RETURNING id`,
+    [orderId, pid, ageMinutes, amount],
   );
   return { restaurantId, orderId, paymentId: p.rows[0].id, providerPaymentId: pid };
 }
@@ -246,6 +247,87 @@ test('P6: поздняя оплата ОТМЕНЁННОГО заказа ухо
     delete process.env.DATABASE_URL;
   }
 });
+
+async function withFakeYookassaCanonical(body, fn) {
+  const previous = {
+    provider: process.env.PAYMENT_PROVIDER,
+    shopId: process.env.YOOKASSA_SHOP_ID,
+    secret: process.env.YOOKASSA_SECRET_KEY,
+    environment: process.env.YOOKASSA_ENV,
+    fetch: global.fetch,
+  };
+  process.env.PAYMENT_PROVIDER = 'yookassa';
+  process.env.YOOKASSA_SHOP_ID = '999999';
+  process.env.YOOKASSA_SECRET_KEY = 'test_finance_hardening_fake_only';
+  process.env.YOOKASSA_ENV = 'sandbox';
+  global.fetch = async () => ({ ok: true, status: 200, json: async () => body });
+  try {
+    return await fn();
+  } finally {
+    for (const [key, value] of [
+      ['PAYMENT_PROVIDER', previous.provider],
+      ['YOOKASSA_SHOP_ID', previous.shopId],
+      ['YOOKASSA_SECRET_KEY', previous.secret],
+      ['YOOKASSA_ENV', previous.environment],
+    ]) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    global.fetch = previous.fetch;
+  }
+}
+
+test('P7: polling передаёт local amount/currency и принимает совпавший canonical payment', async () => {
+  process.env.DATABASE_URL = await freshDatabase('s22_p7_amount_ok');
+  let db;
+  try {
+    await withFakeYookassaCanonical({
+      id: 'yk-p7', status: 'succeeded', test: true,
+      amount: { value: '300.00', currency: 'RUB' },
+    }, async () => {
+      ({ db } = requireFresh());
+      const reconciliation = require('../../services/postgresql/paymentReconciliationService');
+      const { paymentId } = await seedOrderWithPendingPayment(db, { providerPaymentId: 'yk-p7', amount: 30000 });
+      const stats = await reconciliation.runPaymentReconciliation();
+      assert.equal(stats.confirmedPaid, 1);
+      const payment = await db.query('SELECT status FROM payments WHERE id = $1', [paymentId]);
+      assert.equal(payment[0].status, 'succeeded');
+    });
+  } finally {
+    if (db) await db.close();
+    delete process.env.DATABASE_URL;
+  }
+});
+
+for (const [label, amount] of [
+  ['amount', { value: '299.00', currency: 'RUB' }],
+  ['currency', { value: '300.00', currency: 'USD' }],
+]) {
+  test(`P8 ${label}: polling fail-closed не подтверждает local payment при canonical mismatch`, async () => {
+    process.env.DATABASE_URL = await freshDatabase(`s22_p8_${label}`);
+    let db;
+    try {
+      await withFakeYookassaCanonical({ id: `yk-p8-${label}`, status: 'succeeded', test: true, amount }, async () => {
+        ({ db } = requireFresh());
+        const reconciliation = require('../../services/postgresql/paymentReconciliationService');
+        const { orderId, paymentId } = await seedOrderWithPendingPayment(db, {
+          providerPaymentId: `yk-p8-${label}`, amount: 30000,
+        });
+        const stats = await reconciliation.runPaymentReconciliation();
+        assert.equal(stats.confirmedPaid, 0);
+        assert.equal(stats.unknown, 1);
+        const payment = await db.query('SELECT status, last_reconcile_error_code FROM payments WHERE id = $1', [paymentId]);
+        assert.equal(payment[0].status, 'pending');
+        assert.equal(payment[0].last_reconcile_error_code, 'unknown_result');
+        const order = await db.query('SELECT status FROM orders WHERE id = $1', [orderId]);
+        assert.equal(order[0].status, 'awaiting_payment');
+      });
+    } finally {
+      if (db) await db.close();
+      delete process.env.DATABASE_URL;
+    }
+  });
+}
 
 // ===========================================================================
 // D — двойной успешный платёж

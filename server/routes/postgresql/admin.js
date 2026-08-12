@@ -51,6 +51,7 @@ const crypto = require('node:crypto');
 const db = require('../../db/postgresql');
 const { layout } = require('../../admin/layout');
 const pgOrderService = require('../../services/postgresql/orderService');
+const { formatMinorRub } = require('../../services/money');
 
 const router = express.Router();
 
@@ -132,8 +133,8 @@ router.get('/', async (req, res) => {
       <h1>Сегодня</h1>
       <div class="row">
         <div class="panel"><div style="color:var(--txt2);font-size:12px">Заказов</div><div style="font-size:28px;font-weight:800">${today.cnt}</div></div>
-        <div class="panel"><div style="color:var(--txt2);font-size:12px">Оборот</div><div style="font-size:28px;font-weight:800">${today.revenue} ₽</div></div>
-        <div class="panel"><div style="color:var(--txt2);font-size:12px">Комиссия YAAM</div><div style="font-size:28px;font-weight:800">${today.commission} ₽</div></div>
+        <div class="panel"><div style="color:var(--txt2);font-size:12px">Оборот</div><div style="font-size:28px;font-weight:800">${formatMinorRub(today.revenue)}</div></div>
+        <div class="panel"><div style="color:var(--txt2);font-size:12px">Комиссия YAAM</div><div style="font-size:28px;font-weight:800">${formatMinorRub(today.commission)}</div></div>
       </div>
       <div class="panel">
         <h2 style="font-size:15px;margin-top:0">Контроль качества по ресторанам</h2>
@@ -454,7 +455,7 @@ router.get('/orders', async (req, res) => {
       <table>
         <tr><th>Код</th><th>Ресторан</th><th>Сумма</th><th>Комиссия</th><th>Тип</th><th>Статус</th><th>Создан</th></tr>
         ${orders.map((o) => `<tr>
-          <td><span class="order-code">${esc(o.public_code)}</span></td><td>${esc(o.restaurant_name)}</td><td>${o.items_total} ₽</td><td>${o.commission_amount} ₽</td>
+          <td><span class="order-code">${esc(o.public_code)}</span></td><td>${esc(o.restaurant_name)}</td><td>${formatMinorRub(o.items_total)}</td><td>${formatMinorRub(o.commission_amount)}</td>
           <td>${o.fulfillment_type === 'pickup' ? 'Самовывоз' : 'Доставка'}</td>
           <td>${esc(o.status)}</td><td>${esc(formatDateTime(o.created_at))}</td>
         </tr>`).join('') || '<tr><td colspan="7" style="color:var(--txt2)">Заказов пока нет</td></tr>'}

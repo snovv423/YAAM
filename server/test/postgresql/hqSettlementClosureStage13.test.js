@@ -320,6 +320,15 @@ test('L2: долг переносится через несколько пери
   assert.equal(byWeek['2026-08-17'].payable_amount, 570);
   assert.equal(byWeek['2026-08-17'].carry_forward_remaining, 0);
   assert.equal(byWeek['2026-08-17'].payout_blocked_reason, null);
+  const carryAudit = await db.query(
+    `SELECT action, details FROM hq_audit_log
+      WHERE action IN ('settlement_carry_forward_applied','settlement_carry_forward_accrued')
+      ORDER BY id`,
+  );
+  assert.ok(carryAudit.some((r) => r.action === 'settlement_carry_forward_accrued'
+    && /начислен долг 9,30 ₽, итого долг 9,30 ₽/.test(r.details)));
+  assert.ok(carryAudit.some((r) => r.action === 'settlement_carry_forward_applied'
+    && /удержано 5 ₽ долга прошлых периодов, остаток долга 4,30 ₽/.test(r.details)));
   await db.close();
 });
 

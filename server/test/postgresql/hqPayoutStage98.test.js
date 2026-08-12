@@ -53,7 +53,9 @@ async function createRestaurant(db, name) {
 }
 
 let orderCounter = 0;
-async function createOrderRow(db, { restaurantId, status, itemsTotal = 1000, commissionAmount = 70 }) {
+async function createOrderRow(db, {
+  restaurantId, status, itemsTotal = 1000, commissionAmount = 70, statusUpdatedAt = null,
+}) {
   orderCounter += 1;
   const code = `YAAM-98${orderCounter}`;
   const phone = `+7905${String(orderCounter).padStart(7, '0')}`;
@@ -64,9 +66,10 @@ async function createOrderRow(db, { restaurantId, status, itemsTotal = 1000, com
   const rows = await db.execute(
     `INSERT INTO orders
        (public_code, restaurant_id, city, customer_name, customer_phone, address, items_total, commission_amount, status, status_updated_at, earned_at)
-     VALUES ($1,$2,'Грозный','Тест',$3,'адрес',$4,$5,$6,NOW(), CASE WHEN $6 = 'delivered' THEN NOW() ELSE NULL END)
+     VALUES ($1,$2,'Грозный','Тест',$3,'адрес',$4,$5,$6,COALESCE($7,NOW()),
+       CASE WHEN $6 = 'delivered' THEN COALESCE($7,NOW()) ELSE NULL END)
      RETURNING id`,
-    [code, restaurantId, phone, itemsTotal, commissionAmount, status],
+    [code, restaurantId, phone, itemsTotal, commissionAmount, status, statusUpdatedAt],
   );
   return rows.rows[0].id;
 }
@@ -76,8 +79,10 @@ async function addSucceededPayment(db, orderId, amount) {
 }
 
 async function closedPeriodWithEarnings(db, settlementService, restaurantId, { itemsTotal = 1000, commissionAmount = 70, dayOffset = 0 } = {}) {
-  const orderId = await createOrderRow(db, { restaurantId, status: 'delivered', itemsTotal, commissionAmount });
-  if (dayOffset) await db.execute(`UPDATE orders SET status_updated_at = NOW() + $2 * INTERVAL '1 day', earned_at = NOW() + $2 * INTERVAL '1 day' WHERE id = $1`, [orderId, dayOffset]);
+  const statusUpdatedAt = dayOffset ? new Date(Date.now() + dayOffset * 24 * 60 * 60 * 1000) : null;
+  const orderId = await createOrderRow(db, {
+    restaurantId, status: 'delivered', itemsTotal, commissionAmount, statusUpdatedAt,
+  });
   await addSucceededPayment(db, orderId, itemsTotal);
   const period = await settlementService.createDraftSettlementPeriod({ periodFrom: todayStr(dayOffset), periodTo: todayStr(dayOffset) });
   await settlementService.closeSettlementPeriod(period.id);

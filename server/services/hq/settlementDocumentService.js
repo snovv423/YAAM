@@ -15,11 +15,13 @@
 //   4. ВЫДАЧА         — routes/hq/settlements.js, только внутри HQ-сессии,
 //      с проверкой принадлежности документа паре (период, ресторан).
 //
-// Деньги — целые рубли (INTEGER), как и во всей остальной схеме. Ни одного
-// float в расчётах документа: суммы берутся из snapshot как есть.
+// Деньги — integer minor units (копейки), как и во всём PostgreSQL financial
+// core. Ни одного float: суммы берутся из snapshot как есть и форматируются
+// только на границе представления.
 const db = require('../../db/postgresql');
 const { ValidationError } = require('./restaurantLifecycle');
 const { logAuditEvent } = require('./auditLog');
+const { redactString } = require('../observability/logger');
 
 const DOCUMENT_KINDS = ['agent_report', 'order_registry'];
 
@@ -333,6 +335,29 @@ function buildPayload(kind, snapshot, options) {
   throw new ValidationError(`Неизвестный вид документа: ${kind}`);
 }
 
+function safeGenerationError(err) {
+  return redactString((err && err.message) || 'неизвестная ошибка')
+    .replace(/https?:\/\/\S+/g, '<url>')
+    .replace(/\s+/g, ' ')
+    .slice(0, 500);
+}
+
+async function recordGenerationFailure(periodId, restaurantId, kind, err) {
+  const result = await db.execute(
+    `INSERT INTO settlement_document_generation_failures
+       (settlement_period_id, restaurant_id, kind, failure_count, last_error_safe,
+        first_failed_at, last_failed_at)
+     VALUES ($1,$2,$3,1,$4,NOW(),NOW())
+     ON CONFLICT (settlement_period_id, restaurant_id, kind) DO UPDATE
+       SET failure_count = settlement_document_generation_failures.failure_count + 1,
+           last_error_safe = EXCLUDED.last_error_safe,
+           last_failed_at = NOW()
+     RETURNING *`,
+    [periodId, restaurantId, kind, safeGenerationError(err)],
+  );
+  return result.rows[0];
+}
+
 // ---------------------------------------------------------------------------
 // Создание документов
 // ---------------------------------------------------------------------------
@@ -370,13 +395,20 @@ async function ensureDocument(periodId, restaurantId, kind, { now = new Date(), 
     return { document: inserted.rows[0], created: true };
   } catch (err) {
     // Ошибка документа НЕ откатывает уже закрытый период (задание, раздел 9):
-    // фиксируем failed-строку, чтобы владелец видел статус «Ошибка».
-    console.error(`[settlementDocuments] ${kind} для периода ${periodId}/ресторана ${restaurantId}:`, err.message);
-    await logAuditEvent({
-      action: 'settlement_document_failed', restaurantId,
-      details: `${DOCUMENT_KIND_LABELS[kind]}: ${err.message}`, ip: null,
-    });
-    return { document: null, created: false, error: err.message };
+    // сначала durable bookkeeping, затем best-effort audit. Сбой audit log
+    // не должен стирать сам факт неудачной попытки и обходить retry limit.
+    const safeError = safeGenerationError(err);
+    const failure = await recordGenerationFailure(periodId, restaurantId, kind, err);
+    console.error(`[settlementDocuments] ${kind} для периода ${periodId}/ресторана ${restaurantId}:`, safeError);
+    try {
+      await logAuditEvent({
+        action: 'settlement_document_failed', restaurantId,
+        details: `${DOCUMENT_KIND_LABELS[kind]}: ${safeError}`, ip: null,
+      });
+    } catch (auditErr) {
+      console.error('[settlementDocuments] failed to write generation audit:', safeGenerationError(auditErr));
+    }
+    return { document: null, created: false, error: safeError, failure };
   }
 }
 
@@ -496,10 +528,10 @@ async function retryMissingDocuments({ limit = 20, now = new Date(), env = proce
              AND d.status = 'generated'
         )
         AND COALESCE((
-          SELECT MAX(d2.generation_attempts) FROM settlement_documents d2
-           WHERE d2.settlement_period_id = srl.settlement_period_id
-             AND d2.restaurant_id = srl.restaurant_id
-             AND d2.kind = k.kind
+          SELECT f.failure_count FROM settlement_document_generation_failures f
+           WHERE f.settlement_period_id = srl.settlement_period_id
+             AND f.restaurant_id = srl.restaurant_id
+             AND f.kind = k.kind
         ), 0) < $2
       ORDER BY srl.settlement_period_id, srl.restaurant_id
       LIMIT $3`,
@@ -520,14 +552,6 @@ async function retryMissingDocuments({ limit = 20, now = new Date(), env = proce
       });
     } else if (!res.document) {
       results.failed += 1;
-      // Счётчик попыток — на строке-неудаче, если она есть; иначе создаём
-      // маркерную запись невозможно (нет номера), поэтому просто считаем.
-      // eslint-disable-next-line no-await-in-loop
-      await db.execute(
-        `UPDATE settlement_documents SET generation_attempts = generation_attempts + 1
-          WHERE settlement_period_id = $1 AND restaurant_id = $2 AND kind = $3`,
-        [row.period_id, row.restaurant_id, row.kind],
-      );
     }
   }
   return results;

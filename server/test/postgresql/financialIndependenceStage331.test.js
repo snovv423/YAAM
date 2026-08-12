@@ -62,16 +62,18 @@ async function pgCreateRestaurant() {
   return rows[0].id;
 }
 
-async function pgCreateOrder(restaurantId, { status = 'preparing', fulfillmentType = 'delivery', statusUpdatedAt = null } = {}) {
+async function pgCreateOrder(restaurantId, {
+  status = 'preparing', fulfillmentType = 'delivery', statusUpdatedAt = null, earnedAt = null,
+} = {}) {
   const suffix = uniqueSuffix();
   const rows = await db.query(
     `INSERT INTO orders (
        public_code, restaurant_id, city, customer_name, customer_phone, address,
-       items_total, commission_amount, status, fulfillment_type, status_updated_at
+       items_total, commission_amount, status, fulfillment_type, status_updated_at, earned_at
      ) VALUES ($1, $2, 'Грозный', 'Test Customer', '+79280000001', 'ул. Тестовая, 1', 500, 35, $3, $4,
-       COALESCE($5, NOW()))
+       COALESCE($5, NOW()), $6)
      RETURNING *`,
-    [`YAAM-FI-${suffix}`, restaurantId, status, fulfillmentType, statusUpdatedAt]
+    [`YAAM-FI-${suffix}`, restaurantId, status, fulfillmentType, statusUpdatedAt, earnedAt]
   );
   return rows[0];
 }
@@ -279,16 +281,16 @@ test('H. Заказ с succeeded-возвратом исключается из 
 
 test('I. Заказ передан курьеру ДО границы периода, клиент подтвердил ПОСЛЕ — заказ относится к периоду передачи курьеру', async () => {
   const restaurantId = await pgCreateRestaurant();
-  const order = await pgCreateOrder(restaurantId, { status: 'ready' });
+  const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const order = await pgCreateOrder(restaurantId, {
+    status: 'courier', statusUpdatedAt: yesterday, earnedAt: yesterday,
+  });
   await pgCreatePayment(order.id);
 
-  // Момент передачи курьеру — "вчера" (симулируем, что расчётный период уже
-  // закрылся вчера ночью) — backdate earned_at сразу после реального
-  // restaurantAdvance-перехода, тем же принципом, что и в orderServiceStage33
-  // (сначала реальный переход, потом только сдвиг времени для теста границы).
-  await pgOrderService.restaurantAdvance(order.id, 'courier');
-  const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
-  await db.execute('UPDATE orders SET earned_at = $1 WHERE id = $2', [yesterday, order.id]);
+  // Исторический fixture создаётся сразу с фактическим моментом передачи
+  // курьеру. Реальный ready->courier transition и первоначальная установка
+  // earned_at отдельно доказаны тестом A; уже установленный financial fact
+  // после 0015 намеренно нельзя переписывать даже в тесте.
 
   // Клиент подтверждает получение "сегодня", ПОСЛЕ границы периода —
   // status_updated_at и delivered_via обновятся на "сегодня", earned_at
@@ -326,10 +328,6 @@ test('I. Заказ передан курьеру ДО границы перио
 
 test('I2. То же самое на уровне settlementService.closeSettlementPeriod (реальное закрытие периода)', async () => {
   const restaurantId = await pgCreateRestaurant();
-  const order = await pgCreateOrder(restaurantId, { status: 'ready' });
-  await pgCreatePayment(order.id);
-  await pgOrderService.restaurantAdvance(order.id, 'courier');
-
   // projectTodayStr (не наивный UTC toISOString) — тот же якорь MSK-дня,
   // которым реально пользуется resolvePeriodRangeForPeriod внутри
   // closeSettlementPeriod; иначе тест плавает в окне 21:00-24:00 UTC
@@ -339,10 +337,10 @@ test('I2. То же самое на уровне settlementService.closeSettleme
   const yesterdayStr = todayStr(-1);
   const yesterdayRange = resolvePeriodRange({ period: 'custom', from: yesterdayStr, to: yesterdayStr });
   const safeYesterdayMoment = new Date(yesterdayRange.startUtc.getTime() + 12 * 60 * 60 * 1000);
-  await db.execute(
-    `UPDATE orders SET earned_at = $1 WHERE id = $2`,
-    [safeYesterdayMoment, order.id],
-  );
+  const order = await pgCreateOrder(restaurantId, {
+    status: 'courier', statusUpdatedAt: safeYesterdayMoment, earnedAt: safeYesterdayMoment,
+  });
+  await pgCreatePayment(order.id);
 
   // Клиент подтверждает ПОСЛЕ того, как "вчерашний" период уже закрыт ниже.
   // Период — глобальный (по календарной дате, не по ресторану), поэтому

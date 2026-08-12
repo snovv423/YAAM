@@ -90,7 +90,7 @@ function sleep(ms) { return new Promise((r) => { setTimeout(r, ms); }); }
 
 // Реальный жизненный цикл до earned_at, тем же способом, что и в Stage 37
 // (никаких SQL-обходов состояний) — доставка, целиком через сервис.
-async function deliverRealOrder(orderService, db, restaurantId, menuItemId) {
+async function deliverRealOrder(orderService, db, restaurantId, menuItemId, { earnedAt = null } = {}) {
   const payload = {
     restaurantId, city: 'Грозный', customerName: 'Клиент', customerPhone: uniquePhone(),
     address: 'ул. Дубликат, 1', comment: '', fulfillmentType: 'delivery',
@@ -104,7 +104,17 @@ async function deliverRealOrder(orderService, db, restaurantId, menuItemId) {
   await orderService.restaurantAccept(order.id);
   await orderService.restaurantAdvance(order.id, 'preparing');
   await orderService.restaurantAdvance(order.id, 'ready');
-  await orderService.restaurantAdvance(order.id, 'courier');
+  if (earnedAt) {
+    const applied = await db.execute(
+      `UPDATE orders
+          SET status = 'courier', status_updated_at = $2, earned_at = $2
+        WHERE id = $1 AND status = 'ready' AND earned_at IS NULL`,
+      [order.id, earnedAt],
+    );
+    assert.equal(applied.rowCount, 1, 'historical fixture must perform one initial earned_at assignment');
+  } else {
+    await orderService.restaurantAdvance(order.id, 'courier');
+  }
   await orderService.confirmReceiptByCustomer(order.id);
   return { orderId: order.id, canonicalPaymentId: paymentRow.id };
 }
@@ -217,13 +227,14 @@ test('B: поздний duplicate_payment-возврат ПОСЛЕ закрыт
   try {
     const restaurantId = await createRestaurant(db, 'B');
     const menuItem = await seedMenuItem(menuAdminService, restaurantId, 1000);
-    const { orderId } = await deliverRealOrder(orderService, db, restaurantId, menuItem.id);
+    const historicalEarnedAt = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+    const { orderId } = await deliverRealOrder(
+      orderService, db, restaurantId, menuItem.id, { earnedAt: historicalEarnedAt },
+    );
 
-    // T1: задним числом переносим earned_at в позавчера — тот же приём, что
-    // и в hqSettlementClosureStage13.test.js (order() с явным deliveredAt),
-    // нужен только чтобы период 1 успел ЗАКРЫТЬСЯ ДО того, как случится
-    // duplicate-возврат (который в этом тесте происходит "сейчас").
-    await db.execute(`UPDATE orders SET earned_at = NOW() - interval '2 days' WHERE id = $1`, [orderId]);
+    // T1: fixture изначально материализован с earned_at в позавчера, чтобы
+    // период 1 успел закрыться до duplicate-возврата. После 0015 уже
+    // установленный financial fact нельзя backdate отдельным UPDATE.
 
     const pad = (n) => String(n).padStart(2, '0');
     const toDateStr = (d) => `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;

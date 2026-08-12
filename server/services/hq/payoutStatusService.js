@@ -21,6 +21,7 @@ const db = require('../../db/postgresql');
 const payoutService = require('./payoutService');
 const restaurantPayoutService = require('./restaurantPayoutService');
 const { logAuditEvent } = require('./auditLog');
+const { formatMinorRub } = require('../money');
 
 // Фирменные статусы YAAM (спецификация, раздел 5) — только реально
 // достижимые состояния, без эмодзи и технических текстов.
@@ -116,8 +117,8 @@ async function listPayoutStatuses() {
     ORDER BY r.name, r.id
   `);
 
-  // Самая свежая закрытая строка расчёта БЕЗ созданной выплаты — ровно то,
-  // что можно выплатить прямо сейчас. DISTINCT ON — один ряд на ресторан.
+  // Самая старая закрытая строка расчёта БЕЗ созданной выплаты — backlog
+  // обрабатывается FIFO. DISTINCT ON — один ряд на ресторан.
   const payableRows = await db.query(`
     SELECT DISTINCT ON (srl.restaurant_id)
       srl.restaurant_id, srl.settlement_period_id, srl.payable_amount,
@@ -131,7 +132,7 @@ async function listPayoutStatuses() {
          WHERE rp.settlement_period_id = srl.settlement_period_id
            AND rp.restaurant_id = srl.restaurant_id
       )
-    ORDER BY srl.restaurant_id, sp.period_to DESC, sp.id DESC
+    ORDER BY srl.restaurant_id, sp.period_to ASC, sp.id ASC
   `);
 
   // Незавершённая выплата важнее уже выплаченной: владельцу нужно видеть то,
@@ -250,10 +251,31 @@ async function payRestaurant(restaurantId, { ip = null } = {}) {
   await logAuditEvent({
     action: 'payout_created',
     restaurantId,
-    details: `выплата #${payout.id}: ${payout.amount} ₽ (период ${row.periodFrom}–${row.periodTo})`,
+    details: `выплата #${payout.id}: ${formatMinorRub(payout.amount)} (период ${row.periodFrom}–${row.periodTo})`,
     ip,
   });
   return payout;
+}
+
+// Тот же readiness gate для period-detail route. Маршрут несёт конкретный
+// settlement id, поэтому дополнительно запрещает перескочить через более
+// старую невыплаченную неделю: listPayoutStatuses() уже выбирает FIFO-кандидата.
+async function prepareSettlementPayout(settlementPeriodId, restaurantId, options = {}) {
+  const periodId = Number.parseInt(settlementPeriodId, 10);
+  const restId = Number.parseInt(restaurantId, 10);
+  if (!Number.isInteger(periodId) || !Number.isInteger(restId)) {
+    throw new payoutService.ValidationError('Некорректный расчётный период или ресторан.');
+  }
+  const statuses = await listPayoutStatuses();
+  const row = statuses.find((s) => s.restaurantId === restId);
+  if (!row) throw new payoutService.ValidationError('Ресторан не найден.');
+  if (!row.canPay) {
+    throw new payoutService.ValidationError(`Выплата недоступна: ${row.statusLabel}.`);
+  }
+  if (row.settlementPeriodId !== periodId) {
+    throw new payoutService.ValidationError('Сначала подготовьте выплату за самый старый невыплаченный период.');
+  }
+  return payoutService.prepareRestaurantPayout(periodId, restId, options);
 }
 
 // Массовая выплата (спецификация, раздел 11): не готовые пропускаются, ошибка
@@ -275,7 +297,7 @@ async function payAllReady({ ip = null } = {}) {
       await logAuditEvent({
         action: 'payout_created',
         restaurantId: row.restaurantId,
-        details: `массовая выплата #${payout.id}: ${payout.amount} ₽ (период ${row.periodFrom}–${row.periodTo})`,
+        details: `массовая выплата #${payout.id}: ${formatMinorRub(payout.amount)} (период ${row.periodFrom}–${row.periodTo})`,
         ip,
       });
       result.paid.push({ restaurantId: row.restaurantId, name: row.name, payoutId: payout.id, amount: payout.amount });
@@ -297,5 +319,6 @@ module.exports = {
   computePayoutReadiness,
   listPayoutStatuses,
   payRestaurant,
+  prepareSettlementPayout,
   payAllReady,
 };

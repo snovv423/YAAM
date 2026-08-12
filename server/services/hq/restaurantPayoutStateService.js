@@ -52,7 +52,7 @@ function nextSettlementAt(now = new Date()) {
   return { at: targetUtc, daysLeft, hour: SETTLEMENT_HOUR };
 }
 
-// Самая свежая закрытая строка расчёта по ресторану с положительной суммой,
+// Самая старая невыплаченная закрытая строка расчёта по ресторану с положительной суммой,
 // у которой ЕЩЁ НЕТ обязательства выплаты (restaurant_payouts). Именно она —
 // то, что можно выплатить прямо сейчас.
 async function findPayableLine(restaurantId) {
@@ -68,7 +68,7 @@ async function findPayableLine(restaurantId) {
            WHERE rp.settlement_period_id = srl.settlement_period_id
              AND rp.restaurant_id = srl.restaurant_id
         )
-      ORDER BY sp.period_to DESC, sp.id DESC
+      ORDER BY sp.period_to ASC, sp.id ASC
       LIMIT 1`,
     [restaurantId],
   );

@@ -433,6 +433,35 @@ CREATE TABLE IF NOT EXISTS orders (
   earned_at TIMESTAMPTZ
 );
 
+CREATE OR REPLACE FUNCTION fn_orders_earned_at_immutable()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF OLD.earned_at IS NOT NULL AND NEW.earned_at IS DISTINCT FROM OLD.earned_at THEN
+    RAISE EXCEPTION 'orders.earned_at is immutable after first assignment';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_orders_earned_at_immutable ON orders;
+DO $earned_at_trigger$
+BEGIN
+  -- schema.sql остаётся безопасно переисполняемым поверх исторических
+  -- pre-0013 snapshots: официальный migrator сначала добавит earned_at
+  -- миграцией 0013, затем 0015 создаст trigger безусловно.
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+     WHERE table_schema = current_schema()
+       AND table_name = 'orders'
+       AND column_name = 'earned_at'
+  ) THEN
+    EXECUTE 'CREATE TRIGGER trg_orders_earned_at_immutable
+             BEFORE UPDATE OF earned_at ON orders
+             FOR EACH ROW EXECUTE FUNCTION fn_orders_earned_at_immutable()';
+  END IF;
+END;
+$earned_at_trigger$;
+
 -- =========================================================================
 -- order_access_credentials
 -- =========================================================================
@@ -2093,6 +2122,22 @@ EXECUTE FUNCTION fn_settlement_document_chain_consistent();
 CREATE UNIQUE INDEX IF NOT EXISTS ux_settlement_documents_supersedes
   ON settlement_documents (supersedes_document_id)
   WHERE supersedes_document_id IS NOT NULL;
+
+-- Durable bookkeeping для неудачных попыток генерации. Он вынесен из
+-- immutable settlement_documents: отсутствие документа нельзя выразить
+-- UPDATE существующей строки, а failed-marker не должен становиться частью
+-- юридической version chain.
+CREATE TABLE IF NOT EXISTS settlement_document_generation_failures (
+  id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  settlement_period_id INTEGER NOT NULL REFERENCES settlement_periods(id),
+  restaurant_id INTEGER NOT NULL REFERENCES restaurants(id),
+  kind TEXT NOT NULL CHECK (kind IN ('agent_report', 'order_registry')),
+  failure_count INTEGER NOT NULL DEFAULT 1 CHECK (failure_count > 0),
+  last_error_safe TEXT NOT NULL DEFAULT '',
+  first_failed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_failed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (settlement_period_id, restaurant_id, kind)
+);
 
 -- -------------------------------------------------------------------------
 -- Перенос отрицательного остатка (carry-forward долга ресторана)

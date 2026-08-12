@@ -19,6 +19,7 @@ const EXPECTED_TABLES = [
   // Stage 22 — реестр отвергнутых webhook и счётчик номеров документов.
   'webhook_rejections',
   'document_number_counters',
+  'settlement_document_generation_failures',
   'restaurants', 'categories', 'menu_items', 'orders', 'order_access_credentials',
   // Фича «Поделиться заказом» — read-only share-токен, отдельный от
   // order_access_credentials (см. orderShareService.js).
@@ -126,6 +127,7 @@ const TABLES_WITH_CREATED_AT = [
 ];
 
 const EXPECTED_FUNCTIONS = [
+  'fn_orders_earned_at_immutable',
   'fn_refunds_amount_matches_payment',
   'fn_refunds_block_after_succeeded',
   'fn_refunds_immutable_fields',
@@ -163,6 +165,7 @@ const EXPECTED_FUNCTIONS = [
 // задокументированное поведение representation в information_schema, не
 // два физически разных триггера.
 const EXPECTED_TRIGGERS = {
+  trg_orders_earned_at_immutable: ['UPDATE'],
   trg_refunds_amount_matches_payment: ['INSERT'],
   trg_refunds_block_after_succeeded: ['INSERT'],
   trg_refunds_immutable_fields: ['UPDATE'],
@@ -208,6 +211,7 @@ const IDENTITY_TABLES = [
   // Расчётные документы периода: «Отчёт агента» и «Реестр заказов».
   'settlement_adjustments',
   'settlement_documents',
+  'settlement_document_generation_failures',
 ];
 
 let cluster;
@@ -232,7 +236,7 @@ async function runSchemaAndInspect(t, databaseName) {
       await client.query(SCHEMA_SQL);
     });
 
-    await t.test('создаются все 44 таблицы', async () => {
+    await t.test('создаются все 45 таблиц', async () => {
       const { rows } = await client.query(
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename`
       );
@@ -240,7 +244,7 @@ async function runSchemaAndInspect(t, databaseName) {
       assert.deepEqual(names, [...EXPECTED_TABLES].sort());
     });
 
-    await t.test('создаются все 56 внешних ключей', async () => {
+    await t.test('создаются все 58 внешних ключей', async () => {
       // Stage 25 добавила один новый FK: menu_items.archived_with_category_id
       // -> categories(id) (миграция 0006) — было 52, стало 53. Stage 29.1
       // добавила bot_order_messages.order_id -> orders(id) (миграция 0008,
@@ -254,7 +258,7 @@ async function runSchemaAndInspect(t, databaseName) {
         FROM information_schema.table_constraints
         WHERE constraint_schema = 'public' AND constraint_type = 'FOREIGN KEY'
       `);
-      assert.equal(rows[0].n, 56);
+      assert.equal(rows[0].n, 58);
     });
 
     await t.test('CHECK-ограничения присутствуют (>=12, включая новый на payments.status)', async () => {
@@ -330,9 +334,10 @@ async function runSchemaAndInspect(t, databaseName) {
         eventsByName.get(r.trigger_name).add(r.event_manipulation);
         tableByName.set(r.trigger_name, r.event_object_table);
       }
-      assert.equal(eventsByName.size, 22, `ожидали 22 различных триггеров, получили: ${[...eventsByName.keys()].join(', ')}`);
+      assert.equal(eventsByName.size, 23, `ожидали 23 различных триггера, получили: ${[...eventsByName.keys()].join(', ')}`);
 
       const EXPECTED_TABLE_BY_TRIGGER = {
+        trg_orders_earned_at_immutable: 'orders',
         trg_refunds_amount_matches_payment: 'refunds',
         trg_refunds_block_after_succeeded: 'refunds',
         trg_refunds_immutable_fields: 'refunds',
@@ -363,7 +368,7 @@ async function runSchemaAndInspect(t, databaseName) {
       }
     });
 
-    await t.test('IDENTITY корректна на всех 17 автоинкрементных таблицах', async () => {
+    await t.test('IDENTITY корректна на всех ожидаемых автоинкрементных таблицах', async () => {
       for (const table of IDENTITY_TABLES) {
         const { rows } = await client.query(`
           SELECT is_identity, identity_generation

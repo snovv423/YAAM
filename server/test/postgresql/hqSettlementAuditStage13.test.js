@@ -516,7 +516,7 @@ test('C1: Telegram-сообщение содержит только capability-�
   assert.match(markup, /\/d\/yaam_doc_v1_/, 'только capability-ссылки');
   assert.doesNotMatch(sent[0].text, /\/hq\//);
   // Суммы при этом остаются — сообщение не должно стать бессмысленным.
-  assert.match(sent[0].text, /930/);
+  assert.match(sent[0].text, /9,30 ₽/);
   await db.close();
 });
 

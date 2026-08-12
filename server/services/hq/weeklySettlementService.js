@@ -26,6 +26,7 @@ const db = require('../../db/postgresql');
 const settlementService = require('./settlementService');
 const { logAuditEvent } = require('./auditLog');
 const { PROJECT_TIMEZONE_OFFSET_MINUTES } = require('./dashboardMetrics');
+const { formatMinorRub } = require('../money');
 
 // Расписание: ПОНЕДЕЛЬНИК 07:00 по времени проекта — первый рабочий момент
 // после конца недели. Ресторан не ждёт лишние семь суток.
@@ -82,7 +83,7 @@ function startOfProjectWeek(localDate) {
 }
 
 // Последняя ПОЛНАЯ неделя (пн..вс), завершившаяся к моменту now.
-// В воскресенье ДО 07:00 расчёта ещё не было — закрываем позапрошлую неделю
+// В понедельник ДО 07:00 планового расчёта ещё не было — закрываем прошлую неделю
 // только если её ещё не закрыли; сама эта функция отвечает лишь на вопрос
 // «какая неделя уже полностью закончилась».
 function lastCompletedWeek(now = new Date()) {
@@ -266,7 +267,7 @@ async function closeWeek({ periodFrom, periodTo, existingId }, { now = new Date(
       // eslint-disable-next-line no-await-in-loop
       await logAuditEvent({
         action: 'settlement_carry_forward_applied', restaurantId: c.restaurantId,
-        details: `период ${periodFrom}–${periodTo}: удержано ${c.debtSettled} ₽ долга прошлых периодов, остаток долга ${c.closingDebt} ₽`,
+        details: `период ${periodFrom}–${periodTo}: удержано ${formatMinorRub(c.debtSettled)} долга прошлых периодов, остаток долга ${formatMinorRub(c.closingDebt)}`,
         ip: null,
       });
     }
@@ -274,7 +275,7 @@ async function closeWeek({ periodFrom, periodTo, existingId }, { now = new Date(
       // eslint-disable-next-line no-await-in-loop
       await logAuditEvent({
         action: 'settlement_carry_forward_accrued', restaurantId: c.restaurantId,
-        details: `период ${periodFrom}–${periodTo}: начислен долг ${c.debtAccrued} ₽, итого долг ${c.closingDebt} ₽`,
+        details: `период ${periodFrom}–${periodTo}: начислен долг ${formatMinorRub(c.debtAccrued)}, итого долг ${formatMinorRub(c.closingDebt)}`,
         ip: null,
       });
     }

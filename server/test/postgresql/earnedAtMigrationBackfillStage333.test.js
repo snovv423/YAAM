@@ -63,6 +63,10 @@ before(async () => {
   const setupClient = cluster.getClient(DATABASE_NAME);
   await setupClient.connect();
   await setupClient.query(SCHEMA_SQL);
+  // Текущий schema.sql уже содержит post-0015 immutability trigger. Для
+  // точного pre-0013 snapshot сначала удаляем зависящий от колонки trigger,
+  // затем саму колонку, которую проверяемая 0013 добавит заново.
+  await setupClient.query('DROP TRIGGER IF EXISTS trg_orders_earned_at_immutable ON orders');
   await setupClient.query('ALTER TABLE orders DROP COLUMN earned_at');
   await setupClient.end();
 

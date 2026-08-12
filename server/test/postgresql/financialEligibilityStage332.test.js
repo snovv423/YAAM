@@ -75,16 +75,18 @@ async function pgCreateRestaurant() {
   return rows[0].id;
 }
 
-async function pgCreateOrder(restaurantId, { status = 'preparing', fulfillmentType = 'delivery', statusUpdatedAt = null } = {}) {
+async function pgCreateOrder(restaurantId, {
+  status = 'preparing', fulfillmentType = 'delivery', statusUpdatedAt = null, earnedAt = null,
+} = {}) {
   const suffix = uniqueSuffix();
   const rows = await db.query(
     `INSERT INTO orders (
        public_code, restaurant_id, city, customer_name, customer_phone, address,
-       items_total, commission_amount, status, fulfillment_type, status_updated_at
+       items_total, commission_amount, status, fulfillment_type, status_updated_at, earned_at
      ) VALUES ($1, $2, 'Грозный', 'Test Customer', '+79280000001', 'ул. Тестовая, 1', 500, 35, $3, $4,
-       COALESCE($5, NOW()))
+       COALESCE($5, NOW()), $6)
      RETURNING *`,
-    [`YAAM-FE-${suffix}`, restaurantId, status, fulfillmentType, statusUpdatedAt]
+    [`YAAM-FE-${suffix}`, restaurantId, status, fulfillmentType, statusUpdatedAt, earnedAt]
   );
   return rows[0];
 }
@@ -151,24 +153,16 @@ test('B. Courier-заказ уже виден в settlement preview (fetchEarned
 
 test('C. closeSettlementPeriod() закрывает период, ПОКА заказ ещё courier — заказ попадает в settlement_order_lines', async () => {
   const restaurantId = await pgCreateRestaurant();
-  const order = await pgCreateOrder(restaurantId, { status: 'ready' });
+  const day = uniqueDayStr(-10);
+  const dayRange = resolvePeriodRange({ period: 'custom', from: day, to: day });
+  const earnedAt = new Date(dayRange.startUtc.getTime() + 12 * 60 * 60 * 1000);
+  const order = await pgCreateOrder(restaurantId, {
+    status: 'courier', statusUpdatedAt: earnedAt, earnedAt,
+  });
   await pgCreatePayment(order.id);
-  await pgOrderService.restaurantAdvance(order.id, 'courier'); // "23:58 Sunday"
 
   const stillCourier = await pgOrderService.getOrder(order.id);
   assert.equal(stillCourier.status, 'courier', 'до закрытия периода клиент ещё не подтверждал получение');
-
-  // Момент передачи курьеру уже "сегодня" (setup только что отработал) —
-  // сдвигаем earned_at на СВОЙ уникальный день (тесты C/D/E/J закрывают
-  // РАЗНЫЕ дни, чтобы не столкнуться на EXCLUDE-ограничении
-  // settlement_periods_no_overlap), тем же принципом, что и в
-  // financialIndependenceStage331.test.js тест I2.
-  const day = uniqueDayStr(-10);
-  const dayRange = resolvePeriodRange({ period: 'custom', from: day, to: day });
-  await db.execute(
-    'UPDATE orders SET earned_at = $1 WHERE id = $2',
-    [new Date(dayRange.startUtc.getTime() + 12 * 60 * 60 * 1000), order.id],
-  );
 
   const period = await settlementService.createDraftSettlementPeriod({ periodFrom: day, periodTo: day });
   const closed = await settlementService.closeSettlementPeriod(period.id); // "23:59" — период закрывается
@@ -186,16 +180,13 @@ test('C. closeSettlementPeriod() закрывает период, ПОКА за�
 
 test('D. Customer confirm ПОСЛЕ закрытия периода не меняет snapshot/сумму/период — без второго учёта', async () => {
   const restaurantId = await pgCreateRestaurant();
-  const order = await pgCreateOrder(restaurantId, { status: 'ready' });
-  await pgCreatePayment(order.id);
-  await pgOrderService.restaurantAdvance(order.id, 'courier'); // "23:58"
-
   const day = uniqueDayStr(-11); // свой день, не пересекается с тестом C/E/J
   const dayRange = resolvePeriodRange({ period: 'custom', from: day, to: day });
-  await db.execute(
-    'UPDATE orders SET earned_at = $1 WHERE id = $2',
-    [new Date(dayRange.startUtc.getTime() + 12 * 60 * 60 * 1000), order.id],
-  );
+  const earnedAt = new Date(dayRange.startUtc.getTime() + 12 * 60 * 60 * 1000);
+  const order = await pgCreateOrder(restaurantId, {
+    status: 'courier', statusUpdatedAt: earnedAt, earnedAt,
+  });
+  await pgCreatePayment(order.id);
 
   const period = await settlementService.createDraftSettlementPeriod({ periodFrom: day, periodTo: day });
   const closed = await settlementService.closeSettlementPeriod(period.id); // "23:59"
@@ -228,16 +219,13 @@ test('D. Customer confirm ПОСЛЕ закрытия периода не мен
 
 test('E. Auto-complete ПОСЛЕ закрытия периода даёт идентичный финансовый результат, что и customer confirm', async () => {
   const restaurantId = await pgCreateRestaurant();
-  const order = await pgCreateOrder(restaurantId, { status: 'ready' });
-  await pgCreatePayment(order.id);
-  await pgOrderService.restaurantAdvance(order.id, 'courier');
-
   const day = uniqueDayStr(-12); // свой день, не пересекается с тестом C/D/J
   const dayRange = resolvePeriodRange({ period: 'custom', from: day, to: day });
-  await db.execute(
-    'UPDATE orders SET earned_at = $1 WHERE id = $2',
-    [new Date(dayRange.startUtc.getTime() + 12 * 60 * 60 * 1000), order.id],
-  );
+  const earnedAt = new Date(dayRange.startUtc.getTime() + 12 * 60 * 60 * 1000);
+  const order = await pgCreateOrder(restaurantId, {
+    status: 'courier', statusUpdatedAt: earnedAt, earnedAt,
+  });
+  await pgCreatePayment(order.id);
 
   const period = await settlementService.createDraftSettlementPeriod({ periodFrom: day, periodTo: day });
   const closed = await settlementService.closeSettlementPeriod(period.id);
@@ -347,16 +335,13 @@ test('I. Заказ с succeeded-возвратом исключается из 
 
 test('J. Заказ, попавший в закрытый период как courier, не попадает повторно в следующий период после delivered', async () => {
   const restaurantId = await pgCreateRestaurant();
-  const order = await pgCreateOrder(restaurantId, { status: 'ready' });
-  await pgCreatePayment(order.id);
-  await pgOrderService.restaurantAdvance(order.id, 'courier');
-
   const day = uniqueDayStr(-13); // свой день, не пересекается с тестом C/D/E
   const dayRange = resolvePeriodRange({ period: 'custom', from: day, to: day });
-  await db.execute(
-    'UPDATE orders SET earned_at = $1 WHERE id = $2',
-    [new Date(dayRange.startUtc.getTime() + 12 * 60 * 60 * 1000), order.id],
-  );
+  const earnedAt = new Date(dayRange.startUtc.getTime() + 12 * 60 * 60 * 1000);
+  const order = await pgCreateOrder(restaurantId, {
+    status: 'courier', statusUpdatedAt: earnedAt, earnedAt,
+  });
+  await pgCreatePayment(order.id);
 
   const period1 = await settlementService.createDraftSettlementPeriod({ periodFrom: day, periodTo: day });
   const closed1 = await settlementService.closeSettlementPeriod(period1.id);

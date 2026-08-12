@@ -611,14 +611,15 @@ test('N: заказ, доставленный ПОСЛЕ закрытия пер
   const settlementService = require('../../services/hq/settlementService');
   try {
     const restaurantId = await createRestaurant(db, 'N');
-    const order1 = await createOrderRow(db, { restaurantId, status: 'delivered', itemsTotal: 1000, commissionAmount: 70 });
+    const order1 = await createOrderRow(db, {
+      restaurantId, status: 'delivered', itemsTotal: 1000, commissionAmount: 70,
+      statusUpdatedAt: new Date(Date.now() - 24 * 60 * 60 * 1000),
+    });
     await addSucceededPayment(db, order1, 1000);
 
     // Период "вчера" — закрываем.
     const period = await settlementService.createDraftSettlementPeriod({ periodFrom: todayStr(-1), periodTo: todayStr(-1) });
-    // Order1 создан "сегодня" (NOW()), а период — "вчера" — сместим
-    // status_updated_at заказа на вчера, чтобы он попал в закрываемый период.
-    await db.execute(`UPDATE orders SET status_updated_at = (NOW() - INTERVAL '1 day'), earned_at = (NOW() - INTERVAL '1 day') WHERE id = $1`, [order1]);
+    // Order1 сразу создан с immutable earned_at внутри вчерашнего дня.
     const result = await settlementService.closeSettlementPeriod(period.id);
     assert.equal(result.lines[0].turnover, 1000);
 
@@ -930,10 +931,12 @@ test('W: удаление draft-периода работает; удалени�
     assert.equal(await settlementService.getSettlementPeriodById(draft.id), null);
 
     const restaurantId = await createRestaurant(db, 'W');
-    const orderId = await createOrderRow(db, { restaurantId, status: 'delivered', itemsTotal: 1000, commissionAmount: 70 });
+    const orderId = await createOrderRow(db, {
+      restaurantId, status: 'delivered', itemsTotal: 1000, commissionAmount: 70,
+      statusUpdatedAt: new Date(Date.now() - 24 * 60 * 60 * 1000),
+    });
     await addSucceededPayment(db, orderId, 1000);
     const period2 = await settlementService.createDraftSettlementPeriod({ periodFrom: todayStr(-1), periodTo: todayStr(-1) });
-    await db.execute(`UPDATE orders SET status_updated_at = (NOW() - INTERVAL '1 day'), earned_at = (NOW() - INTERVAL '1 day') WHERE id = $1`, [orderId]);
     await settlementService.closeSettlementPeriod(period2.id);
     await assert.rejects(() => settlementService.deleteDraftSettlementPeriod(period2.id), /закрытый период нельзя удалить/i);
   } finally {

@@ -6,7 +6,7 @@
 // см. index.js).
 const express = require('express');
 const settlementService = require('../../services/hq/settlementService');
-const payoutService = require('../../services/hq/payoutService');
+const payoutStatusService = require('../../services/hq/payoutStatusService');
 const { ValidationError } = require('../../services/hq/restaurantLifecycle');
 const { logAuditEvent } = require('../../services/hq/auditLog');
 const { ensureCsrfToken, requireCsrf } = require('../../services/hq/csrf');
@@ -17,6 +17,7 @@ const documentViews = require('../../hq/settlementDocumentViews');
 const { esc: escapeHtml } = require('../../hq/layout');
 const settlementNotificationService = require('../../services/hq/settlementNotificationService');
 const db = require('../../db/postgresql');
+const { formatMinorRub } = require('../../services/money');
 
 function notFoundBody(linkBasePath) {
   return `<h1>Расчётный период не найден</h1><div class="panel"><div class="empty-state">Проверьте адрес или вернитесь к списку.</div></div><a class="btn ghost" href="${linkBasePath}/finance">← К финансам</a>`;
@@ -44,7 +45,7 @@ function createSettlementsRouter({ linkBasePath, publicBaseUrl = null }) {
 
   // Ручное создание расчётного периода УДАЛЕНО из интерфейса владельца
   // (docs/HQ-PRODUCT-SPEC.md): периоды закрываются автоматически каждое
-  // воскресенье в 07:00 МСК — services/hq/weeklySettlementService.js.
+  // понедельник в 07:00 МСК — services/hq/weeklySettlementService.js.
   // Аварийный запуск job остаётся только как серверная функция
   // (runWeeklySettlementJob), не как повседневная кнопка HQ.
 
@@ -96,18 +97,17 @@ function createSettlementsRouter({ linkBasePath, publicBaseUrl = null }) {
   router.post('/:id/payouts/:restaurantId/prepare', requireCsrf, async (req, res, next) => {
     try {
       const createdBy = (req.session && req.session.hqUser) || '';
-      const payout = await payoutService.prepareRestaurantPayout(
+      const payout = await payoutStatusService.prepareSettlementPayout(
         req.settlementPeriod.id, req.params.restaurantId, { createdBy, notes: req.body.notes },
       );
       await logAuditEvent({
         action: 'payout_created', restaurantId: payout.restaurant_id,
-        details: `payout_id=${payout.id}; period_id=${payout.settlement_period_id}; amount=${payout.amount}`,
+        details: `payout_id=${payout.id}; period_id=${payout.settlement_period_id}; amount=${formatMinorRub(payout.amount)}`,
         ip: req.ip,
       });
       res.redirect(`${linkBasePath}/payouts/${payout.id}`);
     } catch (err) {
-      // payoutService.ValidationError — та же самая, буквально реэкспортированная
-      // ссылка на restaurantLifecycle.ValidationError (см. payoutService.js) —
+      // payoutStatusService использует тот же ValidationError из payoutService —
       // одна проверка instanceof покрывает оба случая.
       if (err instanceof ValidationError) {
         // PRG вместо повторного рендера: детальная страница теперь собирает
