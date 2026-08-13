@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# YAAM — минимальный локальный backup persistent media storage (Stage 36,
+# раздел 8).
+#
+# СТАТУС: hqtest-only скрипт; устанавливается вместе с одноимёнными
+# hqtest-specific service/timer из этого каталога. До этой стадии PostgreSQL-
+# backup (yaam-pg-backup, тот же каталог) был единственным backup-контуром
+# на VPS — он покрывает ТОЛЬКО базу данных (menu_item_photos/
+# restaurant_photos — метаданные), а не сами файлы (server/services/hq/
+# media/provider.js: LocalMediaProvider, MEDIA_LOCAL_ROOT). До этого скрипта
+# загруженные фотографии существовали в единственном экземпляре без
+# резервной копии — задание прямо запрещало строить полную backup-
+# архитектуру (S3/offsite) в этой стадии, поэтому ниже — минимальный tar-
+# based скрипт по тому же принципу, что уже доказан yaam-pg-backup:
+# атомарная запись через temp-файл, проверка размера, контрольная сумма,
+# ротация по mtime. Не убирать private/masters/ из backup — без него
+# невозможна будущая регенерация thumb/card/full при смене настроек
+# обработки (см. imagePipeline.js), это тоже часть данных, которые нельзя
+# потерять, а не только public-часть.
+#
+# УСТАНОВКА:
+#   sudo cp server/deploy/yaam-media-backup /usr/local/sbin/yaam-media-backup-hqtest
+#   sudo chmod 750 /usr/local/sbin/yaam-media-backup-hqtest
+#   sudo chown root:root /usr/local/sbin/yaam-media-backup-hqtest
+#   sudo cp server/deploy/yaam-media-backup-hqtest.{service,timer} /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now yaam-media-backup-hqtest.timer
+set -uo pipefail
+umask 077
+
+lock_file=/run/lock/yaam-media-backup-hqtest.lock
+exec 9>"$lock_file" || {
+  printf 'ERROR: cannot open lock file %s\n' "$lock_file" >&2
+  exit 1
+}
+if ! flock -n 9; then
+  printf 'ERROR: hqtest media backup is already running\n' >&2
+  exit 75
+fi
+
+# Единственная цель на сегодня — hqtest (единственное окружение, где
+# MEDIA_LOCAL_ROOT реально сконфигурирован, Stage 36). Формат — та же схема
+# "<источник>:<имя>", что и databases[] в yaam-pg-backup, на случай если
+# позже добавится media-контур ещё одного окружения (api-pg).
+sources=(
+  "/opt/yaam-hqtest/media:hqtest"
+)
+
+backup_dir=/var/backups/yaam
+retention_days=14
+timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+
+if [[ ! -d "$backup_dir" || ! -w "$backup_dir" ]]; then
+  printf 'ERROR: backup directory %s is missing or not writable\n' "$backup_dir" >&2
+  exit 1
+fi
+
+failures=0
+
+for entry in "${sources[@]}"; do
+  media_root="${entry%%:*}"
+  label="${entry##*:}"
+
+  if [[ ! -d "$media_root" ]]; then
+    printf 'ERROR: media root %s (%s) не существует — пропуск\n' "$media_root" "$label" >&2
+    failures=$((failures + 1))
+    continue
+  fi
+
+  temporary_file="${backup_dir}/.yaam_media_${label}_${timestamp}.tar.gz.tmp"
+  final_file="${backup_dir}/yaam_media_${label}_${timestamp}.tar.gz"
+
+  # tar сначала во временный файл — та же причина, что и в yaam-pg-backup:
+  # прерванный на середине tar не должен оставить укороченный файл с
+  # «правильным» именем.
+  if ! tar -czf "$temporary_file" -C "$(dirname "$media_root")" "$(basename "$media_root")"; then
+    printf 'ERROR: tar failed for %s (%s)\n' "$media_root" "$label" >&2
+    rm -f "$temporary_file"
+    failures=$((failures + 1))
+    continue
+  fi
+
+  size="$(stat -c '%s' "$temporary_file" 2>/dev/null || echo 0)"
+  # Пустой/подозрительно маленький архив — провалившийся backup, который
+  # выглядит успешным (например, media_root существует, но пуст из-за
+  # опечатки в пути — тогда tar «успешен», но бесполезен).
+  if (( size < 256 )); then
+    printf 'ERROR: archive for %s (%s) is unexpectedly small (%s bytes)\n' "$media_root" "$label" "$size" >&2
+    rm -f "$temporary_file"
+    failures=$((failures + 1))
+    continue
+  fi
+
+  # Читаемость архива — тем же принципом, что pg_restore --list у
+  # yaam-pg-backup: обнаружить повреждённый архив в день создания, а не в
+  # день аварии.
+  if ! tar -tzf "$temporary_file" >/dev/null 2>&1; then
+    printf 'ERROR: archive for %s (%s) is not readable by tar\n' "$media_root" "$label" >&2
+    rm -f "$temporary_file"
+    failures=$((failures + 1))
+    continue
+  fi
+
+  if ! mv "$temporary_file" "$final_file" || ! chmod 600 "$final_file"; then
+    printf 'ERROR: cannot publish archive for %s (%s)\n' "$media_root" "$label" >&2
+    rm -f "$temporary_file"
+    failures=$((failures + 1))
+    continue
+  fi
+
+  if ! ( cd "$backup_dir" && sha256sum "$(basename "$final_file")" > "$(basename "$final_file").sha256" ) \
+     || ! chmod 600 "${final_file}.sha256"; then
+    printf 'ERROR: checksum creation failed for %s\n' "$final_file" >&2
+    rm -f "${final_file}.sha256"
+    failures=$((failures + 1))
+    continue
+  fi
+
+  printf 'ok: %s (%s) -> %s (%s bytes)\n' "$media_root" "$label" "$final_file" "$size"
+
+  # Ротация только своего label — та же изоляция по имени, что у
+  # yaam-pg-backup (разные окружения не могут стереть чужие копии).
+  if ! find "$backup_dir" -maxdepth 1 -type f -name "yaam_media_${label}_*.tar.gz" -mtime "+${retention_days}" -delete \
+     || ! find "$backup_dir" -maxdepth 1 -type f -name "yaam_media_${label}_*.tar.gz.sha256" -mtime "+${retention_days}" -delete; then
+    printf 'ERROR: retention failed for %s\n' "$label" >&2
+    failures=$((failures + 1))
+  fi
+done
+
+if (( failures > 0 )); then
+  printf 'ERROR: %s of %s media backups failed\n' "$failures" "${#sources[@]}" >&2
+  exit 1
+fi
+
+printf 'all %s media backups completed\n' "${#sources[@]}"

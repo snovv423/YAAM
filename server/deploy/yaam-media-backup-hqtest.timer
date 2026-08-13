@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily YAAM hqtest media backup
+
+[Timer]
+OnCalendar=*-*-* 04:35:00 UTC
+RandomizedDelaySec=15m
+Persistent=true
+Unit=yaam-media-backup-hqtest.service
+
+[Install]
+WantedBy=timers.target
