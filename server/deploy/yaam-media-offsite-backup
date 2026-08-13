@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# Upload a verified YAAM hqtest media archive and checksum to private Object Storage.
+# Real uploads require an explicit --real flag. Synthetic tests pass explicit files/prefix.
+set -Eeuo pipefail
+umask 077
+export AWS_EC2_METADATA_DISABLED=true
+
+credentials_file=${YAAM_MEDIA_OFFSITE_ENV:-/etc/yaam/media-offsite-backup.env}
+backup_dir=${YAAM_MEDIA_BACKUP_DIR:-/var/backups/yaam}
+endpoint=https://storage.yandexcloud.net
+mode=${1:-}
+
+fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+
+[[ -r "$credentials_file" ]] || fail "credentials file is not readable"
+set -a
+# shellcheck disable=SC1090
+source "$credentials_file"
+set +a
+
+: "${AWS_ACCESS_KEY_ID:?missing AWS_ACCESS_KEY_ID}"
+: "${AWS_SECRET_ACCESS_KEY:?missing AWS_SECRET_ACCESS_KEY}"
+: "${AWS_DEFAULT_REGION:?missing AWS_DEFAULT_REGION}"
+: "${S3_BUCKET:?missing S3_BUCKET}"
+[[ "$S3_BUCKET" == "yaam-backups-s4mur4-20260813" ]] || fail "unexpected bucket"
+
+case "$mode" in
+  --real)
+    latest_record="$(find "$backup_dir" -maxdepth 1 -type f -name 'yaam_media_hqtest_*.tar.gz' \
+      -printf '%T@ %p\n' | sort -nr | head -n 1)"
+    [[ -n "$latest_record" ]] || fail "no local hqtest media archive found"
+    archive=${latest_record#* }
+    checksum="${archive}.sha256"
+    object_prefix="hqtest/media/$(date -u +%Y/%m/%d)"
+    ;;
+  --synthetic)
+    [[ $# == 4 ]] || fail "usage: $0 --synthetic ARCHIVE CHECKSUM PREFIX"
+    archive=$2
+    checksum=$3
+    object_prefix=$4
+    [[ "$object_prefix" == hqtest/synthetic/* ]] || fail "synthetic prefix is not allowed"
+    ;;
+  *)
+    fail "explicit --real or --synthetic is required"
+    ;;
+esac
+
+[[ -f "$archive" && -f "$checksum" ]] || fail "archive or checksum is missing"
+tar -tzf "$archive" >/dev/null || fail "archive is not readable"
+(cd "$(dirname "$archive")" && sha256sum -c "$(basename "$checksum")") >/dev/null \
+  || fail "local checksum verification failed"
+
+archive_name=$(basename "$archive")
+checksum_name=$(basename "$checksum")
+archive_key="${object_prefix%/}/${archive_name}"
+checksum_key="${object_prefix%/}/${checksum_name}"
+archive_size=$(stat -c '%s' "$archive")
+checksum_size=$(stat -c '%s' "$checksum")
+
+upload_one() {
+  local file=$1 key=$2 attempt
+  for attempt in 1 2 3 4; do
+    if aws --endpoint-url "$endpoint" s3api put-object \
+      --bucket "$S3_BUCKET" --key "$key" --body "$file" >/dev/null; then
+      return 0
+    fi
+    sleep $((attempt * attempt))
+  done
+  fail "upload failed after retries: $key"
+}
+
+upload_one "$archive" "$archive_key"
+upload_one "$checksum" "$checksum_key"
+
+remote_archive_size=$(aws --endpoint-url "$endpoint" s3api head-object \
+  --bucket "$S3_BUCKET" --key "$archive_key" --query ContentLength --output text)
+remote_checksum_size=$(aws --endpoint-url "$endpoint" s3api head-object \
+  --bucket "$S3_BUCKET" --key "$checksum_key" --query ContentLength --output text)
+[[ "$remote_archive_size" == "$archive_size" ]] || fail "remote archive size mismatch"
+[[ "$remote_checksum_size" == "$checksum_size" ]] || fail "remote checksum size mismatch"
+
+printf 'uploaded and size-verified: %s (%s bytes), %s (%s bytes)\n' \
+  "$archive_key" "$archive_size" "$checksum_key" "$checksum_size"

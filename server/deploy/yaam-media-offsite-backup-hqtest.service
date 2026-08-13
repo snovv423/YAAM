@@ -1,0 +1,21 @@
+[Unit]
+Description=YAAM hqtest media off-site backup to Yandex Object Storage
+After=network-online.target yaam-media-backup-hqtest.service
+Wants=network-online.target
+ConditionPathExists=/etc/yaam/media-offsite-backup.env
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+EnvironmentFile=/etc/yaam/media-offsite-backup.env
+ExecStart=/usr/local/sbin/yaam-media-offsite-backup --real
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/var/backups/yaam /etc/yaam/media-offsite-backup.env
+ReadWritePaths=/run/lock

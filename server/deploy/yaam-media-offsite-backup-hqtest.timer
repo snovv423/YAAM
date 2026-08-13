@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily YAAM hqtest media off-site backup (disabled until approved)
+
+[Timer]
+OnCalendar=*-*-* 05:05:00 UTC
+RandomizedDelaySec=5m
+Persistent=true
+Unit=yaam-media-offsite-backup-hqtest.service
+
+[Install]
+WantedBy=timers.target
