@@ -133,13 +133,18 @@ function inspectEnv(env = process.env) {
 
   // --- Платежи ---
   const provider = env.PAYMENT_PROVIDER;
-  if (!isBlank(provider) && !['mock', 'yookassa'].includes(provider)) {
-    errors.push('PAYMENT_PROVIDER допускает только "mock" или "yookassa".');
+  if (!isBlank(provider) && !['disabled', 'mock', 'yookassa'].includes(provider)) {
+    errors.push('PAYMENT_PROVIDER допускает только "disabled", "mock" или "yookassa".');
   }
-  if (mode === 'production' && provider !== 'yookassa') {
-    // Главная проверка всего модуля: production на mock-провайдере означал бы
-    // приём настоящих заказов без настоящей оплаты.
-    errors.push('В production PAYMENT_PROVIDER обязан быть "yookassa": mock-провайдер не принимает реальных денег.');
+  if (mode === 'production' && provider !== 'yookassa' && provider !== 'disabled') {
+    // Production на mock-провайдере означал бы приём настоящих заказов без
+    // настоящей оплаты. Явный disabled — отдельный fail-closed режим для
+    // production foundation: каталог/HQ доступны, создание платежей и
+    // заказов заблокировано 503 на API-границе.
+    errors.push('В production PAYMENT_PROVIDER допускает только "yookassa" или fail-closed режим "disabled".');
+  }
+  if (provider === 'disabled') {
+    warnings.push('Платёжный провайдер отключён: создание заказов и платёжные операции недоступны.');
   }
   if (provider === 'yookassa') {
     if (isBlank(env.YOOKASSA_SHOP_ID) || isBlank(env.YOOKASSA_SECRET_KEY)) {

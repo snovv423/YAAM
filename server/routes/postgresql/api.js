@@ -114,6 +114,17 @@ function bearerToken(req) {
   return orderService.parseBearerAuthorization(req.get('authorization'));
 }
 
+// Production API/HQ foundation can be exposed before a real payment provider
+// is authorized. In that state the catalog remains readable, but no order or
+// payment attempt may be materialized. This guard runs before any orderService
+// write and is deliberately distinct from mock: mock is still forbidden in
+// production by services/config/env.js.
+function requirePaymentProviderEnabled(req, res, next) {
+  if (paymentService.providerName !== 'disabled') return next();
+  res.set('Cache-Control', 'no-store');
+  return res.status(503).json({ error: 'Оформление заказов временно недоступно' });
+}
+
 // Синхронна (как и в оригинале) — не делает SQL, только парсинг заголовков.
 function requireBearerForCreate(req, res, next) {
   res.set('Cache-Control', 'no-store');
@@ -476,7 +487,7 @@ router.post('/restaurant-candidates/:id/vote', candidateVoteLimiter, async (req,
   }
 });
 
-router.post('/orders', orderCreateLimiter, requireBearerForCreate, async (req, res) => {
+router.post('/orders', orderCreateLimiter, requirePaymentProviderEnabled, requireBearerForCreate, async (req, res) => {
   try {
     const result = await orderService.createOrderAndResolve({
       ...req.body,
@@ -489,7 +500,7 @@ router.post('/orders', orderCreateLimiter, requireBearerForCreate, async (req, r
   }
 });
 
-router.post('/orders/recover', orderCreateLimiter, requireBearerForCreate, async (req, res) => {
+router.post('/orders/recover', orderCreateLimiter, requirePaymentProviderEnabled, requireBearerForCreate, async (req, res) => {
   try {
     const result = await orderService.recoverOrder({
       orderAccessToken: req.orderAccessToken,
@@ -538,7 +549,7 @@ router.post('/orders/:code/cancel', orderMutationLimiter, requireOrderAccess, as
   }
 });
 
-router.post('/orders/:code/retry-payment', orderMutationLimiter, requireOrderAccess, async (req, res) => {
+router.post('/orders/:code/retry-payment', orderMutationLimiter, requirePaymentProviderEnabled, requireOrderAccess, async (req, res) => {
   try {
     const retryKey = req.get('idempotency-key');
     if (!orderService.isValidRetryKey(retryKey)) {

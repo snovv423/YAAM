@@ -91,7 +91,7 @@ test('E1: валидное production-окружение проходит про
 test('E2: production не запускается с mock-провайдером и с тестовыми заглушками', () => {
   // Mock в production = приём заказов без реальной оплаты.
   const mock = inspectEnv(prodEnv({ PAYMENT_PROVIDER: 'mock' }));
-  assert.ok(mock.errors.some((e) => /mock-провайдер/.test(e)));
+  assert.ok(mock.errors.some((e) => /production.*disabled|yookassa.*disabled/i.test(e)));
 
   // Секрет-заглушка.
   const placeholder = inspectEnv(prodEnv({ HQ_SESSION_SECRET: 'ssssssssssssssssssssssssssssssssss' }));
@@ -118,6 +118,20 @@ test('E2: production не запускается с mock-провайдером 
   // dev-маршруты оплаты.
   const dev = inspectEnv(prodEnv({ ENABLE_DEV_PAYMENT_ROUTES: 'true' }));
   assert.ok(dev.errors.some((e) => /ENABLE_DEV_PAYMENT_ROUTES/.test(e)));
+});
+
+test('E2.1: production foundation принимает только явный disabled и сохраняет запрет mock', () => {
+  const disabled = inspectEnv(prodEnv({
+    PAYMENT_PROVIDER: 'disabled',
+    YOOKASSA_ENV: undefined,
+    YOOKASSA_SHOP_ID: undefined,
+    YOOKASSA_SECRET_KEY: undefined,
+  }));
+  assert.deepEqual(disabled.errors, []);
+  assert.ok(disabled.warnings.some((w) => /Платёжный провайдер отключён/.test(w)));
+
+  const mock = inspectEnv(prodEnv({ PAYMENT_PROVIDER: 'mock' }));
+  assert.ok(mock.errors.some((e) => /production.*disabled|yookassa.*disabled/i.test(e)));
 });
 
 test('E3: staging не может работать боевыми credentials, live YooKassa заблокирован везде', () => {
@@ -1029,7 +1043,7 @@ test('P1: assertEnv действительно вызывается при сб�
         DATABASE_URL: 'postgres://u:p@127.0.0.1:5432/x',
       },
     }),
-    /mock-провайдер/,
+    /production.*disabled|yookassa.*disabled/i,
   );
 });
 

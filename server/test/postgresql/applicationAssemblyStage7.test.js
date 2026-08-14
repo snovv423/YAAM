@@ -735,6 +735,42 @@ test('H1: по умолчанию (ENABLE_DEV_PAYMENT_ROUTES не задан) �
   }
 ));
 
+test('H1.1: PAYMENT_PROVIDER=disabled блокирует create до записи order/payment и не монтирует dev route', withEnvReload(
+  {
+    APP_ENV: 'production',
+    PAYMENT_PROVIDER: 'disabled',
+    TRUST_PROXY: 'loopback',
+    PUBLIC_BACKEND_URL: 'https://api.example.test',
+    HQ_SESSION_SECRET: 'c4f2b8d7e13a94c6f0b2da3f9c2b7d1e648a5906',
+    ENABLE_DEV_PAYMENT_ROUTES: 'false',
+  },
+  async ({ appModule: reloadedApp }) => {
+    const beforeRows = await db.query('SELECT count(*)::int AS n FROM orders');
+    const beforePayments = await db.query('SELECT count(*)::int AS n FROM payments');
+    const instance = reloadedApp.createPostgresqlApp({ port: 0, schedulerIntervalMs: 1_000_000 });
+    await instance.start();
+    try {
+      const { port } = instance.address();
+      const create = await fetchJson(`http://127.0.0.1:${port}/api/orders`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      assert.equal(create.status, 503);
+      assert.match(create.body.error, /временно недоступно/);
+
+      const dev = await fetch(`http://127.0.0.1:${port}/api/orders/YAAM-00001/dev-confirm-payment`, { method: 'POST' });
+      assert.equal(dev.status, 404);
+    } finally {
+      await instance.stop();
+    }
+    const afterRows = await db.query('SELECT count(*)::int AS n FROM orders');
+    const afterPayments = await db.query('SELECT count(*)::int AS n FROM payments');
+    assert.equal(afterRows[0].n, beforeRows[0].n);
+    assert.equal(afterPayments[0].n, beforePayments[0].n);
+  }
+));
+
 test('H2: APP_ENV=production — dev-роут отсутствует, даже если флаг явно включён', withEnvReload(
   // TRUST_PROXY=loopback обязателен вместе с APP_ENV=production с Stage 9
   // (services/postgresql/app.js validateAppEnv() — см.

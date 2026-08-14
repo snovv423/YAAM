@@ -2,15 +2,19 @@ const MockProvider = require('./paymentProviders/mockProvider');
 
 // Единая точка входа для оплаты. orderService и routes/api.js вызывают только
 // эти функции — какой провайдер сейчас активен, решает переменная окружения
-// PAYMENT_PROVIDER (mock | yookassa), больше нигде в коде это не завязано.
+// PAYMENT_PROVIDER (disabled | mock | yookassa), больше нигде в коде это не завязано.
 function loadProvider() {
   const name = process.env.PAYMENT_PROVIDER || 'mock';
   if (name === 'yookassa') {
     const YookassaProvider = require('./paymentProviders/yookassaProvider');
     return new YookassaProvider();
   }
+  if (name === 'disabled') {
+    const DisabledProvider = require('./paymentProviders/disabledProvider');
+    return new DisabledProvider();
+  }
   if (name === 'mock') return new MockProvider();
-  throw new Error(`PAYMENT_PROVIDER="${name}" не поддерживается — допустимы только "mock" или "yookassa".`);
+  throw new Error(`PAYMENT_PROVIDER="${name}" не поддерживается — допустимы только "disabled", "mock" или "yookassa".`);
 }
 
 const provider = loadProvider();

@@ -17,3 +17,14 @@ test('unknown PAYMENT_PROVIDER fails closed instead of silently loading mock', (
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /PAYMENT_PROVIDER=.*не поддерживается/);
 });
+
+test('disabled provider loads explicitly and never falls back to mock', () => {
+  const result = spawnSync(process.execPath, ['-e', "const p=require('./services/paymentService'); console.log(p.providerName)"], {
+    cwd: serverDir,
+    env: { ...process.env, PAYMENT_PROVIDER: 'disabled' },
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.trim(), 'disabled');
+});

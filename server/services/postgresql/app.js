@@ -59,8 +59,8 @@ const KNOWN_APP_ENVS = ['local', 'staging', 'production'];
 function validateAppEnv(env) {
   const errors = [];
 
-  if (env.PAYMENT_PROVIDER !== undefined && !['mock', 'yookassa'].includes(env.PAYMENT_PROVIDER)) {
-    errors.push('PAYMENT_PROVIDER допускает только "mock" или "yookassa".');
+  if (env.PAYMENT_PROVIDER !== undefined && !['disabled', 'mock', 'yookassa'].includes(env.PAYMENT_PROVIDER)) {
+    errors.push('PAYMENT_PROVIDER допускает только "disabled", "mock" или "yookassa".');
   }
 
   if (env.PAYMENT_PROVIDER === 'yookassa') {
