@@ -207,14 +207,18 @@
   .menu-stickybar.show{height:44px;opacity:1;border-color:rgba(255,255,255,.1)}
   .msb-name{font-weight:800;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .msb-rate{font-size:12px;font-weight:700;color:var(--txt2);flex:0 0 auto}
-  .mtabs{display:flex;gap:9px;overflow-x:auto;padding:14px 16px 4px;scrollbar-width:none}
+  .mtabs{display:flex;gap:9px;overflow-x:auto;padding:14px 16px 4px;scrollbar-width:none;touch-action:pan-x;overscroll-behavior-x:contain;-webkit-overflow-scrolling:touch}
   .mtabs::-webkit-scrollbar{display:none}
-  .mtab{flex:0 0 auto;font-size:13px;font-weight:700;color:var(--txt);padding:9px 16px;border-radius:999px;cursor:pointer;background:var(--glass);border:1px solid var(--gbord);box-shadow:var(--spec);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);transition:background .2s ease,color .2s ease,box-shadow .2s ease}
+  .mtab{flex:0 0 auto;font-family:inherit;font-size:13px;font-weight:700;color:var(--txt);padding:9px 16px;border-radius:999px;cursor:pointer;background:var(--glass);border:1px solid var(--gbord);box-shadow:var(--spec);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);transition:background .2s ease,color .2s ease,box-shadow .2s ease;touch-action:pan-x}
   .mtab.on{background:var(--amber);color:#3a1c00;border-color:transparent;box-shadow:0 6px 16px rgba(255,154,46,.45)}
-  .cat-h{font-weight:800;font-size:17px;padding:20px 18px 8px;position:relative;z-index:2}
+  .cat-h{font-weight:800;font-size:17px;padding:20px 18px 8px;position:relative;z-index:2;scroll-margin-top:108px}
   .dish{position:relative;z-index:2;margin:0 14px 16px;border-radius:24px;overflow:hidden;box-shadow:var(--shadow);isolation:isolate;background:#13402a}
-  .dphoto{position:relative;height:176px}
-  .dphoto>img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:center;z-index:1}
+  /* Карточки получают квадратные ресторанные исходники. Не растягиваем их
+     через cover: это увеличивало блюдо и срезало края на узких телефонах.
+     Полный кадр кладём поверх мягкой копии того же снимка. */
+  .dphoto{position:relative;height:auto;aspect-ratio:4/3;overflow:hidden;background:#0d2519}
+  .dphoto::after{content:"";position:absolute;inset:-18px;z-index:0;background-image:var(--dish-bg,none);background-size:cover;background-position:center;filter:blur(22px) brightness(.5) saturate(1.08);transform:scale(1.12)}
+  .dphoto>img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;object-position:center;z-index:1}
   .dphoto::before{content:"";position:absolute;inset:0;z-index:2;background:linear-gradient(180deg,rgba(0,0,0,.05),transparent 40%,rgba(4,18,11,.55) 100%)}
   .dplate{position:absolute;left:10px;right:auto;max-width:58%;bottom:10px;z-index:3;border-radius:16px;padding:9px 12px;color:#fff;background:var(--glass);border:1px solid var(--gbord);box-shadow:var(--spec),0 8px 18px rgba(0,0,0,.25);backdrop-filter:blur(18px) saturate(170%);-webkit-backdrop-filter:blur(18px) saturate(170%)}
   .dname{font-weight:800;font-size:14.5px}
@@ -247,11 +251,14 @@
      остался object-fit:cover — это ambient-баннер с текстом поверх, не
      "большая галерея" в смысле задания.
   */
-  .dhero{position:relative;height:300px;background:#13402a;overflow:hidden}
+  .dhero{position:relative;height:auto;aspect-ratio:1/1;background:#13402a;overflow:hidden}
   .dhero::before{content:"";position:absolute;inset:-24px;z-index:0;background-image:var(--dhero-bg,none);background-size:cover;background-position:center;filter:blur(28px) brightness(.55);transform:scale(1.15)}
   .dhero>img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;object-position:center;z-index:1}
   .dhero::after{content:"";position:absolute;inset:0;z-index:2;background:linear-gradient(180deg,rgba(0,0,0,.28),transparent 40%,rgba(6,28,17,.85))}
   .gallery{display:flex;gap:9px;padding:14px 16px 2px;overflow-x:auto;scrollbar-width:none;margin-top:-44px;position:relative;z-index:3}
+  /* Пустая галерея раньше всё равно занимала отрицательное место и
+     наезжала на метаданные ресторана — на iPhone были видны белые «точки». */
+  .gallery:empty{display:none}
   .gallery::-webkit-scrollbar{display:none}
   .thumb{flex:0 0 64px;width:64px;height:64px;border-radius:14px;overflow:hidden;cursor:pointer;border:2px solid transparent;background:#13402a;padding:0}
   .thumb.on{border-color:var(--amber)}

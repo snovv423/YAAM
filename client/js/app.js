@@ -581,7 +581,7 @@ async function doOpenRest(id){
   document.getElementById('msb-name').textContent=curRest.name;
   document.getElementById('msb-rate').textContent=showRating?`★ ${curRest.rate}`:'';
   const tabs=curRest.menu.map(c=>c.cat);
-  document.getElementById('m-tabs').innerHTML=tabs.map((t,i)=>`<div class="mtab ${i===0?'on':''}" onclick="document.getElementById('sec${i}').scrollIntoView({behavior:'smooth'})">${esc(t)}</div>`).join('');
+  document.getElementById('m-tabs').innerHTML=tabs.map((t,i)=>`<button type="button" class="mtab ${i===0?'on':''}" onclick="scrollToMenuSection(${i})">${esc(t)}</button>`).join('');
   renderMenuBody(); go('menu'); updateBar();
   window.scrollTo(0,0);
   initMenuScrollFX();
@@ -590,7 +590,28 @@ async function doOpenRest(id){
 // Компактная плашка ресторана при скролле меню + подсветка активной категории
 // + лёгкий скролл-параллакс на фото ресторана (transform-only, работает и на тач-устройствах,
 // в отличие от прежнего hover-параллакса на главной, который на мобильном просто не срабатывал).
-let catObserver=null, menuScrollHandler=null;
+let catObserver=null, menuScrollHandler=null, menuCategoryScrollLockUntil=0;
+function centerMenuTab(tab){
+  const strip=document.getElementById('m-tabs');
+  if(!strip||!tab)return;
+  const target=tab.offsetLeft-(strip.clientWidth-tab.offsetWidth)/2;
+  strip.scrollTo({left:Math.max(0,target),behavior:'smooth'});
+}
+function setActiveMenuTab(idx){
+  const tabs=[...document.querySelectorAll('#m-tabs .mtab')];
+  tabs.forEach((tab,i)=>tab.classList.toggle('on',i===idx));
+  centerMenuTab(tabs[idx]);
+}
+function scrollToMenuSection(idx){
+  const section=document.getElementById('sec'+idx);
+  if(!section)return;
+  menuCategoryScrollLockUntil=Date.now()+900;
+  setActiveMenuTab(idx);
+  const sticky=document.querySelector('.menu-sticky-group');
+  const offset=(sticky?sticky.offsetHeight:0)+8;
+  const top=window.scrollY+section.getBoundingClientRect().top-offset;
+  window.scrollTo({top:Math.max(0,top),behavior:'smooth'});
+}
 function initMenuScrollFX(){
   const hero=document.querySelector('#m-hero img');
   const stickybar=document.getElementById('menu-stickybar');
@@ -611,11 +632,11 @@ function initMenuScrollFX(){
   const sections=[...document.querySelectorAll('#m-body .cat-h')];
   const tabs=[...document.querySelectorAll('#m-tabs .mtab')];
   catObserver=new IntersectionObserver((entries)=>{
+    if(Date.now()<menuCategoryScrollLockUntil)return;
     entries.forEach(en=>{
       if(!en.isIntersecting)return;
       const idx=sections.indexOf(en.target);
-      tabs.forEach((t,i)=>t.classList.toggle('on',i===idx));
-      if(tabs[idx])tabs[idx].scrollIntoView({behavior:'smooth',inline:'center',block:'nearest'});
+      setActiveMenuTab(idx);
     });
   },{rootMargin:'-96px 0px -75% 0px'});
   sections.forEach(s=>catObserver.observe(s));
@@ -632,9 +653,11 @@ function findItem(k){const[ci,ii]=k.split('_').map(Number);const d=curRest.menu[
 function dishCard(d,ci,ii){
   const k=key(ci,ii);const q=cart[k]?cart[k].q:0;const so=SOLD_OUT[k]||d.available===false;
   const hasSrc=!!(d.photoUrl||d.im);
-  const photo=hasSrc?`<img src="${d.photoUrl||U(d.im,700)}" loading="lazy" onerror="this.closest('.dphoto').classList.add('nophoto');this.remove()">`:'';
+  const photoSrc=hasSrc?(d.photoUrl||U(d.im,700)):'';
+  const safePhotoSrc=esc(photoSrc);
+  const photo=hasSrc?`<img src="${safePhotoSrc}" loading="lazy" decoding="async" onerror="this.closest('.dphoto').classList.add('nophoto');this.remove()">`:'';
   return `<div class="dish ${so?'dis':''}" ${so?'':`onclick="openDish('${k}')"`}>
-    <div class="dphoto ${hasSrc?'':'nophoto'}" style="background:${d.g}">${photo}
+    <div class="dphoto ${hasSrc?'':'nophoto'}" style="background:${d.g};${hasSrc?`--dish-bg:url(&quot;${safePhotoSrc}&quot;)`:''}">${photo}
     <div class="dplate"><div class="dname">${esc(d.n)}${d.pop?' <span class="hit">Хит</span>':''}</div><div class="ddesc">${esc(d.d)}</div></div>
     <div class="dactions"><div class="dprice">${d.p} ₽</div>${so?'<span class="soldout">Нет в наличии</span>':`<div data-ctrl-key="${k}" onclick="event.stopPropagation()">${q>0?qtyHtml(k,q):`<button class="add" onclick="addItem('${k}',event)">+</button>`}</div>`}</div></div></div>`;
 }
