@@ -609,7 +609,11 @@ function scrollToMenuSection(idx){
   const section=document.getElementById('sec'+idx);
   if(!section)return;
   const sticky=document.querySelector('.menu-sticky-group');
-  const offset=(sticky?sticky.offsetHeight:0)+8;
+  const tabsStrip=document.getElementById('m-tabs');
+  // При прыжке с самого верха компактная 44px-плашка ещё скрыта, но после
+  // прокрутки появится. Сразу резервируем её будущую высоту, чтобы заголовок
+  // далёкой категории не оказался под sticky-группой.
+  const offset=Math.max(sticky?sticky.offsetHeight:0,(tabsStrip?tabsStrip.offsetHeight:0)+44)+8;
   const top=window.scrollY+section.getBoundingClientRect().top-offset;
   const target=Math.max(0,top);
   const behavior=menuScrollBehavior(window.scrollY,target,window.innerHeight);
