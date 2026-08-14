@@ -246,12 +246,14 @@ function cardHTML(r){
 
 async function renderList(instant){
   let base;
+  let loadFailed=false;
   if(USE_API){
     try{
       base=(await api.getRestaurants(selectedCity)).map(normalizeRestaurant);
     }catch(err){
       showToast('Не удалось загрузить рестораны — проверьте соединение');
       base=[];
+      loadFailed=true;
     }
   }else{
     base=restaurants.filter(r=>r.cities.includes(selectedCity));
@@ -261,7 +263,9 @@ async function renderList(instant){
   const closedR=base.filter(r=>!r.open);
   const el=document.getElementById('list');
   if(!base.length){
-    el.innerHTML='<div class="empty">В этом городе пока нет ресторанов.<br>Скоро появятся — проголосуйте за свой город наверху!</div>';
+    el.innerHTML=loadFailed
+      ? '<div class="empty">Не удалось загрузить рестораны.<br>Проверьте соединение и попробуйте ещё раз.</div>'
+      : '<div class="empty">В этом городе пока нет ресторанов.<br>Скоро появятся — проголосуйте за свой город наверху!</div>';
     return;
   }
   let html='';
@@ -2629,10 +2633,8 @@ function voteTouchEnd(){
   if(el)el.addEventListener('input',saveCartState);
 });
 
-// Stage 11A: staging-режим виден только тестировщику (?yaam_staging_api=1),
-// обычные посетители demo-сайта никогда его не видят — IS_STAGING_MODE
-// остаётся false, если window.YAAM_API_BASE_URL/query/sessionStorage не
-// задавали staging явно (см. resolveApiBaseUrl() в api.js).
+// Production frontend не показывает прежний staging-индикатор. Условие
+// сохранено как безопасный guard для совместимости разметки.
 if(typeof IS_STAGING_MODE!=='undefined'&&IS_STAGING_MODE){
   const stgBadge=document.getElementById('stgBadge');
   if(stgBadge)stgBadge.hidden=false;

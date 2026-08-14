@@ -88,7 +88,7 @@ function makeFakeElement(id) {
   };
 }
 
-function createSandbox({ apiBaseUrl, locationSearch, locationHref } = {}) {
+function createSandbox({ apiBaseUrl, locationSearch, locationHref, useProductionDefault = false } = {}) {
   const store = {};
   const localStorage = {
     getItem: (k) => (Object.prototype.hasOwnProperty.call(store, k) ? store[k] : null),
@@ -166,9 +166,11 @@ function createSandbox({ apiBaseUrl, locationSearch, locationHref } = {}) {
     },
   };
   sandbox.window = sandbox; // как в реальном браузере — window === глобальный объект
-  sandbox.window.YAAM_API_BASE_URL = apiBaseUrl || undefined;
-  // fetch не используется в demo-режиме (USE_API=false, apiBaseUrl не задан) —
-  // тестовые сценарии этой задачи все проходят через demo-ветку app.js.
+  if (!useProductionDefault) {
+    sandbox.window.__YAAM_TEST_MODE__ = true;
+    sandbox.window.__YAAM_TEST_API_BASE_URL = apiBaseUrl || null;
+  }
+  // Старые unit-тесты изолированы от production API через test-only override.
   sandbox.fetch = async () => { throw new Error('fetch не должен вызываться в demo-режиме этого теста'); };
 
   vm.createContext(sandbox);
