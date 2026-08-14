@@ -26,6 +26,12 @@ test('главная HELP-кнопка ведёт ровно на https://t.me/Y
   assert.equal(match[1], REQUIRED_SUPPORT_URL);
 });
 
+test('устаревший prototype-текст удалён, HELP остаётся непосредственно перед юридическим footer', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  assert.doesNotMatch(html, /Прототип YAAM|Фото — для примера/);
+  assert.match(html, /<a class="help-link"[^>]*>HELP<\/a>\s*<footer class="site-footer">/);
+});
+
 test('«Написать в поддержку» (карточка отмены заказа) ведёт на https://t.me/YAAMHELP', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const match = html.match(/<a class="ghost" href="([^"]+)" target="_blank" rel="noopener">Написать в поддержку<\/a>/);
