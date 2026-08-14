@@ -68,6 +68,22 @@ test('dishCard: доступное блюдо даёт добавить в ко�
   assert.match(html, /onclick="openDish\('0_0'\)"/);
 });
 
+test('dishCard: длинное меню не загружает все фотографии сразу и не создаёт вторую CSS-копию', () => {
+  const sandbox = freshApp({});
+  setMenu(sandbox, [{ cat: 'Кат', items: [{ id: 1, n: 'Фото', d: '', p: 150, available: true, photoUrl: 'https://cdn.test/dish.webp' }] }]);
+  evalInContext(sandbox, 'renderMenuBody()');
+  const html = sandbox.document.getElementById('m-body').innerHTML;
+  assert.match(html, /data-src="https:\/\/cdn\.test\/dish\.webp"/, 'URL должен ждать viewport-observer в data-src');
+  assert.doesNotMatch(html, /<img[^>]+\ssrc=/, 'до приближения к viewport картинка не должна декодироваться');
+  assert.doesNotMatch(html, /--dish-bg/, 'вторая фоновая копия не должна удерживаться в памяти');
+});
+
+test('menuScrollBehavior: дальний переход мгновенный, соседний остаётся плавным', () => {
+  const sandbox = freshApp({});
+  assert.equal(evalInContext(sandbox, 'menuScrollBehavior(32000, 180, 844)'), 'auto');
+  assert.equal(evalInContext(sandbox, 'menuScrollBehavior(1000, 1800, 844)'), 'smooth');
+});
+
 test('addItem: не добавляет заново проверку доступности (гарантия — на уровне рендера/сервера), но цена/название берутся из текущего меню', () => {
   const sandbox = freshApp({});
   setMenu(sandbox, [{ cat: 'Кат', items: [{ id: 42, n: 'Шашлык', d: '', p: 650, available: true }] }]);

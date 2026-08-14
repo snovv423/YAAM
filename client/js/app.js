@@ -602,15 +602,20 @@ function setActiveMenuTab(idx){
   tabs.forEach((tab,i)=>tab.classList.toggle('on',i===idx));
   centerMenuTab(tabs[idx]);
 }
+function menuScrollBehavior(from,to,viewportHeight){
+  return Math.abs(to-from)>Math.max(viewportHeight*2,1400)?'auto':'smooth';
+}
 function scrollToMenuSection(idx){
   const section=document.getElementById('sec'+idx);
   if(!section)return;
-  menuCategoryScrollLockUntil=Date.now()+900;
-  setActiveMenuTab(idx);
   const sticky=document.querySelector('.menu-sticky-group');
   const offset=(sticky?sticky.offsetHeight:0)+8;
   const top=window.scrollY+section.getBoundingClientRect().top-offset;
-  window.scrollTo({top:Math.max(0,top),behavior:'smooth'});
+  const target=Math.max(0,top);
+  const behavior=menuScrollBehavior(window.scrollY,target,window.innerHeight);
+  menuCategoryScrollLockUntil=Date.now()+(behavior==='smooth'?900:150);
+  setActiveMenuTab(idx);
+  window.scrollTo({top:target,behavior});
 }
 function initMenuScrollFX(){
   const hero=document.querySelector('#m-hero img');
@@ -655,9 +660,9 @@ function dishCard(d,ci,ii){
   const hasSrc=!!(d.photoUrl||d.im);
   const photoSrc=hasSrc?(d.photoUrl||U(d.im,700)):'';
   const safePhotoSrc=esc(photoSrc);
-  const photo=hasSrc?`<img src="${safePhotoSrc}" loading="lazy" decoding="async" onerror="this.closest('.dphoto').classList.add('nophoto');this.remove()">`:'';
+  const photo=hasSrc?`<img data-src="${safePhotoSrc}" loading="lazy" decoding="async" onerror="this.dataset.failed='1';this.closest('.dphoto').classList.add('nophoto');this.removeAttribute('src')">`:'';
   return `<div class="dish ${so?'dis':''}" ${so?'':`onclick="openDish('${k}')"`}>
-    <div class="dphoto ${hasSrc?'':'nophoto'}" style="background:${d.g};${hasSrc?`--dish-bg:url(&quot;${safePhotoSrc}&quot;)`:''}">${photo}
+    <div class="dphoto ${hasSrc?'':'nophoto'}" style="background:${d.g}">${photo}
     <div class="dplate"><div class="dname">${esc(d.n)}${d.pop?' <span class="hit">Хит</span>':''}</div><div class="ddesc">${esc(d.d)}</div></div>
     <div class="dactions"><div class="dprice">${d.p} ₽</div>${so?'<span class="soldout">Нет в наличии</span>':`<div data-ctrl-key="${k}" onclick="event.stopPropagation()">${q>0?qtyHtml(k,q):`<button class="add" onclick="addItem('${k}',event)">+</button>`}</div>`}</div></div></div>`;
 }
@@ -665,6 +670,24 @@ function renderMenuBody(){
   let html='';
   curRest.menu.forEach((c,ci)=>{html+=`<div class="cat-h" id="sec${ci}">${esc(c.cat)}</div>`+c.items.map((d,ii)=>dishCard(d,ci,ii)).join('');});
   document.getElementById('m-body').innerHTML=html;
+  initDishImageVirtualization();
+}
+let dishImageObserver=null;
+function initDishImageVirtualization(){
+  if(dishImageObserver)dishImageObserver.disconnect();
+  const photos=[...document.querySelectorAll('#m-body .dphoto')];
+  dishImageObserver=new IntersectionObserver((entries)=>{
+    entries.forEach(entry=>{
+      const img=entry.target.querySelector('img[data-src]');
+      if(!img||img.dataset.failed==='1')return;
+      if(entry.isIntersecting){
+        if(!img.getAttribute('src'))img.src=img.dataset.src;
+      }else{
+        img.removeAttribute('src');
+      }
+    });
+  },{rootMargin:'1200px 0px'});
+  photos.forEach(photo=>dishImageObserver.observe(photo));
 }
 function qtyHtml(k,q){return `<div class="qty"><button onclick="dec('${k}')">−</button><span>${q}</span><button onclick="inc('${k}',event)">+</button></div>`;}
 function addItem(k,e){const it=findItem(k);cart[k]={n:it.n,p:it.p,q:1,menuItemId:it.id};refreshAll(k);if(e)flyAnim(e);}
