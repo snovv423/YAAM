@@ -1,11 +1,19 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const test = require('node:test');
 const { createSandbox, loadAppInSandbox, evalInContext, teardown } = require('./helpers/loadApp');
 
 const PRODUCTION_URL = 'https://api.yaam.su';
 const DEMO_NAMES = /ASCOFFEE|Сладкий дом/;
+
+test('published HTML cache-busts both changed runtime scripts with one cutover version', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  assert.match(html, /src="js\/api\.js\?v=prod-api-cutover-1"/);
+  assert.match(html, /src="js\/app\.js\?v=prod-api-cutover-1"/);
+});
 
 async function loadProduction(fetchImpl, locationSearch = '') {
   const { sandbox } = createSandbox({ useProductionDefault: true, locationSearch });
