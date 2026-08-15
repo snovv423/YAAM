@@ -194,19 +194,27 @@ function normalizeRestaurant(r){
 }
 let restaurantsCache=[];
 
-let cityAnimTimer=null;
-function selectCity(c){
+let cityRenderSeq=0;
+async function selectCity(c){
   if(c===selectedCity)return;
   selectedCity=c;
+  const renderSeq=++cityRenderSeq;
   document.querySelectorAll('#cities .citychip').forEach(ch=>ch.classList.toggle('sel',ch.textContent===c));
   const list=document.getElementById('list');
-  clearTimeout(cityAnimTimer);
-  list.style.transition='opacity .2s ease';
+  // Старая карточка относится к предыдущему городу: убираем её сразу,
+  // чтобы она не просвечивала под уже выбранным названием нового города.
+  list.style.transition='none';
   list.style.opacity='0';
-  cityAnimTimer=setTimeout(()=>{
-    renderList(true);           // true = без каскада, сразу видимы
+  list.innerHTML='';
+  list.setAttribute('aria-busy','true');
+  const rendered=await renderList(true,c,renderSeq);
+  if(!rendered||renderSeq!==cityRenderSeq)return;
+  list.removeAttribute('aria-busy');
+  requestAnimationFrame(()=>{
+    if(renderSeq!==cityRenderSeq)return;
+    list.style.transition='opacity .18s ease';
     list.style.opacity='1';
-  },200);
+  });
 }
 
 // Русское склонение слова "заказ" по числу — 1 заказ, 2 заказа, 5 заказов,
@@ -244,20 +252,24 @@ function cardHTML(r){
     </div></div>`;
 }
 
-async function renderList(instant){
+async function renderList(instant,city=selectedCity,renderSeq=null){
   let base;
   let loadFailed=false;
   if(USE_API){
     try{
-      base=(await api.getRestaurants(selectedCity)).map(normalizeRestaurant);
+      const response=await api.getRestaurants(city);
+      if(renderSeq!==null&&renderSeq!==cityRenderSeq)return false;
+      base=response.map(normalizeRestaurant);
     }catch(err){
+      if(renderSeq!==null&&renderSeq!==cityRenderSeq)return false;
       showToast('Не удалось загрузить рестораны — проверьте соединение');
       base=[];
       loadFailed=true;
     }
   }else{
-    base=restaurants.filter(r=>r.cities.includes(selectedCity));
+    base=restaurants.filter(r=>r.cities.includes(city));
   }
+  if(renderSeq!==null&&renderSeq!==cityRenderSeq)return false;
   restaurantsCache=base;
   const openR=base.filter(r=>r.open).sort((a,b)=>(b.isNew?1:0)-(a.isNew?1:0)||b.rate-a.rate);
   const closedR=base.filter(r=>!r.open);
@@ -266,15 +278,16 @@ async function renderList(instant){
     el.innerHTML=loadFailed
       ? '<div class="empty">Не удалось загрузить рестораны.<br>Проверьте соединение и попробуйте ещё раз.</div>'
       : '<div class="empty">В этом городе пока нет ресторанов.<br>Скоро появятся — проголосуйте за свой город наверху!</div>';
-    return;
+    return true;
   }
   let html='';
   if(!openR.length){html+=`<div class="sleep"><h3>Город спит</h3><p>Сейчас всё закрыто — рестораны откроются позже.</p></div>`;}
   html+=openR.map(cardHTML).join('');
   if(closedR.length) html+=`<div class="grouplbl">Закрыты сейчас</div>`+closedR.map(cardHTML).join('');
   el.innerHTML=html;
-  if(instant){return;}           // смена города — сразу видимы, без анимации
+  if(instant){return true;}      // смена города — сразу видимы, без анимации
   setTimeout(applyStagger,10);
+  return true;
 }
 function shut(n){showToast(n+' сейчас закрыт — загляните позже');}
 function showToast(msg){
