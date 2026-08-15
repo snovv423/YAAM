@@ -13,7 +13,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Cormorant+Garamond:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="css/style.css?v=dish-card-frame-1">
+<link rel="stylesheet" href="css/style.css?v=dish-scroll-return-1">
 </head>
 <body>
 
@@ -79,7 +79,7 @@
 <!-- DISH -->
 <div id="dish" class="screen">
   <div class="dhero" id="d-hero">
-    <button class="back" onclick="go('menu')">← Назад</button>
+    <button class="back" onclick="backFromDish()">← Назад</button>
     <button type="button" class="gnav gprev" id="d-gprev" aria-label="Предыдущее фото" onclick="galleryStep('d',-1)">‹</button>
     <button type="button" class="gnav gnext" id="d-gnext" aria-label="Следующее фото" onclick="galleryStep('d',1)">›</button>
     <div class="gcount" id="d-gcount"></div>
@@ -253,7 +253,7 @@
 </div>
 
 <script src="js/data.js"></script>
-<script src="js/api.js?v=dish-card-frame-1"></script>
-<script src="js/app.js?v=dish-card-frame-1"></script>
+<script src="js/api.js?v=dish-scroll-return-1"></script>
+<script src="js/app.js?v=dish-scroll-return-1"></script>
 </body>
 </html>

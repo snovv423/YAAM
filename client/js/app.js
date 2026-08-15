@@ -1111,8 +1111,31 @@ async function tryRestoreSession(){
   return false;
 }
 
-let curDishKey=null,curDishPrice=0,dishQty=1;
+let curDishKey=null,curDishPrice=0,dishQty=1,menuReturnScrollY=0;
+function rememberMenuPosition(){
+  if(!cur('menu'))return;
+  menuReturnScrollY=Math.max(0,Number(window.scrollY)||0);
+  try{
+    history.replaceState({...history.state,screen:'menu',menuScrollY:menuReturnScrollY},'');
+  }catch(e){}
+}
+function restoreMenuPosition(value=menuReturnScrollY){
+  const target=Math.max(0,Number(value)||0);
+  menuReturnScrollY=target;
+  // Два кадра дают Safari закончить переключение .screen до восстановления
+  // прокрутки; фиксированная высота карточек делает позицию стабильной.
+  requestAnimationFrame(()=>requestAnimationFrame(()=>window.scrollTo(0,target)));
+}
+function backFromDish(){
+  if(typeof history.back==='function'){
+    history.back();
+    return;
+  }
+  go('menu');
+  restoreMenuPosition();
+}
 function openDish(k){
+  rememberMenuPosition();
   curDishKey=k;const[ci,ii]=k.split('_').map(Number);const d=curRest.menu[ci].items[ii];
   // из API приходят реальные значения (могут быть пустыми, если владелец
   // ресторана их не заполнил в YAAM HQ — Stage 5A позволяет создать блюдо
@@ -1167,7 +1190,7 @@ function openDish(k){
 function renderDishAdd(){document.getElementById('d-qty').textContent=dishQty;document.getElementById('d-add').textContent=`Добавить · ${curDishPrice*dishQty} ₽`;}
 function dishQtyPlus(){dishQty++;renderDishAdd();}
 function dishQtyMinus(){if(dishQty>1){dishQty--;renderDishAdd();}}
-function addFromDish(){const it=findItem(curDishKey);cart[curDishKey]={n:it.n,p:it.p,q:dishQty,menuItemId:it.id};refreshAll(curDishKey);go('menu');}
+function addFromDish(){const it=findItem(curDishKey);cart[curDishKey]={n:it.n,p:it.p,q:dishQty,menuItemId:it.id};refreshAll(curDishKey);backFromDish();}
 function swapHero(id,i){
   const src=U(id,1000);
   const img=document.querySelector('#d-hero img');if(img)img.src=src;
@@ -2540,6 +2563,7 @@ document.addEventListener('touchend',()=>{if(ptrActive){renderList();setTimeout(
 // History API
 window.addEventListener('popstate',e=>{try{
   let s=(e.state&&e.state.screen)||'home';
+  const menuScrollY=s==='menu'?(e.state&&e.state.menuScrollY!=null?e.state.menuScrollY:menuReturnScrollY):0;
   // Активный незавершённый заказ важнее истории браузера: "назад" не должен
   // возвращать к пустой форме чекаута/корзине, из которой можно случайно
   // создать дубль заказа (см. openQR/resumeExistingOrderFlow). Демо-заказ на
@@ -2563,6 +2587,7 @@ window.addEventListener('popstate',e=>{try{
   document.getElementById(s).classList.add('active');
   document.querySelector('.dish-add').style.display=(s==='dish')?'block':'none';
   window.scrollTo(0,0);updateBar();
+  if(s==='menu')restoreMenuPosition(menuScrollY);
 }catch(err){}});
 
 // Голосование за рестораны, которых ещё нет в YAAM. Источник данных (после
