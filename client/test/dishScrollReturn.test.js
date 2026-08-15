@@ -28,6 +28,7 @@ test('restoring the menu returns to the remembered position, not the top', () =>
   evalInContext(sandbox, 'menuReturnScrollY=8420;restoreMenuPosition()');
 
   assert.deepEqual(scrollCalls.at(-1), [0, 8420]);
+  assert.ok(scrollCalls.every(call => call[1] === 8420), 'возврат не должен промежуточно прыгать к началу меню');
   teardown(sandbox);
 });
 

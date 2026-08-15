@@ -11,9 +11,9 @@ const DEMO_NAMES = /ASCOFFEE|Сладкий дом/;
 
 test('published HTML cache-busts both changed runtime scripts with one cutover version', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
-  assert.match(html, /href="css\/style\.css\?v=dish-scroll-return-1"/);
-  assert.match(html, /src="js\/api\.js\?v=dish-scroll-return-1"/);
-  assert.match(html, /src="js\/app\.js\?v=dish-scroll-return-1"/);
+  assert.match(html, /href="css\/style\.css\?v=dish-scroll-return-2"/);
+  assert.match(html, /src="js\/api\.js\?v=dish-scroll-return-2"/);
+  assert.match(html, /src="js\/app\.js\?v=dish-scroll-return-2"/);
 });
 
 async function loadProduction(fetchImpl, locationSearch = '') {

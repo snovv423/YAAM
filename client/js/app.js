@@ -1122,9 +1122,12 @@ function rememberMenuPosition(){
 function restoreMenuPosition(value=menuReturnScrollY){
   const target=Math.max(0,Number(value)||0);
   menuReturnScrollY=target;
-  // Два кадра дают Safari закончить переключение .screen до восстановления
-  // прокрутки; фиксированная высота карточек делает позицию стабильной.
-  requestAnimationFrame(()=>requestAnimationFrame(()=>window.scrollTo(0,target)));
+  // Ставим позицию в том же кадре, в котором меню снова стало активным:
+  // промежуточный scrollTo(0,0) был виден в Safari как резкий рывок.
+  window.scrollTo(0,target);
+  // Один контрольный кадр компенсирует позднюю раскладку Safari без
+  // видимого путешествия от начала меню к выбранному блюду.
+  requestAnimationFrame(()=>{if(cur('menu'))window.scrollTo(0,target)});
 }
 function backFromDish(){
   if(typeof history.back==='function'){
@@ -2586,8 +2589,9 @@ window.addEventListener('popstate',e=>{try{
   document.querySelectorAll('.screen').forEach(x=>x.classList.remove('active'));
   document.getElementById(s).classList.add('active');
   document.querySelector('.dish-add').style.display=(s==='dish')?'block':'none';
-  window.scrollTo(0,0);updateBar();
+  updateBar();
   if(s==='menu')restoreMenuPosition(menuScrollY);
+  else window.scrollTo(0,0);
 }catch(err){}});
 
 // Голосование за рестораны, которых ещё нет в YAAM. Источник данных (после
