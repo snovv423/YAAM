@@ -24,11 +24,11 @@ timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 # роль production не имеет прав на таблицы hqtest (проверено: pg_dump падает
 # на "permission denied for table restaurants").
 databases=(
-  # Stage 20: рабочая база api-pg переехала в yaam_staging_v2. Старая
-  # yaam_production оставлена нетронутой как точка отката и продолжает
-  # копироваться — пока владелец не решит её судьбу.
+  # Каждая база копируется своей scoped ролью. Production backup использует
+  # отдельную read-only роль: staging-role yaam_app не имеет прав на таблицы,
+  # принадлежащие yaamprod, и не должна получать cross-environment доступ.
   "yaam_staging_v2:yaam_app"
-  "yaam_production:yaam_app"
+  "yaam_production:yaam_prod_backup"
   "yaam_hqtest:yaam_hqtest_app"
 )
 

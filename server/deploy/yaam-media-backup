@@ -70,6 +70,15 @@ for entry in "${sources[@]}"; do
   temporary_file="${backup_dir}/.yaam_media_${label}_${timestamp}.tar.gz.tmp"
   final_file="${backup_dir}/yaam_media_${label}_${timestamp}.tar.gz"
 
+  # Пустой media source — валидное начальное состояние hqtest, а не
+  # повреждение. Пустые подкаталоги не являются media payload; любой файл,
+  # symlink или иной недиректориальный объект сохраняет строгий size-check.
+  # Фиксируем это ДО архивации, чтобы не судить о содержимом по размеру gzip.
+  source_is_empty=0
+  if ! find "$media_root" -mindepth 1 ! -type d -print -quit | grep -q .; then
+    source_is_empty=1
+  fi
+
   # tar сначала во временный файл — та же причина, что и в yaam-pg-backup:
   # прерванный на середине tar не должен оставить укороченный файл с
   # «правильным» именем.
@@ -81,10 +90,10 @@ for entry in "${sources[@]}"; do
   fi
 
   size="$(stat -c '%s' "$temporary_file" 2>/dev/null || echo 0)"
-  # Пустой/подозрительно маленький архив — провалившийся backup, который
-  # выглядит успешным (например, media_root существует, но пуст из-за
-  # опечатки в пути — тогда tar «успешен», но бесполезен).
-  if (( size < 256 )); then
+  # Для непустого источника подозрительно маленький архив по-прежнему
+  # считается провалом. Пустой источник допускается только вместе с
+  # последующей обязательной tar -t проверкой читаемости.
+  if (( size < 256 && source_is_empty == 0 )); then
     printf 'ERROR: archive for %s (%s) is unexpectedly small (%s bytes)\n' "$media_root" "$label" "$size" >&2
     rm -f "$temporary_file"
     failures=$((failures + 1))
@@ -99,6 +108,10 @@ for entry in "${sources[@]}"; do
     rm -f "$temporary_file"
     failures=$((failures + 1))
     continue
+  fi
+
+  if (( source_is_empty == 1 )); then
+    printf 'ok: empty media source %s (%s) archived explicitly (%s bytes)\n' "$media_root" "$label" "$size"
   fi
 
   if ! mv "$temporary_file" "$final_file" || ! chmod 600 "$final_file"; then

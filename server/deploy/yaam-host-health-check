@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+umask 077
+
+alerting_file=/etc/yaam/alerting.env
+offsite_state=/var/lib/yaam/offsite-backup/last-success.utc
+tls_certificate=/etc/letsencrypt/live/api-pg.yaam.su/fullchain.pem
+
+[[ -r "$alerting_file" ]] || {
+  printf 'ERROR: alerting file is not readable\n' >&2
+  exit 1
+}
+
+set -a
+# shellcheck disable=SC1090
+source "$alerting_file"
+set +a
+
+: "${BETTERSTACK_HOST_HEARTBEAT_URL:?missing BETTERSTACK_HOST_HEARTBEAT_URL}"
+heartbeat_url="$BETTERSTACK_HOST_HEARTBEAT_URL"
+
+fail() {
+  printf 'ERROR: %s\n' "$*" >&2
+  curl --fail --silent --show-error --max-time 10 "${heartbeat_url}/fail" >/dev/null || true
+  exit 1
+}
+
+[[ "${YAAM_HEALTHCHECK_FORCE_FAIL:-0}" != 1 ]] || fail "controlled failure simulation"
+
+required_units=(
+  nginx.service
+  postgresql.service
+  yaam-backend-production.service
+  yaam-backend-postgresql.service
+  certbot.timer
+  yaam-pg-backup.timer
+  yaam-pg-offsite-backup.timer
+)
+
+for unit in "${required_units[@]}"; do
+  systemctl is-active --quiet "$unit" || fail "required unit is not active: $unit"
+done
+
+# Backup jobs have their own timers, freshness checks and Better Stack
+# heartbeat. A retained failed state of a completed oneshot must remain
+# visible in diagnostics, but must not masquerade as a production runtime
+# outage in this host/service heartbeat.
+independent_backup_units='^(yaam-pg-backup|yaam-pg-offsite-backup|yaam-media-backup-hqtest|yaam-media-offsite-backup-hqtest)\.service$'
+failed_units="$(systemctl --failed --no-legend --plain | awk '{print $1}' | grep -v '^yaam-host-health-check.service$' || true)"
+backup_failed_units="$(grep -E "$independent_backup_units" <<<"$failed_units" || true)"
+runtime_failed_units="$(grep -Ev "$independent_backup_units" <<<"$failed_units" || true)"
+
+if [[ -n "$backup_failed_units" ]]; then
+  printf 'WARNING: independently monitored backup units are failed: %s\n' \
+    "$(tr '\n' ' ' <<<"$backup_failed_units" | sed 's/[[:space:]]*$//')" >&2
+fi
+[[ -z "$runtime_failed_units" ]] \
+  || fail "systemd has failed runtime units: $(tr '\n' ' ' <<<"$runtime_failed_units" | sed 's/[[:space:]]*$//')"
+
+disk_used_percent="$(df --output=pcent / | tail -n 1 | tr -dc '0-9')"
+[[ -n "$disk_used_percent" ]] || fail "could not read root filesystem usage"
+(( disk_used_percent < 85 )) || fail "root filesystem usage is at least 85 percent"
+
+mem_total_kib="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)"
+mem_available_kib="$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)"
+(( mem_total_kib > 0 )) || fail "could not read total memory"
+(( mem_available_kib * 100 / mem_total_kib >= 15 )) || fail "available memory is below 15 percent"
+
+if journalctl -k --since '10 minutes ago' --no-pager 2>/dev/null | grep -Eqi 'out of memory|killed process'; then
+  fail "recent kernel OOM event detected"
+fi
+
+[[ -s "$tls_certificate" ]] || fail "TLS certificate file is missing"
+openssl x509 -checkend 1209600 -noout -in "$tls_certificate" >/dev/null \
+  || fail "TLS certificate expires in less than 14 days"
+
+[[ -s "$offsite_state" ]] || fail "offsite backup success marker is missing"
+offsite_marker="$(cat "$offsite_state")"
+if [[ "$offsite_marker" =~ ^([0-9]{4})([0-9]{2})([0-9]{2})T([0-9]{2})([0-9]{2})([0-9]{2})Z$ ]]; then
+  offsite_marker="${BASH_REMATCH[1]}-${BASH_REMATCH[2]}-${BASH_REMATCH[3]}T${BASH_REMATCH[4]}:${BASH_REMATCH[5]}:${BASH_REMATCH[6]}Z"
+fi
+offsite_epoch="$(date -u -d "$offsite_marker" +%s)" || fail "invalid offsite backup timestamp"
+now_epoch="$(date -u +%s)"
+offsite_age="$((now_epoch - offsite_epoch))"
+(( offsite_age <= 129600 )) || fail "last successful offsite backup is older than 36 hours"
+
+pg_isready --quiet --host 127.0.0.1 --port 5432 \
+  || fail "PostgreSQL is not accepting local connections"
+
+production_ready_payload="$(curl --fail --silent --show-error --max-time 5 http://127.0.0.1:3003/health/ready)" \
+  || fail "production backend readiness request failed"
+grep -q '"ok":true' <<<"$production_ready_payload" \
+  || fail "production backend readiness payload is not healthy"
+
+staging_ready_payload="$(curl --fail --silent --show-error --max-time 5 http://127.0.0.1:3001/health/ready)" \
+  || fail "staging backend readiness request failed"
+grep -q '"ok":true' <<<"$staging_ready_payload" \
+  || fail "staging backend readiness payload is not healthy"
+
+heartbeat_delivered=0
+for attempt in 1 2 3; do
+  if curl --fail --silent --show-error --max-time 10 "$heartbeat_url" >/dev/null; then
+    heartbeat_delivered=1
+    break
+  fi
+  if (( attempt < 3 )); then
+    printf 'WARNING: successful heartbeat delivery attempt %s failed; retrying\n' "$attempt" >&2
+    sleep 2
+  fi
+done
+(( heartbeat_delivered == 1 )) || fail "could not report successful host heartbeat after 3 attempts"
+
+printf 'Host health check succeeded: disk_used_percent=%s memory_available_percent=%s offsite_age_seconds=%s\n' \
+  "$disk_used_percent" "$((mem_available_kib * 100 / mem_total_kib))" "$offsite_age"
