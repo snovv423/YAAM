@@ -37,3 +37,12 @@ test('dish back button uses scroll-preserving navigation', () => {
   assert.match(html, /id="dish"[\s\S]*?onclick="backFromDish\(\)"/);
   assert.doesNotMatch(html, /id="dish"[\s\S]*?onclick="go\('menu'\)"/);
 });
+
+test('browser native scroll restoration cannot overwrite the saved menu position', () => {
+  const { sandbox } = createSandbox();
+  sandbox.history.scrollRestoration = 'auto';
+  loadAppInSandbox(sandbox);
+
+  assert.equal(sandbox.history.scrollRestoration, 'manual');
+  teardown(sandbox);
+});

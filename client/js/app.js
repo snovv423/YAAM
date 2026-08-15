@@ -2563,7 +2563,10 @@ document.addEventListener('touchstart',e=>{if(window.scrollY===0)ptrY=e.touches[
 document.addEventListener('touchmove',e=>{if(window.scrollY===0&&e.touches[0].clientY-ptrY>60&&cur('home')){document.getElementById('ptr').classList.add('show');ptrActive=true;}},{passive:true});
 document.addEventListener('touchend',()=>{if(ptrActive){renderList();setTimeout(()=>document.getElementById('ptr').classList.remove('show'),600);}ptrActive=false;});
 
-// History API
+// History API. В SPA позицию меню восстанавливаем сами: автоматический
+// scroll restoration Safari срабатывает ПОСЛЕ popstate и иногда поздно
+// перезаписывает нашу точную позицию нулём, возвращая клиента в начало.
+try{if('scrollRestoration'in history)history.scrollRestoration='manual';}catch(e){}
 window.addEventListener('popstate',e=>{try{
   let s=(e.state&&e.state.screen)||'home';
   const menuScrollY=s==='menu'?(e.state&&e.state.menuScrollY!=null?e.state.menuScrollY:menuReturnScrollY):0;
