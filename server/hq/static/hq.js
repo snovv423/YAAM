@@ -7,6 +7,18 @@
 // `script-src 'self'` без 'unsafe-inline', поэтому инлайн-скрипт браузер бы
 // просто заблокировал.
 (function () {
+  // Chrome может восстановить вкладку с устаревшим результатом media-query
+  // до первого resize. Явно синхронизируем режим с фактической шириной при
+  // загрузке/возврате из back-forward cache; resize остаётся страховкой.
+  function syncLayoutMode() {
+    var wide = document.documentElement.clientWidth > 760;
+    document.documentElement.classList.toggle('hq-wide', wide);
+    document.documentElement.classList.toggle('hq-narrow', !wide);
+  }
+  syncLayoutMode();
+  window.addEventListener('pageshow', syncLayoutMode);
+  window.addEventListener('resize', syncLayoutMode);
+
   // Double-submit guard — делегированный слушатель на document, работает для
   // любой формы HQ без необходимости давать каждой свой уникальный id/script.
   document.addEventListener('submit', function (event) {

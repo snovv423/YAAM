@@ -405,14 +405,11 @@ function layout({ title, active, body, csrfToken, linkBasePath = '/hq' }) {
   .photo-card img{display:block;width:100%;aspect-ratio:4/3;object-fit:cover;object-position:center;background:rgba(255,255,255,.04)}
   .photo-badge{position:absolute;top:8px;left:8px;background:var(--amber);color:#3a1c00;font-size:10px;font-weight:800;padding:2px 8px;border-radius:999px;letter-spacing:.02em;text-transform:uppercase}
   .photo-body{padding:10px}
-  .photo-alt-form{display:flex;gap:6px;margin-top:8px}
-  .photo-alt-form input{flex:1;padding:7px 9px;font-size:12px}
-  .photo-alt-form button{padding:7px 10px;font-size:12px}
-  .photo-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+  .photo-actions{display:flex;flex-wrap:wrap;gap:6px}
   .photo-actions form{margin:0}
   .photo-actions button{padding:7px 10px;font-size:12px}
   .photo-upload{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;margin-top:14px}
-  .photo-upload .field{flex:1;min-width:180px}
+  .photo-upload .field{flex:1 1 320px;min-width:180px}
   .photo-meta{font-size:12px;color:var(--txt2);margin-top:10px}
 
   /* Мобильный responsive-table: превращает строки в компактные карточки без
@@ -436,6 +433,12 @@ function layout({ title, active, body, csrfToken, linkBasePath = '/hq' }) {
     table.responsive td{display:flex;justify-content:space-between;align-items:center;gap:10px;border:0;padding:7px 0;font-size:13px;text-align:right}
     table.responsive td::before{content:attr(data-label);color:var(--txt2);font-weight:600;font-size:11px;text-transform:uppercase;text-align:left}
   }
+  /* Страховка для восстановленной Chrome-вкладки: hq.js сверяет режим с
+     фактической шириной при первом показе, не дожидаясь ручного resize. */
+  html.hq-wide .side{display:flex}
+  html.hq-wide main{padding:28px 24px 100px}
+  html.hq-wide .mobile-top,html.hq-wide .mobile-nav{display:none}
+  html.hq-narrow .side{display:none}
 </style>
 </head>
 <body>

@@ -9,8 +9,8 @@
 //
 // Stage 5B.1 — минимализм (задание, раздел 0): фотографиям не нужен
 // lifecycle ресторана/блюда. Убраны ручной reorder («Выше»/«Ниже»),
-// архивирование, восстановление, раздел «Архив». Ровно 3 действия на
-// карточку: сделать основной / изменить описание / удалить — плюс форма
+// архивирование, восстановление, раздел «Архив». Ровно 2 действия на
+// карточку: сделать основной / удалить — плюс форма
 // загрузки. «Удалить» — необратимо, поэтому единственная кнопка с
 // confirm() в этом разделе.
 const { esc } = require('./layout');
@@ -20,17 +20,11 @@ function photoBadge(photo) {
 }
 
 function photoCard({ photo, actionBase, csrfToken }) {
-  const alt = esc(photo.alt_text || '');
   return `
     <div class="photo-card">
       ${photoBadge(photo)}
-      <img src="${esc(photo.urls.card)}" alt="${alt}" loading="lazy" width="400" height="300">
+      <img src="${esc(photo.urls.card)}" alt="" loading="lazy" width="400" height="300">
       <div class="photo-body">
-        <form class="photo-alt-form" method="post" action="${actionBase}/${photo.id}/alt">
-          <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
-          <input type="text" name="alt_text" value="${alt}" placeholder="Описание фото" aria-label="Описание фотографии" maxlength="200">
-          <button type="submit" class="ghost">Сохранить</button>
-        </form>
         <div class="photo-actions">
           ${photo.is_primary === 1 ? '' : `
             <form method="post" action="${actionBase}/${photo.id}/primary">
@@ -75,10 +69,6 @@ function renderPhotoManager({
         <div class="field">
           <label for="photo-file-${esc(actionBase)}">Новая фотография</label>
           <input id="photo-file-${esc(actionBase)}" type="file" name="photo" accept="image/jpeg,image/png,image/webp" required>
-        </div>
-        <div class="field">
-          <label for="photo-alt-${esc(actionBase)}">Описание (необязательно)</label>
-          <input id="photo-alt-${esc(actionBase)}" type="text" name="alt_text" maxlength="200" autocomplete="off">
         </div>
         <button type="submit" data-busy-text="Загрузка…">Загрузить</button>
       </form>
