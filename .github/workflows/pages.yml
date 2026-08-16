@@ -22,6 +22,8 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+      - name: Inject per-deploy cache-busting version (commit SHA)
+        run: sed -i "s/__CACHE_BUST__/${{ github.sha }}/g" client/index.html
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

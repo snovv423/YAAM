@@ -9,11 +9,31 @@ const { createSandbox, loadAppInSandbox, evalInContext, teardown } = require('./
 const PRODUCTION_URL = 'https://api.yaam.su';
 const DEMO_NAMES = /ASCOFFEE|Сладкий дом/;
 
-test('published HTML cache-busts both changed runtime scripts with one cutover version', () => {
+// Stage: automatic per-deploy cache-busting. The repo commits a stable
+// placeholder (__CACHE_BUST__) on all three runtime assets — the CI deploy
+// workflow substitutes it with the real commit SHA at deploy time (see
+// .github/workflows/pages.yml), so every production deploy that changes
+// content also changes the asset URL, without relying on a developer to
+// remember to bump a manual version string (that's what silently broke
+// before: content changed, ?v=safari-scroll-manual-1 didn't, stale Safari
+// caches kept serving old js/app.js and css/style.css).
+test('published HTML uses the shared __CACHE_BUST__ placeholder on all three runtime assets', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
-  assert.match(html, /href="css\/style\.css\?v=safari-scroll-manual-1"/);
-  assert.match(html, /src="js\/api\.js\?v=safari-scroll-manual-1"/);
-  assert.match(html, /src="js\/app\.js\?v=safari-scroll-manual-1"/);
+  assert.match(html, /href="css\/style\.css\?v=__CACHE_BUST__"/);
+  assert.match(html, /src="js\/api\.js\?v=__CACHE_BUST__"/);
+  assert.match(html, /src="js\/app\.js\?v=__CACHE_BUST__"/);
+});
+
+test('Pages deploy workflow substitutes __CACHE_BUST__ with the commit SHA before uploading the artifact', () => {
+  const workflow = fs.readFileSync(
+    path.join(__dirname, '..', '..', '.github', 'workflows', 'pages.yml'),
+    'utf8',
+  );
+  const injectIdx = workflow.indexOf('__CACHE_BUST__');
+  const uploadIdx = workflow.indexOf('upload-pages-artifact');
+  assert.ok(injectIdx !== -1, 'workflow must reference __CACHE_BUST__');
+  assert.match(workflow, /sed -i "s\/__CACHE_BUST__\/\$\{\{ ?github\.sha ?\}\}\/g" client\/index\.html/);
+  assert.ok(injectIdx < uploadIdx, 'cache-bust substitution must run before the artifact is uploaded');
 });
 
 async function loadProduction(fetchImpl, locationSearch = '') {
