@@ -18,8 +18,16 @@
     radial-gradient(880px circle at 8% -2%,#1B5639,transparent 54%),
     radial-gradient(680px circle at 98% 8%,#13674A,transparent 50%),
     radial-gradient(760px circle at 50% 104%,#0B3D27,transparent 55%),
-    linear-gradient(165deg,#0A2417,#0C2E1D 52%,#08301E);background-color:#0A2417;background-attachment:fixed}
-  body{font-family:'Manrope',sans-serif;color:var(--txt);background-color:#0A2417;max-width:480px;margin:0 auto;min-height:100vh;position:relative;overflow-x:hidden;padding-bottom:108px}
+    linear-gradient(165deg,#0A2417,#0C2E1D 52%,#08301E);background-color:#0A2417;background-attachment:fixed;overscroll-behavior-x:none}
+  /* overscroll-behavior-x:none на html/body — тот же приём, что уже стоит на
+     .mtabs (см. ниже), только на корневом документе. Без него резкий/неточный
+     вертикальный fling у левого края экрана в Safari иногда читается как
+     edge-swipe-back: он triggers popstate → пользователя выбрасывает из
+     длинного меню ресторана на главную посреди обычного скролла. Свойство не
+     трогает Y-скролл и не отключает саму системную кнопку/жест "Назад" —
+     оно лишь запрещает документу порождать горизонтальный overscroll/bounce,
+     на который Safari опирается, решая, начинать ли навигационный жест. */
+  body{font-family:'Manrope',sans-serif;color:var(--txt);background-color:#0A2417;max-width:480px;margin:0 auto;min-height:100vh;position:relative;overflow-x:hidden;overscroll-behavior-x:none;padding-bottom:108px}
   body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:1;opacity:.045;mix-blend-mode:soft-light;
     background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E")}
   .glass{background:var(--glass);backdrop-filter:blur(26px) saturate(180%);-webkit-backdrop-filter:blur(26px) saturate(180%);border:1px solid var(--gbord);box-shadow:var(--spec)}
