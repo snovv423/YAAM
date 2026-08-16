@@ -24,7 +24,6 @@
   <div class="top">
     <div class="hero-brand">
       <div class="wm" onclick="neonFlash(this)">YAAM<span class="order-dot" id="orderdot" onclick="event.stopPropagation();dotTap()" title="Ваш заказ"></span></div>
-      <div class="stg-badge" id="stgBadge" hidden>STAGING API</div>
       <div class="cities" id="cities">
         <span class="citychip sel" onclick="selectCity('Грозный')">Грозный</span>
         <span class="citychip" onclick="selectCity('Аргун')">Аргун</span>
@@ -46,13 +45,13 @@
   <div class="list" id="list"></div>
   <a class="help-link" href="https://t.me/YAAMHELP" target="_blank" rel="noopener">HELP</a>
   <footer class="site-footer">
-    <a href="legal/offer.html" target="_blank" rel="noopener">Оферта</a>
-    <a href="legal/privacy.html" target="_blank" rel="noopener">Политика ПДн</a>
-    <a href="legal/personal-data-consent.html" target="_blank" rel="noopener">Согласие на ПДн</a>
+    <a href="legal/offer.html" target="_blank" rel="noopener">Публичная оферта</a>
+    <a href="legal/privacy.html" target="_blank" rel="noopener">Политика обработки персональных данных</a>
+    <a href="legal/personal-data-consent.html" target="_blank" rel="noopener">Согласие на обработку персональных данных</a>
     <a href="legal/payment-refund.html" target="_blank" rel="noopener">Оплата и возврат</a>
     <a href="legal/delivery.html" target="_blank" rel="noopener">Доставка</a>
     <a href="legal/cookies.html" target="_blank" rel="noopener">Cookies</a>
-    <a href="legal/contacts.html" target="_blank" rel="noopener">Контакты</a>
+    <a href="legal/contacts.html" target="_blank" rel="noopener">Реквизиты и контакты</a>
   </footer>
 </div>
 
@@ -131,10 +130,8 @@
 
     <!-- Кнопка всегда видна — основной способ оплаты. Куда она ведёт, решает
          currentPaymentUrl/payFromThisPhone() в app.js: если провайдер вернул
-         реальную paymentUrl/confirmationUrl — открывает её; если нет (сейчас,
-         mock) — выполняет demo-оплату. DEMO-тег показывается только во втором
-         случае, чтобы явно отделить demo от реальной оплаты. -->
-    <div class="qr-demo-tag-wrap" id="qr-demo-tag-wrap" style="display:none"><span class="demo-tag">DEMO</span></div>
+         реальную paymentUrl/confirmationUrl — открывает её; если нет (mock) —
+         оплата завершается напрямую, без внешнего перехода. -->
     <button id="qr-pay-btn" class="pay" onclick="payFromThisPhone()">Оплата с этого устройства</button>
 
     <div class="qr-or-scan">Или отсканируйте QR-код с другого телефона</div>

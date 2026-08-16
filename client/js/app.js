@@ -1303,7 +1303,7 @@ function renderLegalConsent(){
     el.innerHTML=`<p class="legal-ok">Вы уже дали согласие на обработку данных для оформления заказа.</p>`;
   }else{
     el.innerHTML=
-      `<label class="legal-check"><input type="checkbox" id="chk-pdn"><span>Я даю <a href="legal/personal-data-consent.html" target="_blank" rel="noopener">согласие</a> на обработку персональных данных согласно <a href="legal/privacy.html" target="_blank" rel="noopener">политике обработки данных</a></span></label>`;
+      `<label class="legal-check"><input type="checkbox" id="chk-pdn"><span>Я даю <a href="legal/personal-data-consent.html" target="_blank" rel="noopener">согласие на обработку персональных данных</a> для оформления и исполнения заказа в соответствии с <a href="legal/privacy.html" target="_blank" rel="noopener">политикой обработки персональных данных</a></span></label>`;
   }
 }
 function validateLegalConsent(){
@@ -1345,14 +1345,8 @@ let currentOrderAddress=null, currentOrderComment=null;
 // это ORDER-scoped значение, живёт весь жизненный цикл заказа, а не только
 // платёжное окно или фазу ожидания ответа ресторана.
 let orderCreatedAtMs=null;
-// Показывает реальную кнопку оплаты, если у платежа есть настоящая ссылка
-// провайдера, иначе — явно подписанный demo-блок. Никогда не показывает кнопку,
-// которая выглядит как реальная оплата, если paymentUrl на самом деле нет.
 function renderQRPaymentOptions(){
   document.getElementById('qr-order-code').textContent=currentOrderCode||'';
-  // Основная кнопка оплаты видна всегда — единственное, что меняется, это
-  // куда она ведёт (см. payFromThisPhone) и есть ли рядом DEMO-тег.
-  document.getElementById('qr-demo-tag-wrap').style.display=currentPaymentUrl?'none':'block';
 }
 function payFromThisPhone(){
   if(currentPaymentUrl){window.location.href=currentPaymentUrl;return;}
@@ -2632,13 +2626,6 @@ function voteTouchEnd(){
   const el=document.getElementById(id);
   if(el)el.addEventListener('input',saveCartState);
 });
-
-// Production frontend не показывает прежний staging-индикатор. Условие
-// сохранено как безопасный guard для совместимости разметки.
-if(typeof IS_STAGING_MODE!=='undefined'&&IS_STAGING_MODE){
-  const stgBadge=document.getElementById('stgBadge');
-  if(stgBadge)stgBadge.hidden=false;
-}
 
 renderList();
 // Ссылка «Поделиться» (#shared=CODE:TOKEN) обрабатывается ДО восстановления
