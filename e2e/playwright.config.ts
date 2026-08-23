@@ -27,6 +27,13 @@ export default defineConfig({
   use: {
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
+    // По умолчанию — как у настоящего пользователя: static-сервер поднят на
+    // 127.0.0.1, это secure context, значит client/js/pwa.js регистрирует
+    // service worker и прогон идёт с ним. YAAM_E2E_BLOCK_SW=1 отключает
+    // регистрацию, чтобы можно было доказать, что результаты от воркера не
+    // зависят (иначе «SW ничего не ломает» остаётся утверждением без
+    // контрольного прогона).
+    serviceWorkers: process.env.YAAM_E2E_BLOCK_SW === '1' ? 'block' : 'allow',
   },
   projects: [
     { name: 'chromium', use: { ...devices['Desktop Chrome'] } },

@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { test, expect, type Page } from '@playwright/test';
+import { pointFrontendAtLocalBackend as installTestApiHook } from '../fixtures/test-api-hook';
 
 // YAAM HQ Stage 1: реальный browser E2E для порога NEW/счётчик заказов
 // (0-9 завершённых заказов -> бейдж NEW, 10+ -> компактный счётчик). Заказы
@@ -28,10 +29,7 @@ const db = require(path.join(SERVER_DIR, 'db/postgresql/index.js'));
 const SEEDED_RESTAURANT_TEXT = 'YAAM QA — Тестовый ресторан';
 
 async function pointFrontendAtLocalBackend(page: Page) {
-  await page.addInitScript((apiBaseUrl) => {
-    // @ts-expect-error глобал браузерного рантайма
-    window.YAAM_API_BASE_URL = apiBaseUrl;
-  }, API_BASE_URL);
+  await installTestApiHook(page, API_BASE_URL);
 }
 
 async function seededRestaurantId(): Promise<number> {

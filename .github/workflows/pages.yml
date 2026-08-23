@@ -22,8 +22,12 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+      # sw.js подставляется тем же SHA, что и index.html: имя кэша внутри SW
+      # завязано на эту версию, поэтому каждый деплой меняет тело файла
+      # (браузер видит побайтовое отличие и обновляет worker) и на activate
+      # удаляет кэши прошлых версий — старый app.js пережить деплой не может.
       - name: Inject per-deploy cache-busting version (commit SHA)
-        run: sed -i "s/__CACHE_BUST__/${{ github.sha }}/g" client/index.html
+        run: sed -i "s/__CACHE_BUST__/${{ github.sha }}/g" client/index.html client/sw.js
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

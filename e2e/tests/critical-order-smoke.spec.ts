@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { test as base, expect, type Page, type Request } from '@playwright/test';
+import { pointFrontendAtLocalBackend as installTestApiHook } from '../fixtures/test-api-hook';
 
 // Переиспользуем уже установленный `pg` из server/node_modules — не заводим
 // вторую копию той же зависимости только ради этого файла.
@@ -78,13 +79,7 @@ const test = base.extend<{ hygiene: { consoleErrors: string[]; failedRequests: s
 });
 
 async function pointFrontendAtLocalBackend(page: Page) {
-  // Единственная связка между реальным client/js/api.js и локальным
-  // эфемерным backend'ом — уже существующий, документированный override,
-  // проверяемый api.js раньше собственной ?yaam_staging_api=1 логики.
-  await page.addInitScript((apiBaseUrl) => {
-    // @ts-expect-error — глобал объявлен только в браузерном рантайме
-    window.YAAM_API_BASE_URL = apiBaseUrl;
-  }, API_BASE_URL);
+  await installTestApiHook(page, API_BASE_URL);
 }
 
 async function goToCheckoutWithOneDish(page: Page) {
@@ -273,5 +268,139 @@ test.describe('YAAM critical order smoke', () => {
       await page.locator('#confirm-yes').click();
       await expect(page.locator('#home.screen.active')).toBeVisible();
     });
+  });
+
+  // Два сценария ниже перечислены в приёмке как обязательные, но автоматом
+  // не проверялись никогда: пока обвязка уводила клиент на production API,
+  // писать их было не на чем. Ставятся последними — оба теста выше уже
+  // отменили свои заказы и освободили 15-минутный awaiting_payment dedup.
+
+  test('меню -> блюдо -> назад возвращает ту же позицию прокрутки меню', async ({ page, hygiene }) => {
+    // Мобильный вьюпорт нужен по существу: на 1280x720 меню seed-ресторана
+    // из трёх блюд помещается целиком и прокручивать нечего — тест был бы
+    // зелёным, ничего не проверяя.
+    await page.setViewportSize({ width: 393, height: 852 });
+    await pointFrontendAtLocalBackend(page);
+
+    // Насколько именно прокрутится меню, зависит от содержимого seed'а, а не
+    // от проверяемого поведения: у тестового ресторана нет фотографий, и
+    // запас прокрутки невелик. Поэтому целимся в конец страницы и дальше
+    // сравниваем с фактически достигнутой позицией, а не с константой.
+    const scrolledTo = await test.step('открыть ресторан и прокрутить меню', async () => {
+      await page.goto(CLIENT_BASE_URL!);
+      const restaurantCard = page.locator('.card', { hasText: SEEDED_RESTAURANT_TEXT });
+      await expect(restaurantCard).toBeVisible();
+      await restaurantCard.click();
+      await expect(page.locator('#menu.screen.active')).toBeVisible();
+      const reached = await page.evaluate(() => {
+        window.scrollTo(0, document.documentElement.scrollHeight);
+        return window.scrollY;
+      });
+      expect(reached, 'меню обязано быть прокручиваемым, иначе тест ничего не проверяет')
+        .toBeGreaterThan(0);
+      return reached;
+    });
+
+    await test.step('открыть блюдо', async () => {
+      await page.locator('.dish', { hasText: SEEDED_DISH_TEXT }).click();
+      await expect(page.locator('#dish.screen.active')).toBeVisible();
+    });
+
+    await test.step('назад: тот же ресторан и та же позиция прокрутки', async () => {
+      await page.locator('#dish .back').click();
+      await expect(page.locator('#menu.screen.active')).toBeVisible();
+      // SEEDED_RESTAURANT_TEXT — подстрока: полное имя из seed'а несёт ещё и
+      // суффикс стадии, привязываться к нему целиком незачем.
+      await expect(page.locator('#m-name')).toContainText(SEEDED_RESTAURANT_TEXT);
+      // Восстановление позиции идёт через history.back() -> popstate ->
+      // restoreMenuPosition() с контрольным кадром в requestAnimationFrame,
+      // поэтому ждём значение опросом, а не фиксированной паузой.
+      await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(scrolledTo);
+    });
+
+    await test.step('гигиена: без console errors и без failed network requests', async () => {
+      expect(hygiene.consoleErrors, hygiene.consoleErrors.join('\n')).toEqual([]);
+      expect(hygiene.failedRequests, hygiene.failedRequests.join('\n')).toEqual([]);
+    });
+  });
+
+  test('ссылка «Поделиться» открывает статус заказа по access_token, публичный код без токена не пускает', async ({ page, hygiene }) => {
+    await pointFrontendAtLocalBackend(page);
+
+    await test.step('создать заказ', async () => {
+      await goToCheckoutWithOneDish(page);
+      await page.locator('#cart button.pay').click();
+      await expect(page.locator('#qr.screen.active')).toBeVisible();
+      await expect(page.locator('#qr-order-code')).toHaveText(/^YAAM-\d+$/);
+    });
+
+    const orderCode = (await page.locator('#qr-order-code').textContent())!;
+    const state = await readActiveOrderState(page);
+    const token: string = state.orderAccessToken;
+
+    await test.step('публичный код заказа сам по себе не является авторизацией', async () => {
+      // Тот же инвариант, что и в CLAUDE.md: YAAM-xxxxx не даёт доступа,
+      // нужен access_token. Проверяем напрямую по API, без UI.
+      const withoutToken = await page.request.get(`${API_BASE_URL}/api/orders/${orderCode}`);
+      expect(withoutToken.ok(), `GET без токена вернул ${withoutToken.status()}`).toBe(false);
+    });
+
+    await test.step('ссылка с токеном во фрагменте открывает статус заказа', async () => {
+      await page.goto(`${CLIENT_BASE_URL}/#shared=${orderCode}:${token}`);
+      await expect(page.locator('#status.screen.active')).toBeVisible();
+      await expect(page.locator('#st-num')).toHaveText(orderCode);
+    });
+
+    await test.step('токен остаётся во фрагменте и не уходит на сервер', async () => {
+      // Фрагмент URL браузер не передаёт в запросе, но клиент мог бы
+      // случайно прокинуть токен в query — этого быть не должно.
+      for (const req of hygiene.allRequests) {
+        expect(req.url().includes(token), `token найден в URL запроса: ${req.url()}`).toBe(false);
+      }
+    });
+
+    await test.step('очистка: отменить заказ', async () => {
+      await page.goto(CLIENT_BASE_URL!);
+      await expect(page.locator('#status.screen.active')).toBeVisible();
+      await page.locator('#st-pending-pay-wrap button.ghost').click();
+      await page.locator('#confirm-yes').click();
+      await expect(page.locator('#home.screen.active')).toBeVisible();
+    });
+  });
+
+  test('service worker действительно активен в этом прогоне и не кэширует API заказов', async ({ page }) => {
+    // Без этой проверки контрольный прогон с YAAM_E2E_BLOCK_SW=1 ничего не
+    // доказывал бы: «с воркером и без воркера одинаково» имеет смысл только
+    // если в обычном режиме воркер и правда регистрируется.
+    test.skip(process.env.YAAM_E2E_BLOCK_SW === '1', 'контрольный прогон без service worker');
+    await pointFrontendAtLocalBackend(page);
+
+    await page.goto(CLIENT_BASE_URL!);
+    await expect(page.locator('.card', { hasText: SEEDED_RESTAURANT_TEXT })).toBeVisible();
+
+    const registered = await page.evaluate(async () => {
+      const reg = await navigator.serviceWorker.ready;
+      return !!reg.active;
+    });
+    expect(registered, 'client/js/pwa.js обязан зарегистрировать sw.js на 127.0.0.1 (secure context)').toBe(true);
+
+    // Повторная навигация — уже под управлением воркера; каталог обязан
+    // грузиться так же, а ответы API не имеют права осесть в CacheStorage.
+    await page.reload();
+    await expect(page.locator('.card', { hasText: SEEDED_RESTAURANT_TEXT })).toBeVisible();
+
+    const cached = await page.evaluate(async () => {
+      const names = await caches.keys();
+      const urls: string[] = [];
+      for (const name of names) {
+        const cache = await caches.open(name);
+        for (const req of await cache.keys()) urls.push(req.url);
+      }
+      return { controlled: !!navigator.serviceWorker.controller, urls };
+    });
+    expect(cached.controlled, 'после reload страница обязана быть под управлением воркера').toBe(true);
+    const apiUrls = cached.urls.filter((u) => u.includes('/api/'));
+    expect(apiUrls, `ответы API попали в кэш: ${apiUrls.join(', ')}`).toEqual([]);
+    expect(cached.urls.some((u) => u.includes('/js/app.js')), 'app shell должен кэшироваться').toBe(true);
   });
 });

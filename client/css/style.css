@@ -196,7 +196,13 @@
   .toast{position:fixed;left:50%;bottom:110px;transform:translateX(-50%) translateY(20px);max-width:calc(100% - 40px);z-index:200;padding:13px 18px;border-radius:16px;background:var(--glass2);border:1px solid var(--gbord);box-shadow:var(--spec),var(--shadow-sm);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);font-size:13.5px;font-weight:700;color:var(--txt);text-align:center;opacity:0;pointer-events:none;transition:opacity .25s ease,transform .25s ease}
   .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
   /* screens */
-  .screen{display:none}.screen.active{display:block;animation:scrIn .55s ease}
+  /* Переход между экранами. 550мс мягкого проявления читались как «страница
+     грузится» — в приложении смена экрана должна быть почти мгновенной, но не
+     резкой. 180мс на одной opacity: без задержки перед интерактивностью, без
+     transform (он создал бы containing block для fixed-потомков — корзины и
+     кнопки блюда — и дёргал бы их на каждом переходе) и без второго слоя
+     анимации поверх больших DOM-деревьев меню. */
+  .screen{display:none}.screen.active{display:block;animation:scrIn .18s ease-out}
   @keyframes scrIn{from{opacity:0}to{opacity:1}}
   /* В режиме viewport-fit=cover iPhone отдаёт странице область под
      статус-баром. Экран блюда начинается ниже safe area, чтобы hero и
@@ -576,4 +582,48 @@
   /* проявление карточек при скролле */
   .card.reveal{opacity:0;transform:translateY(26px)}
   .card.revealed{opacity:1;transform:none;transition:opacity .6s cubic-bezier(.2,.8,.2,1),transform .6s cubic-bezier(.2,.8,.2,1)}
+  /* ─────────────── safe area установленного приложения ───────────────
+     Собрано одним блоком в конце файла намеренно: правила ниже только
+     переопределяют отступы уже существующих элементов, ничего не переносят
+     и не перекрашивают. В обычной вкладке Safari/Chrome все четыре
+     env(safe-area-inset-*) равны нулю (браузерный chrome сам занимает эти
+     зоны), поэтому блок физически не меняет вёрстку сайта — он включается
+     только когда YAAM запущен с домашнего экрана и страница получает всю
+     площадь экрана целиком (apple-mobile-web-app-status-bar-style=
+     black-translucent + viewport-fit=cover).
+     Правило одно: лишних пустых полей не добавляем — сдвигаем ровно на
+     величину системного выреза, ни на пиксель больше. */
+
+  /* Полоса под статус-баром. Отступы экранов ниже разводят контент в покое,
+     но при прокрутке под вырез всё равно уезжают карточки и текст — их и
+     закрывает эта полоса. Она же служит фоном под прилипшей
+     .menu-sticky-group, которая паркуется ровно под вырезом. */
+  #sa-top{position:fixed;top:0;left:0;right:0;height:env(safe-area-inset-top);z-index:55;pointer-events:none;
+    background:linear-gradient(180deg,rgba(8,36,23,.94),rgba(8,36,23,.72));backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
+
+  /* Низ и бока. .cartbar/.dish-add/.sheet свой bottom-inset уже учитывают
+     (см. выше), здесь добирается только запас под ними у самого документа. */
+  body{padding-bottom:calc(108px + env(safe-area-inset-bottom));
+    padding-left:env(safe-area-inset-left);padding-right:env(safe-area-inset-right)}
+  .toast{bottom:calc(110px + env(safe-area-inset-bottom))}
+  .dish-add,.cartbar{padding-left:calc(16px + env(safe-area-inset-left));padding-right:calc(16px + env(safe-area-inset-right))}
+
+  /* HOME: шапка sticky и стоит первой в потоке — ей нужен собственный
+     внутренний отступ, а не отступ экрана, иначе в прилипшем состоянии она
+     уехала бы под остров, а в покое дала бы пустую щель над собой. */
+  .top{padding-top:calc(24px + env(safe-area-inset-top))}
+
+  /* Все экраны, кроме главной, сдвигаются целиком — тем же приёмом, что уже
+     применён к #dish выше. Для меню это принципиально: hero всего 190px, и
+     если оставить фото под вырезом, а опустить только кнопку «Назад», она
+     наезжает на название ресторана в две строки (.hero-info прижат к низу
+     hero). Сдвиг экрана целиком разводит их так же, как в обычном браузере.
+     .menu-sticky-group прилипает ровно к краю этого отступа: щели над ней в
+     покое не появляется, а зону выреза закрывает #sa-top. */
+  #menu,#cart,#qr,#status,#rejected{padding-top:env(safe-area-inset-top)}
+  .menu-sticky-group{top:env(safe-area-inset-top)}
+
+  /* Штора голосования выезжает сверху — её заголовок обязан быть под вырезом. */
+  .vs-head{padding-top:calc(16px + env(safe-area-inset-top))}
+
   @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}.card.reveal{opacity:1!important;transform:none!important}}

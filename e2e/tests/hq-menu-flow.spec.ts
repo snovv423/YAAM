@@ -1,6 +1,7 @@
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { test, expect, type Page } from '@playwright/test';
+import { pointFrontendAtLocalBackend as installTestApiHook } from '../fixtures/test-api-hook';
 
 // YAAM HQ Stage 5A — полный браузерный сценарий управления меню (задание,
 // раздел 19D, все 26 пунктов): создать ресторан -> опубликовать -> открыть
@@ -33,10 +34,7 @@ const db = require(path.join(SERVER_DIR, 'db/postgresql/index.js'));
 const orderService = require(path.join(SERVER_DIR, 'services/postgresql/orderService.js'));
 
 async function pointFrontendAtLocalBackend(page: Page) {
-  await page.addInitScript((apiBaseUrl) => {
-    // @ts-expect-error глобал браузерного рантайма
-    window.YAAM_API_BASE_URL = apiBaseUrl;
-  }, API_BASE_URL);
+  await installTestApiHook(page, API_BASE_URL);
 }
 
 function uniquePhone(): string {

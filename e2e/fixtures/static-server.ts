@@ -7,9 +7,9 @@ import path from 'node:path';
 // http.server` вручную), а сторонний пакет (serve/http-server и т.п.) explicitly
 // запрещён заданием. Не содержит НИКАКОЙ YAAM-специфичной логики (никаких
 // упоминаний API base URL и т.п.) — это обобщённый static file server,
-// который просто отдаёт client/ как есть; вся YAAM-специфичная связка через
-// window.YAAM_API_BASE_URL делается в тесте через page.addInitScript(),
-// не здесь.
+// который просто отдаёт client/ как есть; вся YAAM-специфичная связка с
+// локальным backend'ом живёт в fixtures/test-api-hook.ts и ставится через
+// page.addInitScript(), не здесь.
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -22,6 +22,10 @@ const MIME: Record<string, string> = {
   '.jpeg': 'image/jpeg',
   '.ico': 'image/x-icon',
   '.webp': 'image/webp',
+  // Манифест PWA. Без явного типа он уезжал бы в fallback
+  // application/octet-stream, и e2e-прогон отличался бы от продакшена
+  // (GitHub Pages отдаёт .webmanifest как application/manifest+json).
+  '.webmanifest': 'application/manifest+json',
 };
 
 export interface StaticServerHandle {
