@@ -141,11 +141,19 @@ test('public markup and CSS remove circular gallery arrows and keep vertical tou
   const clientDir = path.join(__dirname, '..');
   const html = fs.readFileSync(path.join(clientDir, 'index.html'), 'utf8');
   const css = fs.readFileSync(path.join(clientDir, 'css', 'style.css'), 'utf8');
+  const js = fs.readFileSync(path.join(clientDir, 'js', 'app.js'), 'utf8');
   assert.doesNotMatch(html, /class="gnav|id="[md]-g(?:prev|next)"/);
   assert.doesNotMatch(css, /\.gnav/);
   const dishHeroRule = css.match(/\.dhero\{[^}]*\}/)?.[0] || '';
   assert.match(dishHeroRule, /touch-action:pan-y pinch-zoom/);
   assert.doesNotMatch(dishHeroRule, /touch-action\s*:\s*none/);
+  assert.match(css, /\.dhero-track\.snapping\{transition:transform 260ms cubic-bezier\(\.22,1,\.36,1\)\}/);
+  assert.match(css, /\.dhero-slide\{[^}]*flex:0 0 100%/);
+  const dragSource = js.slice(js.indexOf('function bindGalleryDrag'), js.indexOf('function destroyGallery'));
+  assert.match(dragSource, /pointerdown/);
+  assert.match(dragSource, /pointermove/);
+  assert.match(dragSource, /pointerup/);
+  assert.doesNotMatch(dragSource, /preventDefault/);
 });
 
 test('renderGallery: одна фотография — тумб-стрип и счётчик скрыты', () => {
@@ -175,56 +183,97 @@ test('renderGallery: prefix "m" (ресторан) — счётчик и thumbna
   teardown(sandbox);
 });
 
-test('gallerySet/galleryStep: hero, счётчик и active thumbnail синхронны, края не зацикливаются', () => {
+function finishDishSnap(sandbox) {
+  evalInContext(sandbox, `(()=>{const track=galleryState.d.track;track.dispatchEvent({type:'transitionend',target:track})})()`);
+}
+
+test('gallerySet/galleryStep: track snaps before counter/thumbnail commit and never wraps at boundaries', () => {
   const sandbox = freshApp({ apiBaseUrl: 'https://api-pg.yaam.su' });
-  const heroImg = sandbox.document.createElement('img');
-  sandbox.document.querySelector = selector => selector === '#d-hero img' ? heroImg : sandbox.document.createElement('div');
+  const hero = sandbox.document.getElementById('d-hero');
+  hero.getBoundingClientRect = () => ({ width: 300, height: 300, top: 0, left: 0, right: 300, bottom: 300 });
   evalInContext(sandbox, `renderGallery('d', ${toContextLiteral([apiPhotoNormalized('a', ''), apiPhotoNormalized('b', ''), apiPhotoNormalized('c', '')])})`);
   const thumbs = [sandbox.document.createElement('button'), sandbox.document.createElement('button'), sandbox.document.createElement('button')];
   sandbox.document.getElementById('d-gallery').querySelectorAll = selector => selector === '.thumb' ? thumbs : [];
+  evalInContext(sandbox, "updateGalleryChrome('d',0)");
+  assert.equal(evalInContext(sandbox, 'galleryState.d.track.children.length'), 3, 'в track одновременно присутствуют текущий и соседние кадры');
+  assert.equal(evalInContext(sandbox, 'galleryState.d.track.children[1].children[0].src'), 'https://cdn.test/b-full.webp');
   assert.equal(sandbox.document.getElementById('d-gcount').textContent, '1 / 3');
   evalInContext(sandbox, "galleryStep('d', 1)");
+  assert.equal(sandbox.document.getElementById('d-gcount').textContent, '1 / 3', 'chrome не меняется до окончания snap');
+  assert.equal(evalInContext(sandbox, 'galleryState.d.track.style.transform'), 'translate3d(-300px,0,0)');
+  finishDishSnap(sandbox);
   assert.equal(sandbox.document.getElementById('d-gcount').textContent, '2 / 3');
-  assert.equal(heroImg.src, 'https://cdn.test/b-full.webp');
   assert.equal(thumbs[1].classList.contains('on'), true);
   assert.equal(thumbs[0].classList.contains('on'), false);
   evalInContext(sandbox, "galleryStep('d', 1)");
+  finishDishSnap(sandbox);
   assert.equal(sandbox.document.getElementById('d-gcount').textContent, '3 / 3');
   evalInContext(sandbox, "galleryStep('d', 1)");
   assert.equal(sandbox.document.getElementById('d-gcount').textContent, '3 / 3');
   evalInContext(sandbox, "gallerySet('d', 0)");
+  finishDishSnap(sandbox);
   evalInContext(sandbox, "galleryStep('d', -1)");
   assert.equal(sandbox.document.getElementById('d-gcount').textContent, '1 / 3');
   evalInContext(sandbox, "gallerySet('d', 2)");
+  finishDishSnap(sandbox);
   assert.equal(sandbox.document.getElementById('d-gcount').textContent, '3 / 3');
   assert.equal(thumbs[2].classList.contains('on'), true);
-  assert.equal(heroImg.src, 'https://cdn.test/c-full.webp');
   teardown(sandbox);
 });
 
-test('dish hero swipe changes photo horizontally, ignores vertical scroll gesture, and does not duplicate listeners', () => {
+test('dish drag follows pointer live, reveals neighbour, snaps after release, and keeps vertical gesture native', () => {
   const sandbox = freshApp({ apiBaseUrl: 'https://api-pg.yaam.su' });
   const photos = [apiPhotoNormalized('a', ''), apiPhotoNormalized('b', ''), apiPhotoNormalized('c', '')];
-  evalInContext(sandbox, `renderGallery('d', ${toContextLiteral(photos)})`);
-  evalInContext(sandbox, `renderGallery('d', ${toContextLiteral(photos)})`);
   const hero = sandbox.document.getElementById('d-hero');
+  hero.getBoundingClientRect = () => ({ width: 300, height: 300, top: 0, left: 0, right: 300, bottom: 300 });
+  evalInContext(sandbox, `renderGallery('d', ${toContextLiteral(photos)})`);
+  // Повторный render обязан снять старые listeners, иначе один drag мог бы
+  // перескочить сразу через два кадра.
+  evalInContext(sandbox, `renderGallery('d', ${toContextLiteral(photos)})`);
   const count = sandbox.document.getElementById('d-gcount');
-  hero.dispatchEvent({ type: 'touchstart', touches: [{ clientX: 300, clientY: 200 }] });
-  hero.dispatchEvent({ type: 'touchend', changedTouches: [{ clientX: 120, clientY: 208 }] });
-  assert.equal(count.textContent, '2 / 3', 'swipe left advances exactly once');
-  hero.dispatchEvent({ type: 'touchstart', touches: [{ clientX: 120, clientY: 200 }] });
-  hero.dispatchEvent({ type: 'touchend', changedTouches: [{ clientX: 300, clientY: 205 }] });
-  assert.equal(count.textContent, '1 / 3', 'swipe right returns to previous photo');
-  hero.dispatchEvent({ type: 'touchstart', touches: [{ clientX: 180, clientY: 200 }] });
-  hero.dispatchEvent({ type: 'touchend', changedTouches: [{ clientX: 190, clientY: 360 }] });
-  assert.equal(count.textContent, '1 / 3', 'vertical gesture does not change the gallery');
-  hero.dispatchEvent({ type: 'touchstart', touches: [{ clientX: 300, clientY: 200 }] });
-  hero.dispatchEvent({ type: 'touchend', changedTouches: [{ clientX: 120, clientY: 205 }] });
-  hero.dispatchEvent({ type: 'touchstart', touches: [{ clientX: 300, clientY: 200 }] });
-  hero.dispatchEvent({ type: 'touchend', changedTouches: [{ clientX: 120, clientY: 205 }] });
-  hero.dispatchEvent({ type: 'touchstart', touches: [{ clientX: 300, clientY: 200 }] });
-  hero.dispatchEvent({ type: 'touchend', changedTouches: [{ clientX: 120, clientY: 205 }] });
-  assert.equal(count.textContent, '3 / 3', 'last photo is a hard boundary');
+  const thumbs = [sandbox.document.createElement('button'), sandbox.document.createElement('button'), sandbox.document.createElement('button')];
+  sandbox.document.getElementById('d-gallery').querySelectorAll = selector => selector === '.thumb' ? thumbs : [];
+  evalInContext(sandbox, "updateGalleryChrome('d',0)");
+  const track = evalInContext(sandbox, 'galleryState.d.track');
+  hero.dispatchEvent({ type: 'pointerdown', pointerId: 1, pointerType: 'touch', isPrimary: true, clientX: 280, clientY: 180, timeStamp: 0 });
+  hero.dispatchEvent({ type: 'pointermove', pointerId: 1, pointerType: 'touch', clientX: 130, clientY: 184, timeStamp: 100 });
+  assert.equal(track.style.transform, 'translate3d(-150px,0,0)', 'трек удерживается ровно на половине между кадрами');
+  assert.equal(count.textContent, '1 / 3', 'counter остаётся прежним во время drag');
+  assert.equal(thumbs[0].classList.contains('on'), true, 'thumbnail остаётся прежним во время drag');
+  hero.dispatchEvent({ type: 'pointerup', pointerId: 1, pointerType: 'touch', clientX: 130, clientY: 184, timeStamp: 110 });
+  assert.equal(track.style.transform, 'translate3d(-300px,0,0)', 'после отпускания начинается snap к соседу');
+  assert.equal(count.textContent, '1 / 3', 'counter меняется только после transitionend');
+  finishDishSnap(sandbox);
+  assert.equal(count.textContent, '2 / 3', 'после snap фиксируется ровно один следующий кадр');
+  assert.equal(thumbs[1].classList.contains('on'), true);
+
+  const beforeVertical = track.style.transform;
+  hero.dispatchEvent({ type: 'pointerdown', pointerId: 2, pointerType: 'touch', isPrimary: true, clientX: 180, clientY: 160, timeStamp: 200 });
+  hero.dispatchEvent({ type: 'pointermove', pointerId: 2, pointerType: 'touch', clientX: 188, clientY: 300, timeStamp: 260 });
+  hero.dispatchEvent({ type: 'pointerup', pointerId: 2, pointerType: 'touch', clientX: 188, clientY: 300, timeStamp: 270 });
+  assert.equal(track.style.transform, beforeVertical, 'вертикальный жест не двигает track');
+  assert.equal(count.textContent, '2 / 3');
+
+  hero.dispatchEvent({ type: 'pointerdown', pointerId: 3, pointerType: 'touch', isPrimary: true, clientX: 180, clientY: 160, timeStamp: 300 });
+  hero.dispatchEvent({ type: 'pointermove', pointerId: 3, pointerType: 'touch', clientX: 160, clientY: 162, timeStamp: 400 });
+  hero.dispatchEvent({ type: 'pointerup', pointerId: 3, pointerType: 'touch', clientX: 160, clientY: 162, timeStamp: 410 });
+  finishDishSnap(sandbox);
+  assert.equal(count.textContent, '2 / 3', 'короткий медленный drag плавно возвращается');
+  teardown(sandbox);
+});
+
+test('swipe decision combines distance and velocity; first/last edges rubber-band instead of wrapping', () => {
+  const sandbox = freshApp({ apiBaseUrl: 'https://api-pg.yaam.su' });
+  assert.equal(evalInContext(sandbox, 'gallerySwipeTarget(1,3,-20,-.8,300)'), 2, 'быстрый короткий flick идёт вперёд');
+  assert.equal(evalInContext(sandbox, 'gallerySwipeTarget(1,3,20,.8,300)'), 0, 'быстрый короткий flick идёт назад');
+  assert.equal(evalInContext(sandbox, 'gallerySwipeTarget(1,3,-20,-.1,300)'), 1, 'короткий медленный drag возвращается');
+  assert.equal(evalInContext(sandbox, 'gallerySwipeTarget(0,3,120,.9,300)'), 0, 'первая фотография не зацикливается');
+  assert.equal(evalInContext(sandbox, 'gallerySwipeTarget(2,3,-120,-.9,300)'), 2, 'последняя фотография не зацикливается');
+  const resistedStart = evalInContext(sandbox, 'galleryRubberBand(120,300,0,3)');
+  const resistedEnd = evalInContext(sandbox, 'galleryRubberBand(-120,300,2,3)');
+  assert.ok(resistedStart > 0 && resistedStart < 120);
+  assert.ok(resistedEnd < 0 && resistedEnd > -120);
+  assert.equal(evalInContext(sandbox, 'galleryRubberBand(-120,300,1,3)'), -120, 'между кадрами сопротивления нет');
   teardown(sandbox);
 });
 

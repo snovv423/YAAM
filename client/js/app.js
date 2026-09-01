@@ -1182,7 +1182,7 @@ function openDish(k){
   const det=fromApi
     ? {w:d.w||'—',kcal:d.kcal??'—',p:d.prot??'—',f:d.fat??'—',c:d.carb??'—',s:d.s||'Состав не указан'}
     : (DETAILS[d.n]||{w:300,kcal:450,p:20,f:20,c:40,s:'Натуральные ингредиенты'});
-  const h=document.getElementById('d-hero');h.querySelectorAll('img').forEach(x=>x.remove());
+  const h=document.getElementById('d-hero');destroyGallery('d');h.querySelectorAll('img').forEach(x=>x.remove());
   // Реальная галерея (Stage 5B) приходит только из API — d.gallery всегда
   // непустая, если у блюда есть хоть одно фото (сервер сам заворачивает
   // legacy photo_url в gallery из одного элемента — см. buildPhotoFields в
@@ -1192,9 +1192,9 @@ function openDish(k){
   const dishHasSrc=!!(dGallery.length||d.photoUrl||d.im);
   h.classList.toggle('nophoto',!dishHasSrc);
   h.style.background=d.g;
-  if(dishHasSrc){
-    const heroSrc=dGallery.length?dGallery[0].full:(d.photoUrl||U(d.im,1000));
-    const img=new Image();img.src=heroSrc;img.alt=dGallery.length?(dGallery[0].alt||''):'';img.onerror=function(){h.classList.add('nophoto');this.remove()};h.insertBefore(img,h.firstChild);applyFilledCrop(img,dGallery.length&&dGallery[0].crops&&dGallery[0].crops.dish_detail,dGallery.length&&dGallery[0].rotation);
+  if(dishHasSrc&&!dGallery.length){
+    const heroSrc=d.photoUrl||U(d.im,1000);
+    const img=new Image();img.src=heroSrc;img.alt='';img.onerror=function(){h.classList.add('nophoto');this.remove()};h.insertBefore(img,h.firstChild);applyFilledCrop(img,null,0);
   }
   renderGallery('d',dGallery);
   if(!dGallery.length){
@@ -1228,74 +1228,203 @@ function swapHero(id,i){
   document.querySelectorAll('#d-gallery .thumb').forEach((t,j)=>t.classList.toggle('on',j===i));
 }
 
-// Реальная многофотографийная галерея без сторонних библиотек: большой кадр,
-// счётчик и нативно прокручиваемый тумб-стрип. На экране блюда большой кадр
-// листается горизонтальным свайпом; пассивные touch-listeners не блокируют
-// вертикальный скролл страницы. Кнопки-тумбы остаются клавиатурно доступными.
+// Интерактивная галерея блюда без сторонних библиотек. Все кадры находятся
+// рядом в одном transform-треке: во время горизонтального pointer-drag трек
+// буквально следует за пальцем и показывает соседний кадр. touch-action:pan-y
+// оставляет вертикальную прокрутку браузеру; индекс, счётчик и thumbnail
+// фиксируются только после завершения snap-анимации.
+const GALLERY_SNAP_MS=260;
+const GALLERY_AXIS_LOCK_PX=8;
+const GALLERY_DISTANCE_RATIO=.22;
+const GALLERY_MIN_DISTANCE_PX=52;
+const GALLERY_VELOCITY_PX_MS=.48;
 let galleryState={};
-let gallerySwipeCleanup={};
-function bindGallerySwipe(prefix,enabled){
-  if(gallerySwipeCleanup[prefix]){
-    gallerySwipeCleanup[prefix]();
-    delete gallerySwipeCleanup[prefix];
+let galleryDragCleanup={};
+function galleryHeroWidth(hero){
+  const box=hero&&hero.getBoundingClientRect?hero.getBoundingClientRect():null;
+  return Math.max(1,Number(box&&box.width)||Number(hero&&hero.clientWidth)||1);
+}
+function galleryTrackX(index,width,dragX=0){return-index*width+dragX;}
+function galleryRubberBand(dragX,width,index,count){
+  const beyondStart=index===0&&dragX>0;
+  const beyondEnd=index===count-1&&dragX<0;
+  if(!beyondStart&&!beyondEnd)return dragX;
+  const distance=Math.abs(dragX);
+  const resisted=(distance*.36)/(1+distance/(Math.max(1,width)*.75));
+  return Math.sign(dragX)*resisted;
+}
+function gallerySwipeTarget(index,count,dragX,velocityX,width){
+  const distancePassed=Math.abs(dragX)>=Math.max(GALLERY_MIN_DISTANCE_PX,width*GALLERY_DISTANCE_RATIO);
+  const velocityPassed=Math.abs(velocityX)>=GALLERY_VELOCITY_PX_MS;
+  if(!distancePassed&&!velocityPassed)return index;
+  const direction=distancePassed?(dragX<0?1:-1):(velocityX<0?1:-1);
+  return Math.max(0,Math.min(count-1,index+direction));
+}
+function setGalleryTrackPosition(st,index,dragX=0){
+  if(!st||!st.track)return;
+  const width=galleryHeroWidth(st.hero);
+  st.track.style.transform=`translate3d(${galleryTrackX(index,width,dragX)}px,0,0)`;
+}
+function updateGalleryChrome(prefix,index){
+  const st=galleryState[prefix];
+  if(!st)return;
+  st.index=index;
+  const stripEl=document.getElementById(prefix+'-gallery');
+  let activeThumb=null;
+  if(stripEl)stripEl.querySelectorAll('.thumb').forEach((t,j)=>{t.classList.toggle('on',j===index);if(j===index)activeThumb=t;});
+  if(activeThumb&&typeof activeThumb.scrollIntoView==='function')activeThumb.scrollIntoView({behavior:'smooth',block:'nearest',inline:'center'});
+  const countEl=document.getElementById(prefix+'-gcount');
+  if(countEl&&st.photos.length>1)countEl.textContent=(index+1)+' / '+st.photos.length;
+}
+function finishGallerySnap(prefix,target,sequence){
+  const st=galleryState[prefix];
+  if(!st||sequence!==st.snapSequence)return;
+  if(st.snapTimer){clearTimeout(st.snapTimer);st.snapTimer=null;}
+  if(st.snapEnd&&st.track)st.track.removeEventListener('transitionend',st.snapEnd);
+  st.snapEnd=null;st.snapping=false;
+  if(st.track)st.track.classList.remove('snapping');
+  updateGalleryChrome(prefix,target);
+  setGalleryTrackPosition(st,target);
+}
+function snapGalleryTrack(prefix,target){
+  const st=galleryState[prefix];
+  if(!st||!st.track||st.snapping)return;
+  const clamped=Math.max(0,Math.min(st.photos.length-1,target));
+  const sequence=(st.snapSequence||0)+1;
+  st.snapSequence=sequence;st.snapping=true;
+  st.track.classList.add('snapping');
+  // Фиксируем текущий drag-transform до задания snap-точки: переход всегда
+  // начинается из фактического положения под пальцем, а не из прошлого кадра.
+  if(st.track.getBoundingClientRect)st.track.getBoundingClientRect();
+  const done=e=>{if(!e||e.target===st.track)finishGallerySnap(prefix,clamped,sequence);};
+  st.snapEnd=done;
+  st.track.addEventListener('transitionend',done);
+  setGalleryTrackPosition(st,clamped);
+  st.snapTimer=setTimeout(()=>finishGallerySnap(prefix,clamped,sequence),GALLERY_SNAP_MS+90);
+}
+function createDishGalleryTrack(hero,photos){
+  const track=document.createElement('div');
+  track.className='dhero-track';
+  const images=[];
+  photos.forEach((photo,i)=>{
+    const slide=document.createElement('div');
+    slide.className='dhero-slide';
+    const img=new Image();
+    img.src=photo.full;img.alt=photo.alt||'';img.draggable=false;img.loading=i?'lazy':'eager';
+    img.onerror=function(){this.remove();};
+    slide.appendChild(img);track.appendChild(slide);images.push(img);
+  });
+  hero.insertBefore(track,hero.firstChild);
+  images.forEach((img,i)=>{const photo=photos[i];applyFilledCrop(img,photo.crops&&photo.crops.dish_detail,photo.rotation);});
+  return{track,images};
+}
+function bindGalleryDrag(prefix,enabled){
+  if(galleryDragCleanup[prefix]){
+    galleryDragCleanup[prefix]();
+    delete galleryDragCleanup[prefix];
   }
   if(prefix!=='d'||!enabled)return;
   const hero=document.getElementById(prefix+'-hero');
   if(!hero)return;
-  let start=null;
-  const onStart=e=>{
-    if(!e.touches||e.touches.length!==1){start=null;return;}
-    start={x:e.touches[0].clientX,y:e.touches[0].clientY};
+  const st=galleryState[prefix];
+  const eventTime=e=>Number.isFinite(e.timeStamp)?e.timeStamp:Date.now();
+  const onDown=e=>{
+    if(st.snapping||e.isPrimary===false||(e.pointerType==='mouse'&&e.button!==0))return;
+    if(e.target!==hero&&e.target&&e.target.closest&&e.target.closest('button,a'))return;
+    const now=eventTime(e);
+    st.drag={pointerId:e.pointerId,startX:e.clientX,startY:e.clientY,lastX:e.clientX,lastTime:now,velocityX:0,axis:null};
+    st.track.classList.remove('snapping');
   };
-  const onEnd=e=>{
-    if(!start||!e.changedTouches||!e.changedTouches.length){start=null;return;}
-    const touch=e.changedTouches[0];
-    const dx=touch.clientX-start.x;
-    const dy=touch.clientY-start.y;
-    start=null;
-    if(Math.abs(dx)<48||Math.abs(dx)<=Math.abs(dy)*1.2)return;
-    galleryStep(prefix,dx<0?1:-1);
+  const onMove=e=>{
+    const drag=st.drag;
+    if(!drag||e.pointerId!==drag.pointerId)return;
+    const dx=e.clientX-drag.startX,dy=e.clientY-drag.startY;
+    if(!drag.axis){
+      if(Math.max(Math.abs(dx),Math.abs(dy))<GALLERY_AXIS_LOCK_PX)return;
+      if(Math.abs(dy)>Math.abs(dx)*1.1){drag.axis='vertical';return;}
+      if(Math.abs(dx)>Math.abs(dy)*1.1){
+        drag.axis='horizontal';hero.classList.add('dragging');
+        if(hero.setPointerCapture)try{hero.setPointerCapture(e.pointerId);}catch(err){}
+      }else return;
+    }
+    if(drag.axis!=='horizontal')return;
+    const now=eventTime(e),dt=Math.max(1,now-drag.lastTime);
+    const instant=(e.clientX-drag.lastX)/dt;
+    drag.velocityX=drag.velocityX*.35+instant*.65;
+    drag.lastX=e.clientX;drag.lastTime=now;
+    const width=galleryHeroWidth(hero);
+    const displayed=galleryRubberBand(dx,width,st.index,st.photos.length);
+    setGalleryTrackPosition(st,st.index,displayed);
   };
-  const onCancel=()=>{start=null;};
-  hero.addEventListener('touchstart',onStart,{passive:true});
-  hero.addEventListener('touchend',onEnd,{passive:true});
-  hero.addEventListener('touchcancel',onCancel,{passive:true});
-  gallerySwipeCleanup[prefix]=()=>{
-    hero.removeEventListener('touchstart',onStart);
-    hero.removeEventListener('touchend',onEnd);
-    hero.removeEventListener('touchcancel',onCancel);
+  const endDrag=(e,cancelled=false)=>{
+    const drag=st.drag;
+    if(!drag||e.pointerId!==drag.pointerId)return;
+    st.drag=null;hero.classList.remove('dragging');
+    if(hero.releasePointerCapture)try{hero.releasePointerCapture(e.pointerId);}catch(err){}
+    if(drag.axis!=='horizontal'){setGalleryTrackPosition(st,st.index);return;}
+    const dx=e.clientX-drag.startX;
+    const target=cancelled?st.index:gallerySwipeTarget(st.index,st.photos.length,dx,drag.velocityX,galleryHeroWidth(hero));
+    snapGalleryTrack(prefix,target);
+  };
+  const onUp=e=>endDrag(e,false);
+  const onCancel=e=>endDrag(e,true);
+  const onResize=()=>{if(!st.drag&&!st.snapping)setGalleryTrackPosition(st,st.index);};
+  hero.addEventListener('pointerdown',onDown);
+  hero.addEventListener('pointermove',onMove);
+  hero.addEventListener('pointerup',onUp);
+  hero.addEventListener('pointercancel',onCancel);
+  window.addEventListener('resize',onResize,{passive:true});
+  galleryDragCleanup[prefix]=()=>{
+    hero.removeEventListener('pointerdown',onDown);
+    hero.removeEventListener('pointermove',onMove);
+    hero.removeEventListener('pointerup',onUp);
+    hero.removeEventListener('pointercancel',onCancel);
+    window.removeEventListener('resize',onResize);
   };
 }
+function destroyGallery(prefix){
+  if(galleryDragCleanup[prefix]){galleryDragCleanup[prefix]();delete galleryDragCleanup[prefix];}
+  const st=galleryState[prefix];
+  if(!st)return;
+  if(st.snapTimer)clearTimeout(st.snapTimer);
+  if(st.snapEnd&&st.track)st.track.removeEventListener('transitionend',st.snapEnd);
+  (st.images||[]).forEach(img=>{if(img._yaamCropPaint)window.removeEventListener('resize',img._yaamCropPaint);});
+  if(st.track&&st.track.remove)st.track.remove();
+  delete galleryState[prefix];
+}
 function renderGallery(prefix,photos){
-  galleryState[prefix]={photos:photos||[],index:0};
+  destroyGallery(prefix);
+  const hero=document.getElementById(prefix+'-hero');
+  const st=galleryState[prefix]={photos:photos||[],index:0,hero,track:null,images:[],snapping:false,snapSequence:0};
   const stripEl=document.getElementById(prefix+'-gallery');
   const countEl=document.getElementById(prefix+'-gcount');
-  const multi=galleryState[prefix].photos.length>1;
+  const multi=st.photos.length>1;
   if(countEl)countEl.style.display=multi?'block':'none';
   if(stripEl){
-    stripEl.innerHTML=multi?galleryState[prefix].photos.map((p,i)=>
-      `<button type="button" class="thumb ${i===0?'on':''}" aria-label="Фото ${i+1} из ${galleryState[prefix].photos.length}" onclick="gallerySet('${prefix}',${i})"><img src="${p.thumb}" alt="${esc(p.alt)}" loading="lazy"></button>`
+    stripEl.innerHTML=multi?st.photos.map((p,i)=>
+      `<button type="button" class="thumb ${i===0?'on':''}" aria-label="Фото ${i+1} из ${st.photos.length}" onclick="gallerySet('${prefix}',${i})"><img src="${p.thumb}" alt="${esc(p.alt)}" loading="lazy"></button>`
     ).join(''):'';
   }
-  gallerySet(prefix,0);
-  bindGallerySwipe(prefix,multi);
+  if(prefix==='d'&&st.photos.length){const built=createDishGalleryTrack(hero,st.photos);st.track=built.track;st.images=built.images;setGalleryTrackPosition(st,0);}
+  updateGalleryChrome(prefix,0);
+  if(prefix!=='d')updateGalleryHero(prefix,0);
+  bindGalleryDrag(prefix,multi);
+}
+function updateGalleryHero(prefix,index){
+  const st=galleryState[prefix];
+  if(!st||!st.photos.length)return;
+  const photo=st.photos[index];
+  const heroImg=document.querySelector('#'+prefix+'-hero img');
+  if(heroImg){heroImg.src=photo.full;heroImg.alt=photo.alt||'';}
+  if(heroImg)applyFilledCrop(heroImg,photo.crops&&photo.crops.dish_detail,photo.rotation);
 }
 function gallerySet(prefix,i){
   const st=galleryState[prefix];
   const n=st?st.photos.length:0;
-  if(!n)return;
+  if(!n||st.snapping)return;
   const idx=Math.max(0,Math.min(n-1,i));
-  st.index=idx;
-  const photo=st.photos[idx];
-  const heroImg=document.querySelector('#'+prefix+'-hero img');
-  if(heroImg){heroImg.src=photo.full;heroImg.alt=photo.alt||'';}
-  if(heroImg)applyFilledCrop(heroImg,photo.crops&&photo.crops.dish_detail,photo.rotation);
-  const stripEl=document.getElementById(prefix+'-gallery');
-  let activeThumb=null;
-  if(stripEl)stripEl.querySelectorAll('.thumb').forEach((t,j)=>{t.classList.toggle('on',j===idx);if(j===idx)activeThumb=t;});
-  if(activeThumb&&typeof activeThumb.scrollIntoView==='function')activeThumb.scrollIntoView({behavior:'smooth',block:'nearest',inline:'center'});
-  const countEl=document.getElementById(prefix+'-gcount');
-  if(countEl&&n>1)countEl.textContent=(idx+1)+' / '+n;
+  if(prefix==='d'&&st.track){if(idx===st.index){setGalleryTrackPosition(st,idx);updateGalleryChrome(prefix,idx);}else snapGalleryTrack(prefix,idx);return;}
+  updateGalleryHero(prefix,idx);updateGalleryChrome(prefix,idx);
 }
 function galleryStep(prefix,delta){const st=galleryState[prefix];if(st)gallerySet(prefix,st.index+delta);}
 

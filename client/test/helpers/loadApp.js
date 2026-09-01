@@ -17,8 +17,11 @@ const { URL, URLSearchParams } = require('node:url');
 
 function makeFakeElement(id) {
   const listeners = {};
-  return {
+  const element = {
     id,
+    children: [],
+    parentElement: null,
+    get firstChild() { return this.children[0] || null; },
     _text: '',
     get textContent() { return this._text; },
     set textContent(v) { this._text = String(v); },
@@ -83,8 +86,22 @@ function makeFakeElement(id) {
       for (const listener of listeners[event.type] || []) listener.call(this, event);
       return true;
     },
-    appendChild() {},
-    insertBefore() {},
+    appendChild(child) {
+      child.parentElement = this;
+      this.children.push(child);
+      return child;
+    },
+    insertBefore(child, before) {
+      child.parentElement = this;
+      const index = before ? this.children.indexOf(before) : -1;
+      if (index < 0) this.children.push(child); else this.children.splice(index, 0, child);
+      return child;
+    },
+    remove() {
+      if (!this.parentElement) return;
+      this.parentElement.children = this.parentElement.children.filter(child => child !== this);
+      this.parentElement = null;
+    },
     querySelector() { return makeFakeElement(id + '__child'); },
     querySelectorAll() { return []; },
     animate() {},
@@ -101,6 +118,7 @@ function makeFakeElement(id) {
     // вызывающем resetAll()/go('home').
     getBoundingClientRect() { return { top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 }; },
   };
+  return element;
 }
 
 function createSandbox({ apiBaseUrl, locationSearch, locationHref, useProductionDefault = false } = {}) {
@@ -176,8 +194,12 @@ function createSandbox({ apiBaseUrl, locationSearch, locationHref, useProduction
     // global, которого раньше не было в этом стабе (ни один тест до этого не
     // проходил через ветку с реальным photoUrl/im — см. hasSrc-проверки).
     Image: class {
-      constructor() { this.src = ''; this.alt = ''; this.onerror = null; }
-      remove() {}
+      constructor() { this.src = ''; this.alt = ''; this.onerror = null; this.style = {}; this.parentElement = null; this.complete = false; }
+      remove() {
+        if (!this.parentElement) return;
+        this.parentElement.children = this.parentElement.children.filter(child => child !== this);
+        this.parentElement = null;
+      }
     },
   };
   sandbox.window = sandbox; // как в реальном браузере — window === глобальный объект
@@ -222,6 +244,7 @@ function teardown(sandbox) {
     try{clearTimeout(preAutoTimer);}catch(e){}
     try{clearInterval(orderPollTimer);}catch(e){}
     try{clearInterval(sharedViewPollTimer);}catch(e){}
+    try{Object.keys(galleryState).forEach(destroyGallery);}catch(e){}
   `);
 }
 
