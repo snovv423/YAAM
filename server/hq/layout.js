@@ -264,8 +264,6 @@ function layout({ title, active, body, csrfToken, linkBasePath = '/hq' }) {
   .dragging{position:relative;z-index:5;opacity:.9;cursor:grabbing;
     box-shadow:0 14px 34px rgba(0,0,0,.45);border-radius:12px;
     background:var(--panel);will-change:transform}
-  .cat-list.is-reordering>.cat-block:not(.dragging),
-  .dish-list.is-reordering>.dish-row:not(.dragging){transition:transform .16s ease}
   /* Во время жеста ничего не выделяется и ссылка блюда не перехватывает
      указатель — иначе браузер начинает «тащить» текст или ссылку. */
   html.is-reordering{user-select:none;-webkit-user-select:none}
