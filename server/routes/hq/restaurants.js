@@ -10,7 +10,7 @@ const svc = require('../../services/hq/restaurantAdminService');
 const statsService = require('../../services/hq/restaurantStatsService');
 const menuSvc = require('../../services/hq/menuAdminService');
 const photoService = require('../../services/hq/media/photoService');
-const { MAX_SOURCE_BYTES } = require('../../services/hq/media/imagePipeline');
+const { MAX_SOURCE_BYTES, TOO_LARGE_MESSAGE } = require('../../services/hq/media/limits');
 const legalService = require('../../services/hq/restaurantLegalDetailsService');
 const bankService = require('../../services/hq/restaurantBankDetailsService');
 const contractService = require('../../services/hq/restaurantContractService');
@@ -51,6 +51,14 @@ const photoUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: MAX_SOURCE_BYTES, files: 1 },
 });
+
+// Отдельный текст именно для превышения размера: раньше владелец на любую
+// ошибку multer получал одну общую фразу «слишком большой или повреждён» и
+// не понимал, какой предел он перешёл и на сколько.
+function uploadErrorMessage(err) {
+  if (err && err.code === 'LIMIT_FILE_SIZE') return TOO_LARGE_MESSAGE;
+  return 'Не удалось загрузить файл — он повреждён или отклонён при приёме.';
+}
 
 function createRestaurantsRouter({ linkBasePath, mediaProvider = null }) {
   const router = express.Router();
@@ -725,7 +733,7 @@ function createRestaurantsRouter({ linkBasePath, mediaProvider = null }) {
     photoUpload.single('photo'),
     (err, req, res, next) => {
       if (!err) return next();
-      dishPhotoActionRedirect(res, req.params.id, req.params.itemId, { error: 'Не удалось загрузить файл — слишком большой или повреждён.' });
+      dishPhotoActionRedirect(res, req.params.id, req.params.itemId, { error: uploadErrorMessage(err) });
     },
     requireCsrf,
     async (req, res, next) => {
@@ -1234,7 +1242,7 @@ function createRestaurantsRouter({ linkBasePath, mediaProvider = null }) {
     // обработчика (задание, раздел 5/11: понятная ошибка, не сырой 500).
     (err, req, res, next) => {
       if (!err) return next();
-      photoActionRedirect(res, req.params.id, { error: 'Не удалось загрузить файл — слишком большой или повреждён.' });
+      photoActionRedirect(res, req.params.id, { error: uploadErrorMessage(err) });
     },
     requireCsrf,
     async (req, res, next) => {

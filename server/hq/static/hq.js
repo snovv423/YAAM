@@ -309,7 +309,10 @@
         return false;
       }
       if (maxBytes && file.size > maxBytes) {
-        showError('Файл больше ' + Math.round(maxBytes / (1024 * 1024)) + ' МБ — выберите фотографию поменьше.');
+        // Тот же текст, что отдаёт сервер (services/hq/media/limits.js):
+        // владелец не должен видеть две разные формулировки одного отказа.
+        showError('Фото слишком большое. Максимальный размер исходного файла — '
+          + Math.floor(maxBytes / (1024 * 1024)) + ' МБ.');
         return false;
       }
       showError('');

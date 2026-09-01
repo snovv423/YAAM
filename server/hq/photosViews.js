@@ -15,11 +15,13 @@
 // confirm() в этом разделе.
 const { esc } = require('./layout');
 
-// Дублирует imagePipeline.MAX_SOURCE_BYTES намеренно: этот модуль — чистый
-// слой представления и не должен тянуть за собой sharp вместе с пайплайном
-// ради одного числа. Расхождение двух констант ловит регрессионный тест
-// (test/hqPhotoUploadControl.test.js).
-const MAX_SOURCE_BYTES = 15 * 1024 * 1024;
+// Лимит берётся из общего services/hq/media/limits.js — того же модуля, что
+// читают multer в роутах и проверка свободного места. Раньше здесь стоял
+// литерал (чтобы не тянуть в шаблон sharp вместе с imagePipeline), и это
+// был единственный шанс разъехаться с сервером; limits.js зависимостей не
+// имеет, поэтому копия больше не нужна.
+const { MAX_SOURCE_BYTES, TOO_LARGE_MESSAGE } = require('../services/hq/media/limits');
+
 const ACCEPT_MIME = 'image/jpeg,image/png,image/webp';
 
 // id должен быть пригоден и для label[for], и для querySelector: actionBase —
@@ -178,4 +180,4 @@ function renderPhotoManager({
     </div>`;
 }
 
-module.exports = { renderPhotoManager, MAX_SOURCE_BYTES, ACCEPT_MIME };
+module.exports = { renderPhotoManager, MAX_SOURCE_BYTES, TOO_LARGE_MESSAGE, ACCEPT_MIME };

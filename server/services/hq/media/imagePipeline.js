@@ -22,9 +22,16 @@ const { ValidationError } = require('../restaurantLifecycle');
 // protection") — защита от опечаток/абсурдных файлов и от decompression
 // bomb (крошечный файл, распаковывающийся в гигантский растр), а не
 // бизнес-ограничение: ни один настоящий ресторан не должен в них упереться.
-const MAX_SOURCE_BYTES = 15 * 1024 * 1024; // 15 МБ
-const MAX_SOURCE_DIMENSION_PX = 8000; // по каждой стороне
-const MAX_SOURCE_PIXELS = 40_000_000; // ~40 МП — с запасом выше типичных телефонных фото
+//
+// Сами числа живут в ./limits.js — их читают также multer в роутах, шаблон
+// формы загрузки и проверка свободного места; здесь только реэкспорт, чтобы
+// существующие импорты из imagePipeline продолжали работать.
+const {
+  MAX_SOURCE_BYTES,
+  MAX_SOURCE_DIMENSION_PX,
+  MAX_SOURCE_PIXELS,
+  TOO_LARGE_MESSAGE,
+} = require('./limits');
 
 // Детерминированные WebP-варианты (см. server/db/postgresql/schema.sql,
 // комментарий к restaurant_photos/menu_item_photos): каждому базовому
@@ -90,7 +97,7 @@ async function validateSourceImage(buffer) {
     throw new ValidationError('Файл фотографии пуст или повреждён.');
   }
   if (buffer.length > MAX_SOURCE_BYTES) {
-    throw new ValidationError(`Файл слишком большой (максимум ${Math.floor(MAX_SOURCE_BYTES / 1024 / 1024)} МБ).`);
+    throw new ValidationError(TOO_LARGE_MESSAGE);
   }
   const sig = detectFormat(buffer);
   if (!sig) {
@@ -103,6 +110,12 @@ async function validateSourceImage(buffer) {
     // ~268 МП) — это защита от decompression bomb уровня библиотеки,
     // сохранена как есть (defense in depth) поверх наших более строгих
     // продуктовых лимитов ниже.
+    // Здесь limitInputPixels СОЗНАТЕЛЬНО не ставится: metadata() читает
+    // только заголовок и пиксели не декодирует, а с установленным лимитом
+    // libvips бросает уже на открытии — и наш catch ниже превращал бы
+    // превышение площади в общее «файл повреждён» вместо понятного
+    // «слишком большое разрешение». Площадь проверяется явно чуть ниже,
+    // а сам декодер ограничен в processImage().
     metadata = await sharp(buffer).metadata();
   } catch {
     throw new ValidationError('Не удалось прочитать файл как изображение — он повреждён или не является настоящим изображением.');
@@ -140,7 +153,7 @@ async function processImage(buffer) {
 
   const variants = {};
   for (const [name, opts] of Object.entries(VARIANTS)) {
-    const pipeline = sharp(buffer)
+    const pipeline = sharp(buffer, { limitInputPixels: MAX_SOURCE_PIXELS })
       .rotate()
       .resize({ width: opts.maxEdge, height: opts.maxEdge, fit: 'inside', withoutEnlargement: true })
       .webp({ quality: opts.quality, effort: 6, smartSubsample: true });
@@ -160,6 +173,7 @@ module.exports = {
   MAX_SOURCE_BYTES,
   MAX_SOURCE_DIMENSION_PX,
   MAX_SOURCE_PIXELS,
+  TOO_LARGE_MESSAGE,
   VARIANTS,
   PUBLIC_VARIANT_NAMES,
   detectFormat,
