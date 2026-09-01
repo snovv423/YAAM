@@ -249,16 +249,16 @@
 
 // Современная загрузка фотографии.
 //
-// Здесь НЕТ synthetic .click() по input: плитка — это <label for>, поэтому
-// системный выбор файла открывается настоящим trusted-жестом пользователя
-// (иначе Safari/iOS вправе его заблокировать), а на телефоне появляется
-// штатный chooser «Медиатека / Снять фото / Обзор». Сам <input type="file">
-// остаётся в разметке и лишь визуально скрыт классом .visually-hidden —
-// не display:none и не hidden, чтобы он оставался фокусируемым с клавиатуры.
+// Здесь НЕТ synthetic .click() по input: плитка содержит сам <input
+// type="file">, растянутый на всю её площадь и прозрачный, поэтому системный
+// выбор файла открывается настоящим trusted-жестом пользователя (иначе
+// Safari/iOS вправе его заблокировать), а на телефоне появляется штатный
+// chooser «Медиатека / Снять фото / Обзор».
 //
-// Скрипт только показывает превью выбранного файла и локальную ошибку. Если
-// JS отключён, форма отправляется как обычная multipart-форма, а обязательность
-// файла обеспечивает атрибут required.
+// Скрипт показывает превью выбранного файла, локальную ошибку и держит кнопку
+// «Загрузить» выключенной, пока файл не выбран. Если JS отключён, форма
+// отправляется как обычная multipart-форма (кнопка остаётся активной, её
+// выключает только скрипт), а обязательность файла обеспечивает required.
 (function () {
   var forms = document.querySelectorAll('[data-photo-upload]');
   if (!forms.length) return;
@@ -274,7 +274,19 @@
     var clear = form.querySelector('[data-upload-clear]');
     var busy = form.querySelector('[data-upload-busy]');
     var errorEl = form.querySelector('[data-upload-error]');
+    var submitBtn = form.querySelector('[data-upload-submit]');
     if (!input || !tile || !selected || !thumb) return;
+
+    // «Загрузить» до выбора файла раньше выглядела рабочей, но нажатие не
+    // делало ничего: браузер блокировал отправку из-за required у скрытого
+    // input и не показывал подсказку. Кнопка включается только при выбранном
+    // файле — и включается ИЗ СКРИПТА, чтобы без JS форма осталась обычной
+    // рабочей multipart-формой (её проверяет сервер).
+    function setSubmitEnabled(enabled) {
+      if (!submitBtn) return;
+      submitBtn.disabled = !enabled;
+    }
+    setSubmitEnabled(false);
 
     var maxBytes = Number(form.getAttribute('data-max-bytes')) || 0;
     var objectUrl = null;
@@ -299,6 +311,7 @@
       thumb.removeAttribute('src');
       if (nameEl) nameEl.textContent = '';
       if (busy) busy.hidden = true;
+      setSubmitEnabled(false);
     }
 
     function accept(file) {
@@ -329,14 +342,15 @@
       tile.hidden = true;
       selected.hidden = false;
       if (busy) busy.hidden = true;
-      accept(file);
+      setSubmitEnabled(accept(file));
     });
 
     if (clear) {
       clear.addEventListener('click', function () {
         reset();
         showError('');
-        tile.focus();
+        // Фокус возвращается на сам input — он и есть кликабельная плитка.
+        input.focus();
       });
     }
 
@@ -441,16 +455,32 @@
   var lists = document.querySelectorAll('[data-reorder]');
   if (!lists.length) return;
 
+  // Списки вложены друг в друга: ul[data-reorder=items] лежит внутри
+  // details.cat-block, который сам является строкой .cat-list[data-reorder=
+  // categories]. Поэтому строку НЕЛЬЗЯ искать как closest('.cat-block') ||
+  // closest('.dish-row'): для handle блюда первый селектор попадал в
+  // родительскую категорию, и «перетаскивание блюда» на деле таскало всю
+  // категорию, а pointerdown всплывал ОБОИМ спискам сразу — сервер получал
+  // два POST-а (это видно в production access-логе: reorder-categories и
+  // reorder-items приходили парой), а порядок не менялся ни там, ни там.
+  var ROW_SELECTOR = { categories: '.cat-block', items: '.dish-row' };
+
+  function rowSelector(list) {
+    return ROW_SELECTOR[list.getAttribute('data-reorder')] || null;
+  }
+
   function itemsOf(list) {
-    return Array.prototype.slice.call(
-      list.getAttribute('data-reorder') === 'categories'
-        ? list.querySelectorAll(':scope > .cat-block')
-        : list.querySelectorAll(':scope > .dish-row')
-    );
+    var selector = rowSelector(list);
+    if (!selector) return [];
+    return Array.prototype.slice.call(list.querySelectorAll(':scope > ' + selector));
   }
 
   function idOf(el) {
     return el.getAttribute('data-category-id') || el.getAttribute('data-item-id');
+  }
+
+  function orderOf(list) {
+    return itemsOf(list).map(idOf).filter(Boolean).join(',');
   }
 
   function persist(list) {
@@ -459,44 +489,149 @@
     var tokenInput = document.querySelector('input[name="_csrf"]');
     if (!tokenInput) return;
     var order = itemsOf(list).map(idOf).filter(Boolean);
+    list.classList.add('reorder-saving');
     fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify({ _csrf: tokenInput.value, order: order })
-    }).catch(function () { /* порядок применится при следующей попытке; страница не ломается */ });
+    }).then(function (response) {
+      if (!response.ok) throw new Error('reorder failed');
+      list.classList.remove('reorder-saving');
+    }).catch(function () {
+      // Порядок на экране остаётся новым, но владелец должен видеть, что на
+      // сервер он не доехал: молча расходиться экран и БД не должны.
+      list.classList.remove('reorder-saving');
+      list.classList.add('reorder-failed');
+      setTimeout(function () { list.classList.remove('reorder-failed'); }, 4000);
+    });
+  }
+
+  // Куда вставить перетаскиваемую строку: сравниваем указатель с серединами
+  // СОСЕДЕЙ. Через elementFromPoint делать это нельзя — приподнятая строка
+  // сама находится под курсором и перекрывает цель.
+  function placeBy(list, row, clientY) {
+    var siblings = itemsOf(list).filter(function (el) { return el !== row; });
+    var before = null;
+    for (var i = 0; i < siblings.length; i++) {
+      var rect = siblings[i].getBoundingClientRect();
+      if (clientY < rect.top + rect.height / 2) { before = siblings[i]; break; }
+    }
+    if (before) {
+      if (row.nextElementSibling !== before) list.insertBefore(row, before);
+    } else if (list.lastElementChild !== row) {
+      list.appendChild(row);
+    }
   }
 
   lists.forEach(function (list) {
     list.addEventListener('pointerdown', function (event) {
-      var handle = event.target.closest('.drag-handle');
-      if (!handle || !list.contains(handle)) return;
-      var row = handle.closest('.cat-block') || handle.closest('.dish-row');
-      if (!row) return;
+      if (event.button !== undefined && event.button !== 0) return;
+      var handle = event.target.closest && event.target.closest('.drag-handle');
+      if (!handle) return;
+      // Событие обрабатывает ТОЛЬКО ближайший к handle список — иначе
+      // внешний список категорий тоже начал бы тащить свою строку.
+      if (handle.closest('[data-reorder]') !== list) return;
+      var selector = rowSelector(list);
+      if (!selector) return;
+      var row = handle.closest(selector);
+      if (!row || row.parentNode !== list) return;
+
       event.preventDefault();
-      handle.setPointerCapture(event.pointerId);
+      event.stopPropagation();
+
+      var orderBefore = orderOf(list);
+      var pointerId = event.pointerId;
+      // Все расчёты — в координатах документа: во время жеста страница может
+      // прокручиваться (см. tick ниже), и viewport-координаты «уехали» бы
+      // вместе с ней, отрывая строку от пальца.
+      var startPageY = event.clientY + window.scrollY;
+      var startTopDoc = row.getBoundingClientRect().top + window.scrollY;
+      var lastClientY = event.clientY;
+      var moved = false;
+      var rafId = 0;
+
+      // Захват на самом списке, а не на handle: insertBefore на мгновение
+      // вынимает строку из документа, и захват, висевший на handle внутри
+      // неё, браузер сбросил бы прямо посреди жеста (палец «отрывался» бы от
+      // строки после первой же перестановки).
+      try { list.setPointerCapture(pointerId); } catch (e) { /* мышь без захвата тоже работает */ }
       row.classList.add('dragging');
+      list.classList.add('is-reordering');
+      document.documentElement.classList.add('is-reordering');
+
+      function follow(clientY) {
+        row.style.transform = '';
+        var currentTopDoc = row.getBoundingClientRect().top + window.scrollY;
+        var pageY = clientY + window.scrollY;
+        row.style.transform = 'translateY(' + (startTopDoc + (pageY - startPageY) - currentTopDoc) + 'px)';
+      }
+
+      function apply(clientY) {
+        placeBy(list, row, clientY);
+        follow(clientY);
+      }
+
+      // Длинный список (или раскрытая категория) не помещается на экран, а
+      // палец во время жеста «прибит» к строке — без автопрокрутки у края
+      // переставить элемент дальше видимой области было бы невозможно.
+      function tick() {
+        rafId = window.requestAnimationFrame(tick);
+        if (!moved) return;
+        var edge = 72;
+        var speed = 0;
+        if (lastClientY < edge) speed = -Math.ceil((edge - lastClientY) / 5);
+        else if (lastClientY > window.innerHeight - edge) speed = Math.ceil((lastClientY - (window.innerHeight - edge)) / 5);
+        if (!speed) return;
+        var scrollBefore = window.scrollY;
+        window.scrollBy(0, speed);
+        if (window.scrollY !== scrollBefore) apply(lastClientY);
+      }
 
       function onMove(moveEvent) {
-        var target = document.elementFromPoint(moveEvent.clientX, moveEvent.clientY);
-        if (!target) return;
-        var overRow = target.closest('.cat-block') || target.closest('.dish-row');
-        if (!overRow || overRow === row || overRow.parentNode !== list) return;
-        var rect = overRow.getBoundingClientRect();
-        var after = moveEvent.clientY > rect.top + rect.height / 2;
-        list.insertBefore(row, after ? overRow.nextSibling : overRow);
+        if (moveEvent.pointerId !== pointerId) return;
+        moveEvent.preventDefault();
+        lastClientY = moveEvent.clientY;
+        if (!moved && Math.abs(moveEvent.clientY + window.scrollY - startPageY) < 3) return;
+        moved = true;
+        apply(moveEvent.clientY);
       }
 
-      function onUp() {
+      function onUp(upEvent) {
+        if (upEvent && upEvent.pointerId !== undefined && upEvent.pointerId !== pointerId) return;
+        window.removeEventListener('pointermove', onMove, true);
+        window.removeEventListener('pointerup', onUp, true);
+        window.removeEventListener('pointercancel', onUp, true);
+        if (rafId) window.cancelAnimationFrame(rafId);
+        try { list.releasePointerCapture(pointerId); } catch (e) { /* уже отпущен */ }
+        row.style.transform = '';
         row.classList.remove('dragging');
-        handle.removeEventListener('pointermove', onMove);
-        handle.removeEventListener('pointerup', onUp);
-        handle.removeEventListener('pointercancel', onUp);
-        persist(list);
+        list.classList.remove('is-reordering');
+        document.documentElement.classList.remove('is-reordering');
+        if (moved && orderOf(list) !== orderBefore) persist(list);
+        if (moved) {
+          // Категория — это <summary> внутри <details>: клик, завершающий
+          // перетаскивание, иначе свернул бы/развернул бы только что
+          // переставленную категорию. Перехват снимается и по таймеру —
+          // после тач-жеста клик может не прийти вовсе, и «съеденным»
+          // оказался бы следующий обычный клик пользователя.
+          var swallow = function (clickEvent) {
+            clickEvent.preventDefault();
+            clickEvent.stopPropagation();
+            release();
+          };
+          var release = function () {
+            window.removeEventListener('click', swallow, true);
+            window.clearTimeout(swallowTimer);
+          };
+          var swallowTimer = window.setTimeout(release, 350);
+          window.addEventListener('click', swallow, true);
+        }
       }
 
-      handle.addEventListener('pointermove', onMove);
-      handle.addEventListener('pointerup', onUp);
-      handle.addEventListener('pointercancel', onUp);
+      window.addEventListener('pointermove', onMove, true);
+      window.addEventListener('pointerup', onUp, true);
+      window.addEventListener('pointercancel', onUp, true);
+      rafId = window.requestAnimationFrame(tick);
     });
   });
 })();

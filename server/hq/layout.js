@@ -246,11 +246,32 @@ function layout({ title, active, body, csrfToken, linkBasePath = '/hq' }) {
   /* Handle перетаскивания — рисуется CSS (две колонки точек), без символов
      и иконочных шрифтов. Отдельный маленький handle, а не вся строка:
      иначе на мобильном обычная прокрутка переставляла бы элементы. */
-  .drag-handle{flex:0 0 auto;width:16px;height:20px;cursor:grab;touch-action:none;
+  /* Точки рисуются в content-box 16x20, а кликабельная/тапабельная площадь
+     увеличена padding'ом до 32x44 (минимальный комфортный размер для пальца);
+     отрицательные margin'ы возвращают элементу прежнее место в потоке, так
+     что вёрстка строки не меняется. */
+  .drag-handle{flex:0 0 auto;box-sizing:content-box;width:16px;height:20px;
+    padding:12px 8px;margin:-12px -8px;cursor:grab;touch-action:none;
     background-image:radial-gradient(circle,var(--txt2) 1px,transparent 1px);
-    background-size:5px 5px;background-position:2px 3px;background-repeat:repeat;opacity:.5}
+    background-size:5px 5px;background-position:2px 3px;background-repeat:repeat;
+    background-origin:content-box;background-clip:content-box;opacity:.5}
   .drag-handle:active{cursor:grabbing}
-  .dragging{opacity:.5}
+  .drag-handle:hover{opacity:.85}
+  /* Перетаскиваемая строка приподнята и следует за указателем через
+     transform; соседи при этом переставляются в потоке. Никаких transition
+     на transform у .dragging быть не должно — иначе строка тянется за
+     пальцем с задержкой. */
+  .dragging{position:relative;z-index:5;opacity:.9;cursor:grabbing;
+    box-shadow:0 14px 34px rgba(0,0,0,.45);border-radius:12px;
+    background:var(--panel);will-change:transform}
+  .cat-list.is-reordering>.cat-block:not(.dragging),
+  .dish-list.is-reordering>.dish-row:not(.dragging){transition:transform .16s ease}
+  /* Во время жеста ничего не выделяется и ссылка блюда не перехватывает
+     указатель — иначе браузер начинает «тащить» текст или ссылку. */
+  html.is-reordering{user-select:none;-webkit-user-select:none}
+  html.is-reordering .dish-link,html.is-reordering .cat-summary{pointer-events:none}
+  .reorder-saving{opacity:.92}
+  .reorder-failed{outline:2px solid rgba(220,80,80,.75);outline-offset:4px;border-radius:12px}
 
   .dish-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}
   .dish-row{display:flex;align-items:center;gap:8px;padding:6px 0}
@@ -435,10 +456,10 @@ function layout({ title, active, body, csrfToken, linkBasePath = '/hq' }) {
   .photo-section-title{font-weight:700;margin-bottom:6px}
   .photo-meta{font-size:12px;color:var(--txt2);margin-bottom:16px}
 
-  /* Загрузка фотографии. Настоящий <input type="file"> остаётся в DOM и
-     фокусируется с клавиатуры — он лишь снят с потока .visually-hidden;
-     display:none/hidden сделали бы его недоступным. Плитка — это <label for>,
-     поэтому системный диалог открывается настоящим действием пользователя. */
+  /* Загрузка фотографии. Настоящий <input type="file"> лежит ВНУТРИ плитки и
+     сам является её кликабельной поверхностью (см. .upload-tile input ниже):
+     системный диалог открывается настоящим действием пользователя прямо по
+     контролу, без посредника label[for] и без обрезанного до 1×1 элемента. */
   .visually-hidden{position:absolute!important;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
   /* Правила ниже задают display:flex у элементов, которые скрываются
      атрибутом hidden. Авторский display перебивает display:none из UA-таблицы,
@@ -450,7 +471,16 @@ function layout({ title, active, body, csrfToken, linkBasePath = '/hq' }) {
   .upload-tile{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;width:128px;height:128px;border-radius:14px;border:1.5px dashed rgba(255,255,255,.28);background:rgba(255,255,255,.035);color:var(--txt2);font-size:12px;font-weight:700;line-height:1.25;text-align:center;cursor:pointer;margin:0;text-transform:none;letter-spacing:0;transition:border-color .18s,background .18s,color .18s}
   .upload-tile:hover{border-color:var(--amber);color:var(--txt);background:rgba(255,154,46,.07)}
   .upload-plus{font-size:30px;font-weight:400;line-height:1;color:var(--amber)}
-  .visually-hidden:focus-visible+.upload-row .upload-tile,.upload-tile:focus-within{outline:2px solid var(--amber);outline-offset:2px}
+  /* Сам <input type="file"> и есть кликабельная поверхность плитки: он лежит
+     внутри неё, прозрачен и растянут на всю площадь. Так открытие системного
+     выбора файла не зависит ни от совпадения id с label[for], ни от того,
+     считает ли браузер обрезанный до 1×1 контрол пригодным для активации и
+     для нативной валидации required. Ширину/высоту задаёт плитка, поэтому
+     менять их в media-запросах по-прежнему достаточно у .upload-tile. */
+  .upload-tile{position:relative}
+  .upload-tile input[type=file]{position:absolute;inset:0;width:100%;height:100%;margin:0;padding:0;opacity:0;cursor:pointer;font-size:0}
+  .upload-tile:focus-within{outline:2px solid var(--amber);outline-offset:2px;border-color:var(--amber)}
+  .upload-submit[disabled]{opacity:.45;cursor:not-allowed}
   .upload-selected{display:flex;flex-direction:column;gap:6px;max-width:128px}
   .upload-thumb{position:relative;width:128px;height:128px;border-radius:14px;overflow:hidden;border:1px solid var(--bord);background:#101614}
   .upload-thumb img{display:block;width:100%;height:100%;object-fit:cover}

@@ -121,21 +121,26 @@ function photoCard({ photo, actionBase, csrfToken, dishCrops, index }) {
 }
 
 // Современная загрузка вместо стандартного «Выберите файл | Файл не выбран».
-// Настоящий <input type="file"> сохранён — он лишь визуально скрыт классом
-// .visually-hidden (не display:none и не hidden: такой input недоступен с
-// клавиатуры) и связан с плиткой через label[for]. Никакого синтетического
-// .click() — открытие системного выбора файла остаётся trusted-действием
-// пользователя, поэтому на iOS появляется штатный chooser «Фото/Файлы».
+// Настоящий <input type="file"> ЛЕЖИТ ВНУТРИ плитки и занимает её целиком,
+// будучи прозрачным (см. .upload-tile input в layout.js). Раньше он был
+// соседом плитки, обрезался до 1×1 классом .visually-hidden, а клик доходил
+// до него только через label[for=id]: вся загрузка держалась на совпадении
+// id, на активации label и на том, что невидимый контрол остаётся кликабельным
+// и фокусируемым для нативной валидации. Теперь клик по плитке — это клик по
+// самому input: никакого посредника, никакого синтетического .click(),
+// открытие системного выбора файла остаётся trusted-действием пользователя
+// (на iOS по-прежнему появляется штатный chooser «Фото/Файлы»), а required
+// показывает нормальную подсказку, потому что контрол реального размера.
 function uploadControl({ uploadAction, csrfToken, actionBase, error }) {
   const inputId = domId('photo-file', actionBase);
   return `
     <form class="photo-upload" method="post" action="${uploadAction}" enctype="multipart/form-data" data-photo-upload data-max-bytes="${MAX_SOURCE_BYTES}">
       <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
-      <input class="visually-hidden" id="${inputId}" type="file" name="photo" accept="${ACCEPT_MIME}" required data-upload-input>
       <div class="upload-row">
-        <label class="upload-tile" for="${inputId}" data-upload-tile>
+        <label class="upload-tile" data-upload-tile>
           <span class="upload-plus" aria-hidden="true">+</span>
           <span class="upload-tile-text">Добавить фото</span>
+          <input id="${inputId}" type="file" name="photo" accept="${ACCEPT_MIME}" required data-upload-input>
         </label>
         <div class="upload-selected" data-upload-selected hidden>
           <div class="upload-thumb">
@@ -145,7 +150,7 @@ function uploadControl({ uploadAction, csrfToken, actionBase, error }) {
           </div>
           <span class="upload-filename" data-upload-name></span>
         </div>
-        <button type="submit" class="upload-submit" data-busy-text="Загрузка…">Загрузить</button>
+        <button type="submit" class="upload-submit" data-upload-submit data-busy-text="Загрузка…">Загрузить</button>
       </div>
       <p class="upload-error${error ? ' is-visible' : ''}" data-upload-error role="alert">${error ? esc(error) : ''}</p>
     </form>`;

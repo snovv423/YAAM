@@ -134,23 +134,43 @@ test('strict cover сохранён: кадр всегда покрыт, мас�
 test('старый длинный native file input не отображается, но остаётся доступным', () => {
   const html = dishHtml();
   assert.doesNotMatch(html, /Новая фотография/);
-  assert.match(html, /<input class="visually-hidden" id="photo-file-hq-items-1-photos" type="file" name="photo"/);
-  // Именно visually-hidden, а не display:none/hidden: скрытый этими
-  // способами input недоступен с клавиатуры.
-  assert.match(layout, /\.visually-hidden\{position:absolute!important/);
-  assert.doesNotMatch(html, /class="visually-hidden"[^>]*hidden(?:>|\s)/);
+  assert.match(html, /id="photo-file-hq-items-1-photos" type="file" name="photo"/);
   assert.doesNotMatch(html, /type="file"[^>]*disabled/);
 });
 
-test('плитка загрузки — label, связанный с input: системный диалог открывается trusted-жестом', () => {
+test('плитка загрузки — это сам input: системный диалог открывается trusted-жестом', () => {
   const html = dishHtml();
-  const forMatch = /<label class="upload-tile" for="([^"]+)"/.exec(html);
-  assert.ok(forMatch, 'плитка должна быть label с атрибутом for');
-  assert.match(html, new RegExp(`id="${forMatch[1]}" type="file"`));
+  // Input лежит ВНУТРИ плитки и занимает её целиком. Прежняя схема (input —
+  // сосед плитки, обрезанный до 1×1 классом .visually-hidden, клик доходил
+  // до него только через label[for=id]) держалась на активации label и на
+  // том, что невидимый контрол остаётся кликабельным; на production desktop
+  // выбор файла так и не открывался. Теперь посредника между кликом и
+  // контролом нет.
+  const tile = /<label class="upload-tile"([^>]*)>([\s\S]*?)<\/label>/.exec(html);
+  assert.ok(tile, 'плитка должна быть label');
+  assert.doesNotMatch(tile[1], /\bfor=/, 'плитке больше не нужен label[for]');
+  assert.match(tile[2], /<input id="photo-file-hq-items-1-photos" type="file"/);
+  assert.doesNotMatch(html, /<input class="visually-hidden"[^>]*type="file"/);
   assert.match(html, /Добавить фото/);
+  // Кликабельная поверхность — сам контрол, растянутый на всю плитку.
+  assert.match(layout, /\.upload-tile input\[type=file\]\{[^}]*position:absolute[^}]*opacity:0/);
+  assert.match(layout, /\.upload-tile\{position:relative\}/);
   // Синтетический .click() по input браузер вправе заблокировать — его быть
-  // не должно, открытие диалога обеспечивает связка label/for.
+  // не должно.
   assert.doesNotMatch(script, /uploadInput\.click\(\)|input\.click\(\)/);
+});
+
+test('«Загрузить» до выбора файла выключена скриптом, но в разметке остаётся рабочей без JS', () => {
+  const html = dishHtml();
+  // В HTML кнопка НЕ disabled: без JS форма обязана оставаться обычной
+  // рабочей multipart-формой.
+  assert.match(html, /<button type="submit" class="upload-submit" data-upload-submit[^>]*>Загрузить<\/button>/);
+  assert.doesNotMatch(html, /class="upload-submit"[^>]*disabled/);
+  // Скрипт выключает её на старте и включает только на принятом файле —
+  // иначе нажатие на «Загрузить» с пустым input не делало ровно ничего:
+  // браузер блокировал отправку из-за required и не показывал подсказку.
+  assert.match(script, /setSubmitEnabled\(false\)/);
+  assert.match(script, /setSubmitEnabled\(accept\(file\)\)/);
 });
 
 test('после выбора файла показывается миниатюра, а не имя файла', () => {
