@@ -616,7 +616,7 @@ async function doOpenRest(id){
     const heroSrc=mGallery.length?mGallery[0].full:(curRest.photoUrl||U(curRest.im,900));
     const img=new Image();img.src=heroSrc;img.alt=mGallery.length?(mGallery[0].alt||''):'';img.onerror=function(){h.classList.add('nophoto');this.remove()};h.insertBefore(img,h.firstChild);
   }
-  renderGallery('m',mGallery,false);
+  renderGallery('m',mGallery);
   document.getElementById('m-name').textContent=curRest.name;
   const showRating=curRest.votes>=RATING_MIN_VOTES;
   document.getElementById('m-meta').innerHTML=`${showRating?`<span>★ ${curRest.rate} · ${curRest.votes}</span>`:''}<span>Часы: ${curRest.hours}</span>`;
@@ -1228,32 +1228,49 @@ function swapHero(id,i){
   document.querySelectorAll('#d-gallery .thumb').forEach((t,j)=>t.classList.toggle('on',j===i));
 }
 
-// YAAM HQ Stage 5B — реальная многофотографийная галерея (ресторан/блюдо),
-// без сторонних библиотек: тумб-стрип с горизонтальным нативным скроллом
-// (свайп на мобильном "бесплатно"), плюс явные кнопки-стрелки и счётчик
-// поверх hero (задание, раздел 9/10 — swipe не единственный способ листать,
-// стрелки/счётчик обязательны, ничего из этого не показывается при одной
-// фотографии). prefix — 'm' (ресторан, #m-hero/#m-gallery/#m-gprev/...) или
-// 'd' (блюдо, #d-hero/#d-gallery/...). Кнопки-тумбы — реальные <button>, а
-// не <div onclick>, ради клавиатурной доступности (задание, раздел 10).
+// Реальная многофотографийная галерея без сторонних библиотек: большой кадр,
+// счётчик и нативно прокручиваемый тумб-стрип. На экране блюда большой кадр
+// листается горизонтальным свайпом; пассивные touch-listeners не блокируют
+// вертикальный скролл страницы. Кнопки-тумбы остаются клавиатурно доступными.
 let galleryState={};
-// showArrows=false для 'm' (шапка ресторана): там поверх hero уже лежит
-// название переменной высоты (.hero-info, до 2 строк) — стрелки поверх
-// низкого 190px-hero рисковали бы перекрывать длинные названия. Тумб-стрип
-// под hero уже даёт равноценную не-swipe навигацию (клик по любой миниатюре),
-// поэтому явные стрелки для 'm' не показываются, только счётчик (он в
-// верхнем углу, вне зоны заголовка). У 'd' (блюдо) своего наложенного
-// текста на hero нет — стрелки включены.
-function renderGallery(prefix,photos,showArrows){
+let gallerySwipeCleanup={};
+function bindGallerySwipe(prefix,enabled){
+  if(gallerySwipeCleanup[prefix]){
+    gallerySwipeCleanup[prefix]();
+    delete gallerySwipeCleanup[prefix];
+  }
+  if(prefix!=='d'||!enabled)return;
+  const hero=document.getElementById(prefix+'-hero');
+  if(!hero)return;
+  let start=null;
+  const onStart=e=>{
+    if(!e.touches||e.touches.length!==1){start=null;return;}
+    start={x:e.touches[0].clientX,y:e.touches[0].clientY};
+  };
+  const onEnd=e=>{
+    if(!start||!e.changedTouches||!e.changedTouches.length){start=null;return;}
+    const touch=e.changedTouches[0];
+    const dx=touch.clientX-start.x;
+    const dy=touch.clientY-start.y;
+    start=null;
+    if(Math.abs(dx)<48||Math.abs(dx)<=Math.abs(dy)*1.2)return;
+    galleryStep(prefix,dx<0?1:-1);
+  };
+  const onCancel=()=>{start=null;};
+  hero.addEventListener('touchstart',onStart,{passive:true});
+  hero.addEventListener('touchend',onEnd,{passive:true});
+  hero.addEventListener('touchcancel',onCancel,{passive:true});
+  gallerySwipeCleanup[prefix]=()=>{
+    hero.removeEventListener('touchstart',onStart);
+    hero.removeEventListener('touchend',onEnd);
+    hero.removeEventListener('touchcancel',onCancel);
+  };
+}
+function renderGallery(prefix,photos){
   galleryState[prefix]={photos:photos||[],index:0};
   const stripEl=document.getElementById(prefix+'-gallery');
-  const prevBtn=document.getElementById(prefix+'-gprev');
-  const nextBtn=document.getElementById(prefix+'-gnext');
   const countEl=document.getElementById(prefix+'-gcount');
   const multi=galleryState[prefix].photos.length>1;
-  const arrowsOn=multi&&showArrows!==false;
-  if(prevBtn)prevBtn.style.display=arrowsOn?'flex':'none';
-  if(nextBtn)nextBtn.style.display=arrowsOn?'flex':'none';
   if(countEl)countEl.style.display=multi?'block':'none';
   if(stripEl){
     stripEl.innerHTML=multi?galleryState[prefix].photos.map((p,i)=>
@@ -1261,19 +1278,22 @@ function renderGallery(prefix,photos,showArrows){
     ).join(''):'';
   }
   gallerySet(prefix,0);
+  bindGallerySwipe(prefix,multi);
 }
 function gallerySet(prefix,i){
   const st=galleryState[prefix];
   const n=st?st.photos.length:0;
   if(!n)return;
-  const idx=((i%n)+n)%n;
+  const idx=Math.max(0,Math.min(n-1,i));
   st.index=idx;
   const photo=st.photos[idx];
   const heroImg=document.querySelector('#'+prefix+'-hero img');
   if(heroImg){heroImg.src=photo.full;heroImg.alt=photo.alt||'';}
   if(heroImg)applyFilledCrop(heroImg,photo.crops&&photo.crops.dish_detail,photo.rotation);
   const stripEl=document.getElementById(prefix+'-gallery');
-  if(stripEl)stripEl.querySelectorAll('.thumb').forEach((t,j)=>t.classList.toggle('on',j===idx));
+  let activeThumb=null;
+  if(stripEl)stripEl.querySelectorAll('.thumb').forEach((t,j)=>{t.classList.toggle('on',j===idx);if(j===idx)activeThumb=t;});
+  if(activeThumb&&typeof activeThumb.scrollIntoView==='function')activeThumb.scrollIntoView({behavior:'smooth',block:'nearest',inline:'center'});
   const countEl=document.getElementById(prefix+'-gcount');
   if(countEl&&n>1)countEl.textContent=(idx+1)+' / '+n;
 }

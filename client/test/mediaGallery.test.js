@@ -8,6 +8,8 @@
 // (node:vm), не переписанную копию.
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const { createSandbox, loadAppInSandbox, evalInContext, teardown } = require('./helpers/loadApp');
 
 function freshApp(opts) {
@@ -135,13 +137,22 @@ test('renderGallery: несколько фото — тумб-стрип из н
   teardown(sandbox);
 });
 
-test('renderGallery: одна фотография — тумб-стрип пуст, стрелки и счётчик скрыты (задание: "no unnecessary arrows")', () => {
+test('public markup and CSS remove circular gallery arrows and keep vertical touch scrolling', () => {
+  const clientDir = path.join(__dirname, '..');
+  const html = fs.readFileSync(path.join(clientDir, 'index.html'), 'utf8');
+  const css = fs.readFileSync(path.join(clientDir, 'css', 'style.css'), 'utf8');
+  assert.doesNotMatch(html, /class="gnav|id="[md]-g(?:prev|next)"/);
+  assert.doesNotMatch(css, /\.gnav/);
+  const dishHeroRule = css.match(/\.dhero\{[^}]*\}/)?.[0] || '';
+  assert.match(dishHeroRule, /touch-action:pan-y pinch-zoom/);
+  assert.doesNotMatch(dishHeroRule, /touch-action\s*:\s*none/);
+});
+
+test('renderGallery: одна фотография — тумб-стрип и счётчик скрыты', () => {
   const sandbox = freshApp({ apiBaseUrl: 'https://api-pg.yaam.su' });
   setDishWithGallery(sandbox, [apiPhotoNormalized('solo', 'Единственное фото')]);
   evalInContext(sandbox, "openDish('0_0')");
   assert.equal(sandbox.document.getElementById('d-gallery').innerHTML, '');
-  assert.equal(sandbox.document.getElementById('d-gprev').style.display, 'none');
-  assert.equal(sandbox.document.getElementById('d-gnext').style.display, 'none');
   assert.equal(sandbox.document.getElementById('d-gcount').style.display, 'none');
   teardown(sandbox);
 });
@@ -156,30 +167,64 @@ test('renderGallery: без фото вовсе — nophoto-заглушка, г
   teardown(sandbox);
 });
 
-test('renderGallery: prefix "m" (ресторан) — стрелки принудительно скрыты даже при нескольких фото, счётчик остаётся', () => {
+test('renderGallery: prefix "m" (ресторан) — счётчик и thumbnails остаются', () => {
   const sandbox = freshApp({ apiBaseUrl: 'https://api-pg.yaam.su' });
-  evalInContext(sandbox, `renderGallery('m', ${toContextLiteral([apiPhotoNormalized('x', 'X'), apiPhotoNormalized('y', 'Y')])}, false)`);
-  assert.equal(sandbox.document.getElementById('m-gprev').style.display, 'none');
-  assert.equal(sandbox.document.getElementById('m-gnext').style.display, 'none');
+  evalInContext(sandbox, `renderGallery('m', ${toContextLiteral([apiPhotoNormalized('x', 'X'), apiPhotoNormalized('y', 'Y')])})`);
   assert.equal(sandbox.document.getElementById('m-gcount').style.display, 'block');
+  assert.match(sandbox.document.getElementById('m-gallery').innerHTML, /Фото 2 из 2/);
   teardown(sandbox);
 });
 
-test('gallerySet/galleryStep: счётчик обновляется и индекс оборачивается по модулю (нет выхода за границы)', () => {
+test('gallerySet/galleryStep: hero, счётчик и active thumbnail синхронны, края не зацикливаются', () => {
   const sandbox = freshApp({ apiBaseUrl: 'https://api-pg.yaam.su' });
-  evalInContext(sandbox, `renderGallery('d', ${toContextLiteral([apiPhotoNormalized('a', ''), apiPhotoNormalized('b', ''), apiPhotoNormalized('c', '')])}, true)`);
+  const heroImg = sandbox.document.createElement('img');
+  sandbox.document.querySelector = selector => selector === '#d-hero img' ? heroImg : sandbox.document.createElement('div');
+  evalInContext(sandbox, `renderGallery('d', ${toContextLiteral([apiPhotoNormalized('a', ''), apiPhotoNormalized('b', ''), apiPhotoNormalized('c', '')])})`);
+  const thumbs = [sandbox.document.createElement('button'), sandbox.document.createElement('button'), sandbox.document.createElement('button')];
+  sandbox.document.getElementById('d-gallery').querySelectorAll = selector => selector === '.thumb' ? thumbs : [];
   assert.equal(sandbox.document.getElementById('d-gcount').textContent, '1 / 3');
   evalInContext(sandbox, "galleryStep('d', 1)");
   assert.equal(sandbox.document.getElementById('d-gcount').textContent, '2 / 3');
+  assert.equal(heroImg.src, 'https://cdn.test/b-full.webp');
+  assert.equal(thumbs[1].classList.contains('on'), true);
+  assert.equal(thumbs[0].classList.contains('on'), false);
   evalInContext(sandbox, "galleryStep('d', 1)");
   assert.equal(sandbox.document.getElementById('d-gcount').textContent, '3 / 3');
-  // Следующий шаг должен обернуться на первую фотографию, не бросить и не
-  // застрять на "4 / 3".
   evalInContext(sandbox, "galleryStep('d', 1)");
-  assert.equal(sandbox.document.getElementById('d-gcount').textContent, '1 / 3');
-  // Шаг назад с первой фотографии — на последнюю (модуль, не отрицательный индекс).
+  assert.equal(sandbox.document.getElementById('d-gcount').textContent, '3 / 3');
+  evalInContext(sandbox, "gallerySet('d', 0)");
   evalInContext(sandbox, "galleryStep('d', -1)");
+  assert.equal(sandbox.document.getElementById('d-gcount').textContent, '1 / 3');
+  evalInContext(sandbox, "gallerySet('d', 2)");
   assert.equal(sandbox.document.getElementById('d-gcount').textContent, '3 / 3');
+  assert.equal(thumbs[2].classList.contains('on'), true);
+  assert.equal(heroImg.src, 'https://cdn.test/c-full.webp');
+  teardown(sandbox);
+});
+
+test('dish hero swipe changes photo horizontally, ignores vertical scroll gesture, and does not duplicate listeners', () => {
+  const sandbox = freshApp({ apiBaseUrl: 'https://api-pg.yaam.su' });
+  const photos = [apiPhotoNormalized('a', ''), apiPhotoNormalized('b', ''), apiPhotoNormalized('c', '')];
+  evalInContext(sandbox, `renderGallery('d', ${toContextLiteral(photos)})`);
+  evalInContext(sandbox, `renderGallery('d', ${toContextLiteral(photos)})`);
+  const hero = sandbox.document.getElementById('d-hero');
+  const count = sandbox.document.getElementById('d-gcount');
+  hero.dispatchEvent({ type: 'touchstart', touches: [{ clientX: 300, clientY: 200 }] });
+  hero.dispatchEvent({ type: 'touchend', changedTouches: [{ clientX: 120, clientY: 208 }] });
+  assert.equal(count.textContent, '2 / 3', 'swipe left advances exactly once');
+  hero.dispatchEvent({ type: 'touchstart', touches: [{ clientX: 120, clientY: 200 }] });
+  hero.dispatchEvent({ type: 'touchend', changedTouches: [{ clientX: 300, clientY: 205 }] });
+  assert.equal(count.textContent, '1 / 3', 'swipe right returns to previous photo');
+  hero.dispatchEvent({ type: 'touchstart', touches: [{ clientX: 180, clientY: 200 }] });
+  hero.dispatchEvent({ type: 'touchend', changedTouches: [{ clientX: 190, clientY: 360 }] });
+  assert.equal(count.textContent, '1 / 3', 'vertical gesture does not change the gallery');
+  hero.dispatchEvent({ type: 'touchstart', touches: [{ clientX: 300, clientY: 200 }] });
+  hero.dispatchEvent({ type: 'touchend', changedTouches: [{ clientX: 120, clientY: 205 }] });
+  hero.dispatchEvent({ type: 'touchstart', touches: [{ clientX: 300, clientY: 200 }] });
+  hero.dispatchEvent({ type: 'touchend', changedTouches: [{ clientX: 120, clientY: 205 }] });
+  hero.dispatchEvent({ type: 'touchstart', touches: [{ clientX: 300, clientY: 200 }] });
+  hero.dispatchEvent({ type: 'touchend', changedTouches: [{ clientX: 120, clientY: 205 }] });
+  assert.equal(count.textContent, '3 / 3', 'last photo is a hard boundary');
   teardown(sandbox);
 });
 

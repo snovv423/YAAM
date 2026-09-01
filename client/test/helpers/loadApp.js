@@ -58,7 +58,14 @@ function makeFakeElement(id) {
       return {
         add(cls) { set.add(cls); },
         remove(cls) { set.delete(cls); },
-        toggle(cls) { if (set.has(cls)) { set.delete(cls); return false; } set.add(cls); return true; },
+        toggle(cls, force) {
+          if (force !== undefined) {
+            if (force) set.add(cls); else set.delete(cls);
+            return Boolean(force);
+          }
+          if (set.has(cls)) { set.delete(cls); return false; }
+          set.add(cls); return true;
+        },
         contains(cls) { return set.has(cls); },
       };
     })(),
@@ -68,7 +75,14 @@ function makeFakeElement(id) {
     setAttribute(name, value) { this.attributes[name] = String(value); },
     removeAttribute(name) { delete this.attributes[name]; },
     addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
-    removeEventListener() {},
+    removeEventListener(type, fn) {
+      if (!listeners[type]) return;
+      listeners[type] = listeners[type].filter(listener => listener !== fn);
+    },
+    dispatchEvent(event) {
+      for (const listener of listeners[event.type] || []) listener.call(this, event);
+      return true;
+    },
     appendChild() {},
     insertBefore() {},
     querySelector() { return makeFakeElement(id + '__child'); },
@@ -76,6 +90,7 @@ function makeFakeElement(id) {
     animate() {},
     focus() {},
     click() {},
+    scrollIntoView() {},
     closest() { return this; }, // достаточно для validateCheckout() (toggle .err на "ближайшем" поле)
     offsetHeight: 0,
     // Раньше classList.contains() был всегда-false стабом (см. выше), поэтому
