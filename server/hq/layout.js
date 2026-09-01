@@ -340,7 +340,12 @@ function layout({ title, active, body, csrfToken, linkBasePath = '/hq' }) {
      настройки безопасности из Stage 3) — раньше жили только инлайново на
      странице логина; вынесено сюда один раз, чтобы не дублировать в каждом
      новом экране Stage 4. */
-  label{display:block;font-size:12px;color:var(--txt2);font-weight:700;margin:14px 0 6px;text-transform:uppercase}
+  /* Вертикальный ритм формы задаётся здесь один раз, а не отдельными
+     margin у каждого поля: раньше label отбивался от своего input всего на
+     6px и визуально «прилипал» к нему, а соседние строки .row стояли
+     вплотную. Сейчас связка label->input читается как одна группа (8px
+     внутри), а между группами и строками — заметно больший интервал. */
+  label{display:block;font-size:12px;color:var(--txt2);font-weight:700;margin:20px 0 8px;text-transform:uppercase}
   label:first-child{margin-top:0}
   input,select,textarea{width:100%;padding:11px 13px;border-radius:10px;border:1px solid var(--bord);background:rgba(255,255,255,.05);color:var(--txt);font-size:15px;font-family:inherit}
   textarea{resize:vertical;min-height:70px}
@@ -351,8 +356,19 @@ function layout({ title, active, body, csrfToken, linkBasePath = '/hq' }) {
   button:disabled{opacity:.6;cursor:default}
   a.btn{display:inline-block;background:var(--amber);color:#3a1c00;padding:10px 16px;border-radius:10px;text-decoration:none;font-weight:700;font-size:14px}
   a.btn.ghost{background:rgba(255,255,255,.08);color:var(--txt)}
-  .row{display:flex;gap:12px;flex-wrap:wrap}
+  .row{display:flex;gap:16px;flex-wrap:wrap;margin-top:20px}
   .row>*{flex:1;min-width:160px}
+  /* label внутри .row уже отбит самим отступом строки — иначе получалось
+     20px (row) + 20px (label) и «дыра» между блоками Вес/Калории и БЖУ. */
+  .row label{margin-top:0}
+  /* Кнопка сохранения не должна прилипать к последнему полю. */
+  .panel>form>button[type=submit]{margin-top:24px}
+  /* Возврат на родительский экран. Общий паттерн для detail/edit-страниц HQ
+     (renderBackLink) — виден сразу, до заголовка, и не полагается на
+     history.back(): цель всегда явный адрес. */
+  .detail-back{display:inline-flex;align-items:center;gap:6px;margin-bottom:14px;padding:8px 14px;border-radius:10px;background:rgba(255,255,255,.08);color:var(--txt);text-decoration:none;font-weight:700;font-size:13px;min-height:38px}
+  .detail-back:hover{background:rgba(255,255,255,.14)}
+  .detail-back:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
   .error{margin-top:12px;color:var(--danger);font-size:13px}
   .notice{margin-top:12px;color:var(--ok);font-size:13px}
   /* Stage 14 — компактный sheet настроек и поля пароля. */
@@ -408,44 +424,94 @@ function layout({ title, active, body, csrfToken, linkBasePath = '/hq' }) {
   .photo-card:focus-within{box-shadow:0 0 0 3px rgba(255,154,46,.2)}
   .photo-card.is-primary{border:2px solid var(--amber);box-shadow:0 12px 30px rgba(0,0,0,.18)}
   .photo-open{display:block;width:100%;padding:0;border:0;border-radius:14px 14px 0 0;overflow:hidden;background:#101614;position:relative;color:#fff;text-align:left}
-  .photo-open .photo-master-preview{display:block;width:100%;aspect-ratio:4/3;object-fit:cover;object-position:center;background:rgba(255,255,255,.04);transition:transform .2s}
-  .photo-open:hover .photo-master-preview{transform:scale(1.025)}
-  .photo-edit-label{position:absolute;left:10px;right:10px;bottom:10px;padding:8px 10px;border-radius:9px;background:rgba(8,22,16,.84);backdrop-filter:blur(8px);font-size:12px;font-weight:700;text-align:center}
+  .photo-open .photo-master-preview{display:block;width:100%;aspect-ratio:4/3;object-fit:cover;object-position:center;background:rgba(255,255,255,.04)}
   .photo-badge{position:absolute;z-index:2;top:9px;left:9px;background:var(--amber);color:#3a1c00;font-size:10px;font-weight:800;padding:5px 9px;border-radius:999px;letter-spacing:.02em;text-transform:uppercase;box-shadow:0 5px 16px rgba(0,0,0,.25)}
-  .photo-body{padding:10px}
-  .photo-actions{display:flex;flex-wrap:wrap;gap:7px;align-items:center;justify-content:space-between}
+  .photo-body{padding:12px}
+  .photo-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
   .photo-actions form{margin:0}
-  .photo-actions button{padding:7px 10px;font-size:12px}
+  .photo-actions button{padding:8px 11px;font-size:12px}
   .primary-choice{background:transparent!important;color:var(--amber)!important;border:1px solid rgba(255,154,46,.55)!important}
-  .primary-selected{font-size:12px;font-weight:750;color:var(--amber)}
-  .photo-upload{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;margin-top:14px}
-  .photo-upload .field{flex:1 1 320px;min-width:180px}
-  .photo-meta{font-size:12px;color:var(--txt2);margin-top:10px}
+  .primary-selected{display:inline-flex;align-items:center;font-size:12px;font-weight:750;color:var(--amber);padding:8px 0;white-space:nowrap}
+  .photo-section-title{font-weight:700;margin-bottom:6px}
+  .photo-meta{font-size:12px;color:var(--txt2);margin-bottom:16px}
+
+  /* Загрузка фотографии. Настоящий <input type="file"> остаётся в DOM и
+     фокусируется с клавиатуры — он лишь снят с потока .visually-hidden;
+     display:none/hidden сделали бы его недоступным. Плитка — это <label for>,
+     поэтому системный диалог открывается настоящим действием пользователя. */
+  .visually-hidden{position:absolute!important;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
+  /* Правила ниже задают display:flex у элементов, которые скрываются
+     атрибутом hidden. Авторский display перебивает display:none из UA-таблицы,
+     поэтому hidden надо восстановить в правах явно — иначе плитка и её
+     превью показывались бы одновременно, а «Загрузка…» висела бы всегда. */
+  [hidden]{display:none!important}
+  .photo-upload{margin-top:22px}
+  .upload-row{display:flex;flex-wrap:wrap;gap:16px;align-items:flex-end}
+  .upload-tile{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;width:128px;height:128px;border-radius:14px;border:1.5px dashed rgba(255,255,255,.28);background:rgba(255,255,255,.035);color:var(--txt2);font-size:12px;font-weight:700;line-height:1.25;text-align:center;cursor:pointer;margin:0;text-transform:none;letter-spacing:0;transition:border-color .18s,background .18s,color .18s}
+  .upload-tile:hover{border-color:var(--amber);color:var(--txt);background:rgba(255,154,46,.07)}
+  .upload-plus{font-size:30px;font-weight:400;line-height:1;color:var(--amber)}
+  .visually-hidden:focus-visible+.upload-row .upload-tile,.upload-tile:focus-within{outline:2px solid var(--amber);outline-offset:2px}
+  .upload-selected{display:flex;flex-direction:column;gap:6px;max-width:128px}
+  .upload-thumb{position:relative;width:128px;height:128px;border-radius:14px;overflow:hidden;border:1px solid var(--bord);background:#101614}
+  .upload-thumb img{display:block;width:100%;height:100%;object-fit:cover}
+  .upload-clear{position:absolute;top:6px;right:6px;width:26px;height:26px;padding:0;border-radius:50%;border:0;background:rgba(8,22,16,.82)!important;color:#fff!important;font-size:16px;line-height:1;display:flex;align-items:center;justify-content:center;box-shadow:none}
+  .upload-clear:hover{background:rgba(200,60,60,.9)!important}
+  .upload-busy{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(8,22,16,.72);font-size:12px;font-weight:700;color:#fff}
+  .upload-filename{font-size:11px;color:var(--txt2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .upload-submit{align-self:flex-end}
+  .upload-error{display:none;margin:12px 0 0;padding:10px 12px;border-radius:10px;background:rgba(220,80,80,.12);border:1px solid rgba(220,80,80,.4);color:#ffb4b4;font-size:13px}
+  .upload-error.is-visible{display:block}
   .photo-editor{display:none;grid-column:1/-1;margin:0 -1px -1px;padding:20px;border-top:1px solid var(--bord);background:rgba(5,18,12,.55);border-radius:0 0 15px 15px}
   .photo-editor.is-open{display:block}
-  .photo-card:has(.photo-editor.is-open){grid-column:1/-1}
+  /* С раскрытым редактором карточка занимает всю ширину сетки. Превью при
+     этом остаётся компактным, а действия встают рядом с ним — иначе справа
+     от фотографии оставалась пустая полоса во всю ширину панели. */
+  .photo-card:has(.photo-editor.is-open){grid-column:1/-1;display:grid;grid-template-columns:280px minmax(0,1fr);align-items:start}
   .photo-card:has(.photo-editor.is-open)>.photo-open{max-width:280px;border-radius:14px 0 0 0}
-  .photo-card:has(.photo-editor.is-open)>.photo-body{position:absolute;left:280px;top:0;right:0;min-height:100px}
+  .photo-card:has(.photo-editor.is-open)>.photo-editor{grid-column:1/-1}
   .photo-editor-heading{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:16px}
   .photo-editor-heading strong{display:block;font-size:18px}.photo-editor-heading span{display:block;color:var(--txt2);font-size:12px;margin-top:4px}
   .crop-preset-tabs{display:flex;gap:8px;margin-bottom:18px;padding:4px;background:rgba(255,255,255,.045);border-radius:12px;width:max-content;max-width:100%}
   .crop-preset-tabs button{background:transparent;color:var(--txt2);box-shadow:none;padding:10px 14px;font-size:13px}
   .crop-preset-tabs button span{opacity:.65;margin-left:4px}.crop-preset-tabs button.is-active{background:var(--amber);color:#3a1c00}
-  .rotation-controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:-8px 0 16px}.rotation-controls>span{font-size:12px;color:var(--txt2);margin-right:auto}.rotation-controls strong{color:var(--txt)}
+  .rotation-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 18px}.rotation-controls>span{font-size:12px;color:var(--txt2)}.rotation-controls strong{color:var(--txt)}
+  .rotation-controls button{min-height:40px}
   .crop-workspace{display:grid;grid-template-columns:minmax(0,1fr) 220px;gap:22px;align-items:start}
   .crop-form{display:none}.crop-form.is-active{display:block}
-  .crop-title{display:flex;justify-content:space-between;gap:10px;align-items:center;font-size:13px;margin-bottom:10px}.crop-title span{color:var(--txt2);font-weight:500;font-size:11px}
+  .crop-hint{font-size:12px;color:var(--txt2);margin-top:10px}
   .crop-stage{display:flex;align-items:center;justify-content:center;padding:28px;background:rgba(0,0,0,.58);border:1px solid rgba(255,255,255,.09);border-radius:14px;min-height:330px;box-shadow:inset 0 0 50px rgba(0,0,0,.4)}
-  .crop-viewport{position:relative;overflow:hidden;background:#111;touch-action:none;cursor:grab;border:2px solid #fff;border-radius:8px;user-select:none;box-shadow:0 0 0 999px rgba(0,0,0,.32);width:100%;max-height:440px}
-  .crop-viewport:active{cursor:grabbing}.crop-menu_card{aspect-ratio:7/3}.crop-dish_detail{aspect-ratio:1/1}
-  .crop-viewport img{position:absolute;max-width:none!important;max-height:none!important;aspect-ratio:auto!important;object-fit:fill!important;pointer-events:none;transform-origin:center}
+  /* box-shadow:0 0 0 999px rgba(0,0,0,.32) здесь раньше рисовал «подсветку»
+     кадра. Тень со spread 999px не обрезается ничем на пути к корню, поэтому
+     на странице появлялась широкая полупрозрачная тёмная полоса через всю
+     вёрстку, включая боковое меню. Редактор — обычная inline-секция, никакого
+     затемнения страницы у него быть не должно; рамка кадра задаётся border. */
+  /* max-height:440px здесь раньше молча ломал сам смысл пресета: у кадра 1:1
+     при ширине ~530px высота обрезалась до 440, и «квадрат» на деле имел
+     пропорции 1.2. Владелец кадрировал по одной рамке, а сайт показывал
+     другую. Высоту теперь диктует aspect-ratio, а разумный предел задаётся
+     шириной — для 7:3 её ограничивать не нужно (высота и так втрое меньше). */
+  .crop-viewport{position:relative;overflow:hidden;background:#111;touch-action:none;cursor:grab;border:2px solid rgba(255,255,255,.92);border-radius:8px;user-select:none;width:100%}
+  .crop-viewport:active{cursor:grabbing}
+  .crop-menu_card{aspect-ratio:7/3}
+  .crop-dish_detail{aspect-ratio:1/1;max-width:min(100%,420px)}
+  /* transform-origin ОБЯЗАН быть 0 0: paint() в static/hq.js считает matrix()
+     от левого верхнего угла изображения. При transform-origin:center (было)
+     0° работал случайно — там matrix чисто трансляционная и origin неважен, —
+     а 90/180/270 уводили картинку целиком за пределы overflow:hidden кадра,
+     и пользователь видел чёрный прямоугольник вместо фотографии. */
+  .crop-viewport img{position:absolute;max-width:none!important;max-height:none!important;aspect-ratio:auto!important;object-fit:fill!important;pointer-events:none;transform-origin:0 0}
   .crop-guide{position:absolute;inset:0;pointer-events:none;background:linear-gradient(to right,transparent 33.1%,rgba(255,255,255,.35) 33.3%,transparent 33.6%,transparent 66.3%,rgba(255,255,255,.35) 66.6%,transparent 66.9%),linear-gradient(to bottom,transparent 33.1%,rgba(255,255,255,.35) 33.3%,transparent 33.6%,transparent 66.3%,rgba(255,255,255,.35) 66.6%,transparent 66.9%)}
-  .crop-controls{display:flex;gap:10px;align-items:center;margin-top:12px}.crop-controls button{flex:0 0 auto}
-  .crop-zoom{display:flex;align-items:center;gap:10px;flex:1;margin:0;font-size:12px;text-transform:none;letter-spacing:0}.crop-zoom input{margin:0;padding:0;min-width:80px;width:100%}
-  .crop-preview-heading{font-size:12px;font-weight:750;margin-bottom:12px}.crop-preview-card{margin-bottom:14px}.crop-preview-label{display:flex;justify-content:space-between;color:var(--txt2);font-size:11px;margin-bottom:6px}.crop-preview-label strong{color:var(--txt);font-size:12px}
-  .crop-preview{position:relative;overflow:hidden;border-radius:10px;background:#111;border:1px solid var(--bord)}.crop-preview img{position:absolute;max-width:none!important;max-height:none!important;aspect-ratio:auto!important;object-fit:fill!important;transform-origin:center}
-  @media(max-width:900px){.photo-grid-dish{grid-template-columns:repeat(2,minmax(0,1fr))}.crop-workspace{grid-template-columns:1fr}.crop-live-previews{display:grid;grid-template-columns:1fr 1fr;gap:12px}.crop-preview-heading{grid-column:1/-1;margin:0}}
-  @media(max-width:620px){.photo-grid-dish{grid-template-columns:1fr 1fr;gap:10px}.photo-card:has(.photo-editor.is-open)>.photo-open{max-width:none}.photo-card:has(.photo-editor.is-open)>.photo-body{position:static}.photo-editor{padding:14px}.photo-editor-heading{align-items:center}.crop-stage{padding:14px;min-height:220px}.crop-preset-tabs{display:grid;grid-template-columns:1fr 1fr;width:100%}.crop-preset-tabs button{padding:10px 8px}.rotation-controls>span{flex:1 1 100%}.rotation-controls button{flex:1;min-height:44px;padding:9px 6px}.crop-title{align-items:flex-start;flex-direction:column}.crop-controls{flex-wrap:wrap}.crop-zoom{flex:1 1 100%}.crop-live-previews{grid-template-columns:1fr 1fr}.dish-photo-count{font-size:11px}}
+  .crop-controls{display:flex;gap:10px;align-items:center;margin-top:16px}.crop-controls button{flex:0 0 auto;min-height:40px}
+  .crop-zoom{display:flex;align-items:center;gap:10px;margin:16px 0 0;font-size:12px;text-transform:none;letter-spacing:0}.crop-zoom input{margin:0;padding:0;min-width:80px;width:100%}
+  .crop-preview-heading{font-size:12px;font-weight:750;margin-bottom:12px}
+  /* Предпросмотр показывается только для активного пресета: верхний
+     переключатель — единственное место выбора формата, второй блок раньше
+     дублировал его и перегружал экран. Скрытая карточка остаётся в DOM, её
+     crop-данные не теряются при переключении вкладок. */
+  .crop-preview-card{display:none}.crop-preview-card.is-active{display:block}
+  .crop-preview{position:relative;overflow:hidden;border-radius:10px;background:#111;border:1px solid var(--bord)}.crop-preview img{position:absolute;max-width:none!important;max-height:none!important;aspect-ratio:auto!important;object-fit:fill!important;transform-origin:0 0}
+  @media(max-width:900px){.photo-grid-dish{grid-template-columns:repeat(2,minmax(0,1fr))}.crop-workspace{grid-template-columns:1fr}.crop-live-previews{max-width:260px}}
+  @media(max-width:620px){.photo-grid-dish{grid-template-columns:1fr 1fr;gap:10px}.photo-card:has(.photo-editor.is-open){grid-template-columns:1fr}.photo-card:has(.photo-editor.is-open)>.photo-open{max-width:none}.photo-editor{padding:14px}.photo-editor-heading{align-items:center}.crop-stage{padding:14px;min-height:220px}.crop-preset-tabs{display:grid;grid-template-columns:1fr 1fr;width:100%}.crop-preset-tabs button{padding:10px 8px}.rotation-controls>span{flex:1 1 100%;order:-1}.rotation-controls button{flex:1;min-height:44px;padding:9px 6px}.crop-controls{flex-wrap:wrap}.crop-controls button{flex:1 1 auto;min-height:44px}.crop-live-previews{max-width:none}.dish-photo-count{font-size:11px}.upload-row{gap:12px}.upload-tile,.upload-thumb{width:112px;height:112px}.upload-selected{max-width:112px}.upload-submit{min-height:44px}}
 
   /* Мобильный responsive-table: превращает строки в компактные карточки без
      дублирования разметки (задание, раздел 14 — "на mobile строки заказов
@@ -506,6 +572,17 @@ ${testBannerHtml}
 </html>`;
 }
 
+// Переиспользуемая навигация «назад» для detail/edit-страниц HQ.
+//
+// Именно ссылка на явный адрес, а не history.back(): на detail-страницу
+// попадают и по прямому URL, и после редиректа формы (POST -> 303 -> GET), и
+// из письма — в этих случаях «назад» браузера уводит куда угодно, только не
+// на родительский экран. Ссылка ставится ПЕРЕД заголовком, поэтому видна
+// сразу при открытии страницы, без прокрутки.
+function renderBackLink({ href, label = 'Назад' }) {
+  return `<a class="detail-back" href="${esc(href)}"><span aria-hidden="true">←</span> ${esc(label)}</a>`;
+}
+
 module.exports = {
-  layout, esc, buildNavItems, renderTestBanner, testBannerStyle, TEST_BANNER_HEIGHT_PX,
+  layout, esc, buildNavItems, renderBackLink, renderTestBanner, testBannerStyle, TEST_BANNER_HEIGHT_PX,
 };

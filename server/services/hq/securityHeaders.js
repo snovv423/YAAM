@@ -16,8 +16,14 @@
 // extraImgSrc — origin активного media provider (см. routes/hq/index.js),
 // добавляется в img-src ТОЛЬКО если медиа реально настроено; без него
 // поведение идентично прежнему self+data:.
+//
+// blob: — превью ещё не загруженного файла в форме добавления фотографии
+// (hq/static/hq.js создаёт URL.createObjectURL для выбранного изображения).
+// Это НЕ расширение множества источников: blob-URL может создать только
+// скрипт этого же origin, внешние адреса такой схемой недостижимы. Без него
+// браузер блокировал показ выбранной фотографии до отправки формы.
 function createHqSecurityHeaders({ extraImgSrc } = {}) {
-  const imgSrc = extraImgSrc ? `img-src 'self' data: ${extraImgSrc}` : "img-src 'self' data:";
+  const imgSrc = extraImgSrc ? `img-src 'self' data: blob: ${extraImgSrc}` : "img-src 'self' data: blob:";
   return function hqSecurityHeaders(req, res, next) {
     res.set('Content-Security-Policy', [
       "default-src 'self'",

@@ -9,7 +9,7 @@
 // категории-аккордеоны с компактными строками блюд. Управление категорией
 // спрятано в её собственное маленькое меню, порядок меняется перетаскиванием
 // (hq/static/hq.js), архив вынесен на отдельный экран.
-const { esc } = require('./layout');
+const { esc, renderBackLink } = require('./layout');
 const { money } = require('./restaurantsViews');
 const { renderPhotoManager } = require('./photosViews');
 
@@ -151,7 +151,6 @@ function renderCategoryArchiveOptions({ restaurant, category, otherCategories, i
         <button type="submit" class="ghost compact">Архивировать вместе с блюдами</button>
       </form>
     </div>
-    <a class="btn ghost compact" href="${base}">← К меню</a>
   `;
 }
 
@@ -296,6 +295,7 @@ function renderMenuItemForm({
     </div>`;
 
   return `
+    ${renderBackLink({ href: base })}
     <h2>${esc(title)}</h2>
     ${!isNew ? `<div class="item-status">${esc(itemStatusLabel(v))}</div>` : ''}
     <div class="panel">
@@ -360,7 +360,6 @@ function renderMenuItemForm({
       actionBase: `${base}/items/${v.id}/photos`,
       csrfToken, dishCrops: true, notice,
     }) : ''}
-    <a class="btn ghost compact" href="${base}">← К меню</a>
   `;
 }
 

@@ -74,7 +74,16 @@ function normalizeAltText(value) {
 
 const CROP_TARGETS = Object.freeze({ menu_card: 7 / 3, dish_detail: 1 });
 
-function normalizeCrop(value, target) {
+// source — реальные размеры мастер-файла и текущий поворот. Без них проверка
+// пропорций вырождается в «исходник квадратный» (см. ниже), и это была
+// настоящая production-ошибка: crop хранится в НОРМАЛИЗОВАННЫХ координатах
+// исходника, поэтому у фотографии 1600x900 корректная область 7:3 имеет
+// нормализованные width/height = 1 и 0.762 (отношение 1.31), а не 2.333.
+// Сравнение width/height напрямую с целевым aspect проходило только для
+// квадратных фотографий — для всех остальных «Сохранить» в редакторе всегда
+// падало с «Соотношение сторон кадрирования не соответствует выбранному
+// экрану», то есть кадрирование нельзя было сохранить в принципе.
+function normalizeCrop(value, target, source) {
   const aspect = CROP_TARGETS[target];
   if (!aspect) throw new ValidationError('Неизвестный тип кадрирования.');
   let crop = value;
@@ -92,7 +101,16 @@ function normalizeCrop(value, target) {
   if (x < 0 || y < 0 || width <= 0 || height <= 0 || x + width > 1.000001 || y + height > 1.000001) {
     throw new ValidationError('Область кадрирования выходит за границы фотографии.');
   }
-  if (Math.abs((width / height) - aspect) > 0.01) {
+  // Без source поведение прежнее (исходник считается квадратным) — этим
+  // пользуются юнит-тесты нормализатора; авторитетная проверка выполняется
+  // там, где реальные размеры известны (updateCrop ниже).
+  const sourceWidth = source && Number(source.width) > 0 ? Number(source.width) : 1;
+  const sourceHeight = source && Number(source.height) > 0 ? Number(source.height) : 1;
+  const quarterTurn = source ? [90, 270].includes(normalizeRotation(source.rotation || 0)) : false;
+  const orientedWidth = quarterTurn ? sourceHeight : sourceWidth;
+  const orientedHeight = quarterTurn ? sourceWidth : sourceHeight;
+  const actualAspect = (width * orientedWidth) / (height * orientedHeight);
+  if (Math.abs(actualAspect / aspect - 1) > 0.01) {
     throw new ValidationError('Соотношение сторон кадрирования не соответствует выбранному экрану.');
   }
   return normalized;
@@ -106,7 +124,6 @@ function normalizeRotation(value) {
 
 async function updateCrop(config, ownerId, photoId, target, value, rotationValue = 0) {
   if (config !== MENU_ITEM_CONFIG) throw new ValidationError('Кадрирование доступно только для фотографий блюд.');
-  const crop = normalizeCrop(value, target);
   const rotation = normalizeRotation(rotationValue);
   const column = target === 'menu_card' ? 'menu_card_crop' : 'dish_detail_crop';
   return db.transaction(async (client) => {
@@ -116,6 +133,11 @@ async function updateCrop(config, ownerId, photoId, target, value, rotationValue
     );
     const current = currentResult.rows[0];
     if (!current) return null;
+    // Нормализация перенесена внутрь транзакции: проверка пропорций требует
+    // фактических размеров мастера, а они известны только после чтения строки.
+    const crop = normalizeCrop(value, target, {
+      width: current.width, height: current.height, rotation,
+    });
     const rotationChanged = normalizeRotation(current.rotation_degrees || 0) !== rotation;
     const updated = await db.execute(
       `UPDATE menu_item_photos SET ${column} = $1::jsonb, rotation_degrees = $2,

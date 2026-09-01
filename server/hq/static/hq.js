@@ -155,6 +155,15 @@
         zoom.value = '0';
         render();
       });
+      // Пока панель скрыта (display:none), её кадр имеет нулевой размер и
+      // paint() выходит сразу — так что первый render() после загрузки
+      // страницы ничего не рисует. Редактор теперь открыт не по умолчанию, а
+      // по кнопке, и вкладка пресета переключается на лету, поэтому обе эти
+      // ситуации обязаны заново запрашивать отрисовку уже видимой панели.
+      editor.addEventListener('croprerender', function () {
+        if (!state) return;
+        render();
+      });
     }
     viewport.addEventListener('pointerdown', function (event) {
       if (!state) return;
@@ -179,10 +188,21 @@
     var open = card.querySelector('[data-photo-open]');
     var editor = card.querySelector('[data-photo-editor]');
     if (!editor || !open) return;
+    function rerender() {
+      // Кадр становится измеримым только после того, как секция реально
+      // показана, поэтому просим отрисовку в следующем кадре.
+      requestAnimationFrame(function () {
+        editor.dispatchEvent(new CustomEvent('croprerender'));
+      });
+    }
     function setOpen(value) {
       editor.classList.toggle('is-open', value);
       open.setAttribute('aria-expanded', String(value));
+      if (value) rerender();
     }
+    // Редактор всегда стартует закрытым (разметка не содержит is-open) и
+    // раскрывается ТОЛЬКО этим кликом — ни page load, ни reload, ни
+    // back/forward, ни смена основного фото его не открывают.
     open.addEventListener('click', function () { setOpen(!editor.classList.contains('is-open')); });
     var close = editor.querySelector('[data-photo-close]');
     if (close) close.addEventListener('click', function () { setOpen(false); open.focus(); });
@@ -215,8 +235,120 @@
         editor.querySelectorAll('[data-crop-panel]').forEach(function (panel) {
           panel.classList.toggle('is-active', panel.getAttribute('data-crop-panel') === target);
         });
+        // Предпросмотр справа теперь один — того же пресета, что и вкладка.
+        // Второй остаётся в DOM (чтобы не потерять уже загруженные crop-данные
+        // второго пресета), но скрыт.
+        editor.querySelectorAll('[data-crop-preview-card]').forEach(function (previewCard) {
+          previewCard.classList.toggle('is-active', previewCard.getAttribute('data-crop-preview-card') === target);
+        });
+        rerender();
       });
     });
+  });
+})();
+
+// Современная загрузка фотографии.
+//
+// Здесь НЕТ synthetic .click() по input: плитка — это <label for>, поэтому
+// системный выбор файла открывается настоящим trusted-жестом пользователя
+// (иначе Safari/iOS вправе его заблокировать), а на телефоне появляется
+// штатный chooser «Медиатека / Снять фото / Обзор». Сам <input type="file">
+// остаётся в разметке и лишь визуально скрыт классом .visually-hidden —
+// не display:none и не hidden, чтобы он оставался фокусируемым с клавиатуры.
+//
+// Скрипт только показывает превью выбранного файла и локальную ошибку. Если
+// JS отключён, форма отправляется как обычная multipart-форма, а обязательность
+// файла обеспечивает атрибут required.
+(function () {
+  var forms = document.querySelectorAll('[data-photo-upload]');
+  if (!forms.length) return;
+
+  var ALLOWED = ['image/jpeg', 'image/png', 'image/webp'];
+
+  forms.forEach(function (form) {
+    var input = form.querySelector('[data-upload-input]');
+    var tile = form.querySelector('[data-upload-tile]');
+    var selected = form.querySelector('[data-upload-selected]');
+    var thumb = form.querySelector('[data-upload-thumb]');
+    var nameEl = form.querySelector('[data-upload-name]');
+    var clear = form.querySelector('[data-upload-clear]');
+    var busy = form.querySelector('[data-upload-busy]');
+    var errorEl = form.querySelector('[data-upload-error]');
+    if (!input || !tile || !selected || !thumb) return;
+
+    var maxBytes = Number(form.getAttribute('data-max-bytes')) || 0;
+    var objectUrl = null;
+
+    function showError(message) {
+      if (!errorEl) return;
+      errorEl.textContent = message;
+      errorEl.classList.toggle('is-visible', !!message);
+    }
+
+    function releaseUrl() {
+      if (!objectUrl) return;
+      URL.revokeObjectURL(objectUrl);
+      objectUrl = null;
+    }
+
+    function reset() {
+      releaseUrl();
+      input.value = '';
+      selected.hidden = true;
+      tile.hidden = false;
+      thumb.removeAttribute('src');
+      if (nameEl) nameEl.textContent = '';
+      if (busy) busy.hidden = true;
+    }
+
+    function accept(file) {
+      // Локальная проверка до отправки: при отказе файл ОСТАЁТСЯ выбранным,
+      // страница не перезагружается, и пользователь может сразу повторить.
+      if (ALLOWED.indexOf(file.type) === -1) {
+        showError('Поддерживаются только JPEG, PNG и WebP.');
+        return false;
+      }
+      if (maxBytes && file.size > maxBytes) {
+        showError('Файл больше ' + Math.round(maxBytes / (1024 * 1024)) + ' МБ — выберите фотографию поменьше.');
+        return false;
+      }
+      showError('');
+      return true;
+    }
+
+    input.addEventListener('change', function () {
+      var file = input.files && input.files[0];
+      if (!file) { reset(); return; }
+      releaseUrl();
+      objectUrl = URL.createObjectURL(file);
+      thumb.src = objectUrl;
+      if (nameEl) nameEl.textContent = file.name;
+      tile.hidden = true;
+      selected.hidden = false;
+      if (busy) busy.hidden = true;
+      accept(file);
+    });
+
+    if (clear) {
+      clear.addEventListener('click', function () {
+        reset();
+        showError('');
+        tile.focus();
+      });
+    }
+
+    form.addEventListener('submit', function (event) {
+      var file = input.files && input.files[0];
+      if (!file) return;
+      if (!accept(file)) {
+        event.preventDefault();
+        return;
+      }
+      // Индикатор живёт на самой миниатюре — страницу не затемняем.
+      if (busy) busy.hidden = false;
+    });
+
+    window.addEventListener('pagehide', releaseUrl);
   });
 })();
 

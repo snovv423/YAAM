@@ -153,3 +153,40 @@ test('normalizeCrop: отклоняет выход за master и неверны
   assert.throws(() => normalizeCrop({ x: 0.5, y: 0, width: 0.6, height: 0.6 }, 'dish_detail'), ValidationError);
   assert.throws(() => normalizeCrop({ x: 0, y: 0, width: 1, height: 1 }, 'menu_card'), ValidationError);
 });
+
+// Регрессия: crop хранится в НОРМАЛИЗОВАННЫХ координатах исходника, поэтому
+// сравнивать width/height напрямую с целевым aspect можно только для
+// квадратной фотографии. Для 1600x900 корректная область 7:3 — это 1 x 0.762,
+// и прежняя проверка отклоняла её: «Сохранить» в редакторе не работало ни для
+// одной неквадратной фотографии.
+test('normalizeCrop: aspect считается в пикселях исходника, а не в нормализованных долях', () => {
+  const landscape = { width: 1600, height: 900, rotation: 0 };
+  // 1600 x (0.7619 * 900 = 686) -> 2.333 = 7:3
+  assert.deepEqual(
+    normalizeCrop({ x: 0, y: 0.119048, width: 1, height: 0.761905 }, 'menu_card', landscape),
+    { x: 0, y: 0.119048, width: 1, height: 0.761905 },
+  );
+  // Те же доли, что проходили при «квадратном» допущении, для 16:9 неверны.
+  assert.throws(
+    () => normalizeCrop({ x: 0, y: 0.2, width: 0.7, height: 0.3 }, 'menu_card', landscape),
+    ValidationError,
+  );
+  // 1:1 для того же исходника: 900 x 900 -> width 0.5625, height 1.
+  assert.deepEqual(
+    normalizeCrop({ x: 0.2, y: 0, width: 0.5625, height: 1 }, 'dish_detail', landscape),
+    { x: 0.2, y: 0, width: 0.5625, height: 1 },
+  );
+});
+
+test('normalizeCrop: поворот на 90/270 меняет ориентацию исходника при проверке', () => {
+  const portrait = { width: 900, height: 1600, rotation: 90 }; // ориентированный 1600x900
+  assert.deepEqual(
+    normalizeCrop({ x: 0, y: 0.2, width: 0.39375, height: 0.3 }, 'menu_card', portrait),
+    { x: 0, y: 0.2, width: 0.39375, height: 0.3 },
+  );
+  // Без поворота тот же crop у 900x1600 даёт совсем другое соотношение.
+  assert.throws(
+    () => normalizeCrop({ x: 0, y: 0.2, width: 0.39375, height: 0.3 }, 'menu_card', { width: 900, height: 1600, rotation: 0 }),
+    ValidationError,
+  );
+});
