@@ -72,6 +72,62 @@ function normalizeAltText(value) {
   return trimmed;
 }
 
+const CROP_TARGETS = Object.freeze({ menu_card: 7 / 3, dish_detail: 1 });
+
+function normalizeCrop(value, target) {
+  const aspect = CROP_TARGETS[target];
+  if (!aspect) throw new ValidationError('Неизвестный тип кадрирования.');
+  let crop = value;
+  if (typeof crop === 'string') {
+    try { crop = JSON.parse(crop); } catch { throw new ValidationError('Некорректные параметры кадрирования.'); }
+  }
+  if (!crop || typeof crop !== 'object') throw new ValidationError('Выберите область фотографии.');
+  const normalized = {};
+  for (const key of ['x', 'y', 'width', 'height']) {
+    const n = Number(crop[key]);
+    if (!Number.isFinite(n)) throw new ValidationError('Некорректные параметры кадрирования.');
+    normalized[key] = Math.round(n * 1000000) / 1000000;
+  }
+  const { x, y, width, height } = normalized;
+  if (x < 0 || y < 0 || width <= 0 || height <= 0 || x + width > 1.000001 || y + height > 1.000001) {
+    throw new ValidationError('Область кадрирования выходит за границы фотографии.');
+  }
+  if (Math.abs((width / height) - aspect) > 0.01) {
+    throw new ValidationError('Соотношение сторон кадрирования не соответствует выбранному экрану.');
+  }
+  return normalized;
+}
+
+function normalizeRotation(value) {
+  const rotation = ((Number(value) % 360) + 360) % 360;
+  if (![0, 90, 180, 270].includes(rotation)) throw new ValidationError('Поворот доступен только шагами по 90°.');
+  return rotation;
+}
+
+async function updateCrop(config, ownerId, photoId, target, value, rotationValue = 0) {
+  if (config !== MENU_ITEM_CONFIG) throw new ValidationError('Кадрирование доступно только для фотографий блюд.');
+  const crop = normalizeCrop(value, target);
+  const rotation = normalizeRotation(rotationValue);
+  const column = target === 'menu_card' ? 'menu_card_crop' : 'dish_detail_crop';
+  return db.transaction(async (client) => {
+    const currentResult = await db.execute(
+      `SELECT * FROM menu_item_photos WHERE id = $1 AND menu_item_id = $2 FOR UPDATE`,
+      [photoId, ownerId], client,
+    );
+    const current = currentResult.rows[0];
+    if (!current) return null;
+    const rotationChanged = normalizeRotation(current.rotation_degrees || 0) !== rotation;
+    const updated = await db.execute(
+      `UPDATE menu_item_photos SET ${column} = $1::jsonb, rotation_degrees = $2,
+         ${rotationChanged ? `${target === 'menu_card' ? 'dish_detail_crop' : 'menu_card_crop'} = NULL,` : ''}
+         updated_at = NOW()
+       WHERE id = $3 AND menu_item_id = $4 RETURNING *`,
+      [JSON.stringify(crop), rotation, photoId, ownerId], client,
+    );
+    return updated.rows[0] || null;
+  });
+}
+
 async function deleteAllVariants(provider, storageKeyBase) {
   for (const variant of ALL_VARIANT_NAMES) {
     try {
@@ -235,8 +291,9 @@ async function setPrimary(config, ownerId, photoId) {
       client,
     );
     const updated = await db.execute(
-      `UPDATE ${config.table} SET is_primary = 1, updated_at = NOW() WHERE id = $1 RETURNING *`,
-      [photo.id],
+      `UPDATE ${config.table} SET is_primary = 1, updated_at = NOW()
+       WHERE id = $1 AND ${config.ownerColumn} = $2 RETURNING *`,
+      [photo.id, ownerId],
       client,
     );
     return updated.rows[0];
@@ -361,11 +418,19 @@ async function deleteMenuItemPhoto(restaurantId, menuItemId, photoId, provider) 
   return deletePhoto(MENU_ITEM_CONFIG, menuItemId, photoId, provider);
 }
 
+async function updateMenuItemPhotoCrop(restaurantId, menuItemId, photoId, target, crop, rotation) {
+  await assertMenuItemOwnership(restaurantId, menuItemId);
+  return updateCrop(MENU_ITEM_CONFIG, menuItemId, photoId, target, crop, rotation);
+}
+
 module.exports = {
   ALT_TEXT_MAX,
   MAX_PHOTOS_PER_OWNER,
   RESTAURANT_MAX_PHOTOS,
   photoVariantUrls,
+  CROP_TARGETS,
+  normalizeCrop,
+  normalizeRotation,
   resolvePrimaryPhoto,
   variantObjectKey,
   normalizeAltText,
@@ -384,4 +449,5 @@ module.exports = {
   setMenuItemPhotoPrimary,
   updateMenuItemPhotoAlt,
   deleteMenuItemPhoto,
+  updateMenuItemPhotoCrop,
 };

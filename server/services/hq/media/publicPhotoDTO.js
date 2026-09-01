@@ -19,7 +19,15 @@ const { photoVariantUrls, resolvePrimaryPhoto } = require('./photoService');
 // (allowlist "by construction", тот же принцип, что PUBLIC_RESTAURANT_FIELDS
 // в routes/postgresql/api.js).
 function toPublicPhotoDTO(mediaProvider, photo) {
-  return { alt: photo.alt_text || '', urls: photoVariantUrls(mediaProvider, photo) };
+  return {
+    alt: photo.alt_text || '',
+    urls: photoVariantUrls(mediaProvider, photo),
+    crops: {
+      menu_card: photo.menu_card_crop || null,
+      dish_detail: photo.dish_detail_crop || null,
+    },
+    rotation: Number(photo.rotation_degrees) || 0,
+  };
 }
 
 // Legacy photo_url (задание, раздел 13) — если у владельца ещё нет ни одной
@@ -35,7 +43,7 @@ function buildPhotoFields(mediaProvider, activePhotos, legacyUrl) {
     };
   }
   if (legacyUrl) {
-    const legacy = { alt: '', urls: { thumb: legacyUrl, card: legacyUrl, full: legacyUrl } };
+    const legacy = { alt: '', urls: { thumb: legacyUrl, card: legacyUrl, full: legacyUrl }, crops: { menu_card: null, dish_detail: null }, rotation: 0 };
     return { primary_photo: legacy, gallery: [legacy] };
   }
   return { primary_photo: null, gallery: [] };

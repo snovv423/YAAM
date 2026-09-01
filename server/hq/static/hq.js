@@ -31,6 +31,195 @@
   });
 })();
 
+// Non-destructive photo crop editor. State is stored as a normalized source
+// rectangle, so it remains exact at every responsive display size.
+(function () {
+  var viewports = document.querySelectorAll('[data-cropper]');
+  if (!viewports.length) return;
+
+  viewports.forEach(function (viewport) {
+    var form = viewport.closest('.crop-form');
+    var input = form.querySelector('input[name="crop"]');
+    var zoom = form.querySelector('[data-crop-zoom]');
+    var img = viewport.querySelector('img');
+    var reset = form.querySelector('[data-crop-reset]');
+    var rotationInput = form.querySelector('[data-crop-rotation]');
+    var editor = viewport.closest('[data-photo-editor]');
+    var target = form.getAttribute('data-crop-panel');
+    var preview = editor && editor.querySelector('[data-crop-preview="' + target + '"]');
+    var previewImg = preview && preview.querySelector('img');
+    var aspect = Number(viewport.getAttribute('data-aspect'));
+    var rotation = Number(rotationInput.value) || 0;
+    var state = null;
+    var start = null;
+
+    function clampCrop(crop) {
+      var base = defaultCrop();
+      var width = Math.max(0.000001, Math.min(base.width, Number(crop.width) || base.width));
+      var height = width / (base.width / base.height);
+      if (height > base.height) {
+        height = base.height;
+        width = height * (base.width / base.height);
+      }
+      return {
+        x: Math.max(0, Math.min(1 - width, Number(crop.x) || 0)),
+        y: Math.max(0, Math.min(1 - height, Number(crop.y) || 0)),
+        width: width,
+        height: height,
+      };
+    }
+
+    function paint(currentImg, crop, turn) {
+      if (!currentImg || !currentImg.naturalWidth) return;
+      var frame = currentImg.parentElement.getBoundingClientRect();
+      if (!frame.width || !frame.height) return;
+      var quarterTurn = turn === 90 || turn === 270;
+      var orientedWidth = quarterTurn ? currentImg.naturalHeight : currentImg.naturalWidth;
+      var orientedHeight = quarterTurn ? currentImg.naturalWidth : currentImg.naturalHeight;
+      var scale = Math.max(frame.width / (crop.width * orientedWidth), frame.height / (crop.height * orientedHeight));
+      var renderedWidth = currentImg.naturalWidth * scale;
+      var renderedHeight = currentImg.naturalHeight * scale;
+      var cropX = crop.x * orientedWidth * scale;
+      var cropY = crop.y * orientedHeight * scale;
+      currentImg.style.left = '0';
+      currentImg.style.top = '0';
+      currentImg.style.width = renderedWidth + 'px';
+      currentImg.style.height = renderedHeight + 'px';
+      if (turn === 90) currentImg.style.transform = 'matrix(0,1,-1,0,' + (renderedHeight - cropX) + ',' + (-cropY) + ')';
+      else if (turn === 180) currentImg.style.transform = 'matrix(-1,0,0,-1,' + (renderedWidth - cropX) + ',' + (renderedHeight - cropY) + ')';
+      else if (turn === 270) currentImg.style.transform = 'matrix(0,-1,1,0,' + (-cropX) + ',' + (renderedWidth - cropY) + ')';
+      else currentImg.style.transform = 'matrix(1,0,0,1,' + (-cropX) + ',' + (-cropY) + ')';
+    }
+
+    function defaultCrop() {
+      var sourceAspect = img.naturalWidth / img.naturalHeight;
+      if (rotation === 90 || rotation === 270) sourceAspect = 1 / sourceAspect;
+      if (sourceAspect > aspect) {
+        var width = aspect / sourceAspect;
+        return { x: (1 - width) / 2, y: 0, width: width, height: 1 };
+      }
+      var height = sourceAspect / aspect;
+      return { x: 0, y: (1 - height) / 2, width: 1, height: height };
+    }
+    function parseInitial() {
+      try {
+        var parsed = JSON.parse(input.value);
+        if (parsed && parsed.width > 0 && parsed.height > 0) return clampCrop(parsed);
+      } catch (_) { /* centred fallback */ }
+      return defaultCrop();
+    }
+    function render() {
+      if (!state) return;
+      [img, previewImg].forEach(function (currentImg) {
+        if (!currentImg) return;
+        paint(currentImg, state, rotation);
+      });
+      rotationInput.value = String(rotation);
+      input.value = JSON.stringify({ x: state.x, y: state.y, width: state.width, height: state.height });
+    }
+    function syncZoom() {
+      var base = defaultCrop();
+      var factor = Math.max(0.2, Math.min(1, state.width / base.width));
+      zoom.value = String(Math.round((1 - factor) / 0.8 * 100));
+    }
+    function init() { state = parseInitial(); syncZoom(); render(); }
+    if (img.complete && img.naturalWidth) init(); else img.addEventListener('load', init, { once: true });
+
+    zoom.addEventListener('input', function () {
+      if (!state) return;
+      var base = defaultCrop();
+      var factor = 1 - (Number(zoom.value) / 100) * 0.8;
+      var cx = state.x + state.width / 2;
+      var cy = state.y + state.height / 2;
+      state = clampCrop({
+        x: cx - base.width * factor / 2,
+        y: cy - base.height * factor / 2,
+        width: base.width * factor,
+        height: base.height * factor,
+      });
+      render();
+    });
+    reset.addEventListener('click', function () {
+      if (editor) editor.dispatchEvent(new CustomEvent('cropreset'));
+    });
+    if (editor) {
+      editor.addEventListener('rotationchange', function (event) {
+        rotation = event.detail.rotation;
+        state = defaultCrop();
+        zoom.value = '0';
+        render();
+      });
+      editor.addEventListener('cropreset', function () {
+        rotation = 0;
+        state = defaultCrop();
+        zoom.value = '0';
+        render();
+      });
+    }
+    viewport.addEventListener('pointerdown', function (event) {
+      if (!state) return;
+      event.preventDefault();
+      viewport.setPointerCapture(event.pointerId);
+      start = { x: event.clientX, y: event.clientY, cropX: state.x, cropY: state.y };
+    });
+    viewport.addEventListener('pointermove', function (event) {
+      if (!start || !state) return;
+      var rect = viewport.getBoundingClientRect();
+      state.x = Math.max(0, Math.min(1 - state.width, start.cropX - (event.clientX - start.x) / rect.width * state.width));
+      state.y = Math.max(0, Math.min(1 - state.height, start.cropY - (event.clientY - start.y) / rect.height * state.height));
+      render();
+    });
+    function end() { start = null; }
+    viewport.addEventListener('pointerup', end);
+    viewport.addEventListener('pointercancel', end);
+    window.addEventListener('resize', render);
+  });
+
+  document.querySelectorAll('[data-photo-card]').forEach(function (card) {
+    var open = card.querySelector('[data-photo-open]');
+    var editor = card.querySelector('[data-photo-editor]');
+    if (!editor || !open) return;
+    function setOpen(value) {
+      editor.classList.toggle('is-open', value);
+      open.setAttribute('aria-expanded', String(value));
+    }
+    open.addEventListener('click', function () { setOpen(!editor.classList.contains('is-open')); });
+    var close = editor.querySelector('[data-photo-close]');
+    if (close) close.addEventListener('click', function () { setOpen(false); open.focus(); });
+    var initialRotationInput = editor.querySelector('[data-crop-rotation]');
+    var currentRotation = Number(initialRotationInput && initialRotationInput.value) || 0;
+    function publishRotation() {
+      var label = editor.querySelector('[data-rotation-label]');
+      if (label) label.textContent = currentRotation + '°';
+      editor.dispatchEvent(new CustomEvent('rotationchange', { detail: { rotation: currentRotation } }));
+    }
+    editor.querySelectorAll('[data-rotate]').forEach(function (button) {
+      button.addEventListener('click', function () {
+        currentRotation = (currentRotation + Number(button.getAttribute('data-rotate')) + 360) % 360;
+        publishRotation();
+      });
+    });
+    editor.addEventListener('cropreset', function () {
+      currentRotation = 0;
+      var label = editor.querySelector('[data-rotation-label]');
+      if (label) label.textContent = '0°';
+    });
+    editor.querySelectorAll('[data-crop-tab]').forEach(function (tab) {
+      tab.addEventListener('click', function () {
+        var target = tab.getAttribute('data-crop-tab');
+        editor.querySelectorAll('[data-crop-tab]').forEach(function (other) {
+          var selected = other === tab;
+          other.classList.toggle('is-active', selected);
+          other.setAttribute('aria-selected', String(selected));
+        });
+        editor.querySelectorAll('[data-crop-panel]').forEach(function (panel) {
+          panel.classList.toggle('is-active', panel.getAttribute('data-crop-panel') === target);
+        });
+      });
+    });
+  });
+})();
+
 // Живое обновление «Обзора» ресторана (Stage 4, GET .../overview.json)
 // удалено вместе с самим блоком «Активные заказы»: docs/HQ-PRODUCT-SPEC.md
 // прямо исключает оперативную сводку активных заказов из HQ (HQ — кабинет

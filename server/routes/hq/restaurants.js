@@ -360,10 +360,11 @@ function createRestaurantsRouter({ linkBasePath, mediaProvider = null }) {
   // заполнен. Один запрос на всё меню, не N+1 по блюдам.
   async function attachDishThumbs(restaurantId, menu) {
     const byItem = new Map();
-    if (mediaProvider) {
-      const photos = await photoService.listMenuItemPhotosForRestaurant(restaurantId);
-      for (const p of photos) {
-        if (byItem.has(p.menu_item_id)) continue;
+    const counts = new Map();
+    const photos = await photoService.listMenuItemPhotosForRestaurant(restaurantId);
+    for (const p of photos) {
+      counts.set(p.menu_item_id, (counts.get(p.menu_item_id) || 0) + 1);
+      if (mediaProvider && (p.is_primary === 1 || !byItem.has(p.menu_item_id))) {
         byItem.set(p.menu_item_id, photoService.photoVariantUrls(mediaProvider, p).thumb);
       }
     }
@@ -372,6 +373,7 @@ function createRestaurantsRouter({ linkBasePath, mediaProvider = null }) {
       items: category.items.map((item) => ({
         ...item,
         thumb_url: byItem.get(item.id) || item.photo_url || null,
+        photo_count: counts.get(item.id) || (item.photo_url ? 1 : 0),
       })),
     }));
   }
@@ -664,7 +666,7 @@ function createRestaurantsRouter({ linkBasePath, mediaProvider = null }) {
       const photoData = await menuItemPhotoViewData(req.restaurant.id, req.menuItem.id);
       const body = menuViews.renderMenuItemForm({
         restaurant: req.restaurant, item: req.menuItem, categories: menu, csrfToken, linkBasePath, isNew: false,
-        error: req.query.error, ...photoData,
+        error: req.query.error, notice: req.query.notice, ...photoData,
       });
       res.send(layout({ title: `${req.menuItem.name} — ${req.restaurant.name}`, active: 'restaurants', csrfToken, linkBasePath, body }));
     } catch (err) {
@@ -755,6 +757,18 @@ function createRestaurantsRouter({ linkBasePath, mediaProvider = null }) {
         });
       }
       dishPhotoActionRedirect(res, req.restaurant.id, req.menuItem.id);
+    } catch (err) {
+      if (err instanceof svc.ValidationError) return dishPhotoActionRedirect(res, req.restaurant.id, req.menuItem.id, { error: err.message });
+      next(err);
+    }
+  });
+
+  router.post('/:id/menu/items/:itemId/photos/:dishPhotoId/crop', requireCsrf, async (req, res, next) => {
+    try {
+      await photoService.updateMenuItemPhotoCrop(
+        req.restaurant.id, req.menuItem.id, req.dishPhoto.id, req.body.target, req.body.crop, req.body.rotation,
+      );
+      dishPhotoActionRedirect(res, req.restaurant.id, req.menuItem.id, { notice: 'Кадрирование сохранено.' });
     } catch (err) {
       if (err instanceof svc.ValidationError) return dishPhotoActionRedirect(res, req.restaurant.id, req.menuItem.id, { error: err.message });
       next(err);

@@ -323,6 +323,40 @@ test('E1: menu_item_photos недоступны через чужой restaurant
   }
 });
 
+test('E2: rotation/crops persist per gallery media and primary switching does not move metadata', async () => {
+  const databaseUrl = await freshDatabase('media_rotation_persistence');
+  process.env.DATABASE_URL = databaseUrl;
+  for (const p of HQ_MODULE_PATHS) delete require.cache[p];
+  const db = require('../../db/postgresql');
+  const photoService = require('../../services/hq/media/photoService');
+  try {
+    const restaurant = (await db.execute("INSERT INTO restaurants (name, cities) VALUES ('Rotation','[]') RETURNING id")).rows[0];
+    const category = (await db.execute("INSERT INTO categories (restaurant_id, name) VALUES ($1,'Основное') RETURNING id", [restaurant.id])).rows[0];
+    const item = (await db.execute("INSERT INTO menu_items (restaurant_id, category_id, name, price) VALUES ($1,$2,'Блюдо',500) RETURNING id", [restaurant.id, category.id])).rows[0];
+    const first = (await db.execute("INSERT INTO menu_item_photos (menu_item_id,storage_key,width,height,is_primary) VALUES ($1,'menu-items/one',900,1600,1) RETURNING id", [item.id])).rows[0];
+    const second = (await db.execute("INSERT INTO menu_item_photos (menu_item_id,storage_key,width,height,is_primary) VALUES ($1,'menu-items/two',900,1600,0) RETURNING id", [item.id])).rows[0];
+
+    await photoService.updateMenuItemPhotoCrop(restaurant.id, item.id, first.id, 'menu_card', { x: 0, y: 0.2, width: 0.7, height: 0.3 }, 90);
+    await photoService.updateMenuItemPhotoCrop(restaurant.id, item.id, first.id, 'dish_detail', { x: 0.1, y: 0, width: 0.9, height: 0.9 }, 90);
+    await photoService.setMenuItemPhotoPrimary(restaurant.id, item.id, second.id);
+
+    const reloaded = await photoService.listMenuItemPhotos(restaurant.id, item.id);
+    const persistedFirst = reloaded.find((photo) => photo.id === first.id);
+    const persistedSecond = reloaded.find((photo) => photo.id === second.id);
+    assert.equal(persistedFirst.rotation_degrees, 90);
+    assert.deepEqual(persistedFirst.menu_card_crop, { x: 0, y: 0.2, width: 0.7, height: 0.3 });
+    assert.deepEqual(persistedFirst.dish_detail_crop, { x: 0.1, y: 0, width: 0.9, height: 0.9 });
+    assert.equal(persistedFirst.is_primary, 0);
+    assert.equal(persistedSecond.is_primary, 1);
+    assert.equal(persistedSecond.rotation_degrees, 0);
+    assert.equal(persistedSecond.menu_card_crop, null);
+    assert.equal(persistedSecond.dish_detail_crop, null);
+  } finally {
+    await db.close();
+    delete process.env.DATABASE_URL;
+  }
+});
+
 // ---------------------------------------------------------------------------
 // F — public API
 // ---------------------------------------------------------------------------
@@ -533,7 +567,7 @@ test('K1: persistent MEDIA_LOCAL_ROOT — restart backend (новый инста
       // той же БД — фотография должна остаться полностью рабочей.
       const cookie = await loginHq(second.base);
       const settingsPage = await getPage(second.base, cookie, `/hq/restaurants/${restaurantId}/settings`);
-      assert.ok(settingsPage.html.includes('Переживёт рестарт'), 'фотография должна остаться видна в HQ после restart');
+      assert.ok(settingsPage.html.includes('class="photo-card is-primary"'), 'фотография должна остаться видна в HQ после restart');
       assert.ok(fs.existsSync(path.join(mediaRoot, 'public', storageKeyBase, 'card.webp')), 'файл должен физически пережить restart, не быть пересоздан/утерян');
 
       const publicRes = await fetch(`${second.base}/api/restaurants/${restaurantId}`);

@@ -171,7 +171,36 @@ let demoStage='qr'; // 'qr' — создан, ждёт демо-оплаты; 's
 // загрузил ни одной настоящей фотографии (задание, раздел 13) — здесь
 // только приводим форму объекта к тому, что ждут render-функции ниже.
 function normalizePhotoGallery(apiGallery){
-  return (apiGallery||[]).map(p=>({thumb:p.urls.thumb,card:p.urls.card,full:p.urls.full,alt:p.alt||''}));
+  return (apiGallery||[]).map(p=>({thumb:p.urls.thumb,card:p.urls.card,full:p.urls.full,alt:p.alt||'',rotation:Number(p.rotation)||0,crops:p.crops||{menu_card:null,dish_detail:null}}));
+}
+function applyFilledCrop(img,crop,rotation){
+  if(!img)return;
+  img._yaamCrop=crop||null;img._yaamRotation=((Number(rotation)||0)%360+360)%360;
+  const paint=()=>{
+    const box=img.parentElement&&img.parentElement.getBoundingClientRect?img.parentElement.getBoundingClientRect():null;
+    if(!img.naturalWidth||!box||!box.width||!box.height)return;
+    const turn=img._yaamRotation,quarter=turn===90||turn===270;
+    const ow=quarter?img.naturalHeight:img.naturalWidth,oh=quarter?img.naturalWidth:img.naturalHeight;
+    let crop=img._yaamCrop;
+    if(!crop){const sourceAspect=ow/oh,frameAspect=box.width/box.height;if(sourceAspect>frameAspect){const width=frameAspect/sourceAspect;crop={x:(1-width)/2,y:0,width,height:1};}else{const height=sourceAspect/frameAspect;crop={x:0,y:(1-height)/2,width:1,height};}}
+    const scale=Math.max(box.width/(crop.width*ow),box.height/(crop.height*oh));
+    const rw=img.naturalWidth*scale,rh=img.naturalHeight*scale,cx=crop.x*ow*scale,cy=crop.y*oh*scale;
+    img.style.left='0';img.style.top='0';img.style.width=rw+'px';img.style.height=rh+'px';img.style.objectFit='fill';img.style.transformOrigin='0 0';
+    if(turn===90)img.style.transform=`matrix(0,1,-1,0,${rh-cx},${-cy})`;
+    else if(turn===180)img.style.transform=`matrix(-1,0,0,-1,${rw-cx},${rh-cy})`;
+    else if(turn===270)img.style.transform=`matrix(0,-1,1,0,${-cx},${rw-cy})`;
+    else img.style.transform=`matrix(1,0,0,1,${-cx},${-cy})`;
+  };
+  img._yaamCropPaint=paint;
+  if(img.complete)paint();else if(img.addEventListener)img.addEventListener('load',paint,{once:true});
+  if(!img._yaamCropResizeBound&&window.addEventListener){window.addEventListener('resize',paint,{passive:true});img._yaamCropResizeBound=true;}
+}
+function cropDataAttrs(crop,rotation){
+  return ` data-photo-crop="${esc(JSON.stringify(crop||null))}" data-photo-rotation="${((Number(rotation)||0)%360+360)%360}"`;
+}
+function applyElementCrop(img){
+  let crop=null;try{crop=JSON.parse(img.dataset.photoCrop||'null');}catch(e){}
+  applyFilledCrop(img,crop,Number(img.dataset.photoRotation)||0);
 }
 function normalizeRestaurant(r){
   return{
@@ -184,7 +213,7 @@ function normalizeRestaurant(r){
       cat:cat.name,
       items:cat.items.map(it=>({
         id:it.id, n:it.name, d:it.description||'', p:it.price,
-        g:'linear-gradient(135deg,#3d6b4e,#1e4630)', im:null, photoUrl:it.primary_photo?it.primary_photo.urls.card:'',
+        g:'linear-gradient(135deg,#3d6b4e,#1e4630)', im:null, photoUrl:it.primary_photo?it.primary_photo.urls.card:'', photoCrop:it.primary_photo&&it.primary_photo.crops?it.primary_photo.crops.menu_card:null, photoRotation:it.primary_photo?Number(it.primary_photo.rotation)||0:0,
         gallery:normalizePhotoGallery(it.gallery),
         pop:!!it.is_popular, available:it.is_available!==0,
         w:it.weight_g, kcal:it.kcal, prot:it.protein_g, fat:it.fat_g, carb:it.carbs_g, s:it.composition,
@@ -677,7 +706,7 @@ function dishCard(d,ci,ii){
   const hasSrc=!!(d.photoUrl||d.im);
   const photoSrc=hasSrc?(d.photoUrl||U(d.im,700)):'';
   const safePhotoSrc=esc(photoSrc);
-  const photo=hasSrc?`<img data-src="${safePhotoSrc}" loading="lazy" decoding="async" onerror="this.dataset.failed='1';this.closest('.dphoto').classList.add('nophoto');this.removeAttribute('src')">`:'';
+  const photo=hasSrc?`<img data-src="${safePhotoSrc}"${cropDataAttrs(d.photoCrop,d.photoRotation)} loading="lazy" decoding="async" onerror="this.dataset.failed='1';this.closest('.dphoto').classList.add('nophoto');this.removeAttribute('src')">`:'';
   return `<div class="dish ${so?'dis':''}" ${so?'':`onclick="openDish('${k}')"`}>
     <div class="dphoto ${hasSrc?'':'nophoto'}" style="background:${d.g}">${photo}
     <div class="dplate"><div class="dname">${esc(d.n)}${d.pop?' <span class="hit">Хит</span>':''}</div><div class="ddesc">${esc(d.d)}</div></div>
@@ -698,7 +727,7 @@ function initDishImageVirtualization(){
       const img=entry.target.querySelector('img[data-src]');
       if(!img||img.dataset.failed==='1')return;
       if(entry.isIntersecting){
-        if(!img.getAttribute('src'))img.src=img.dataset.src;
+        if(!img.getAttribute('src')){img.src=img.dataset.src;applyElementCrop(img);}
       }else{
         img.removeAttribute('src');
       }
@@ -1165,8 +1194,7 @@ function openDish(k){
   h.style.background=d.g;
   if(dishHasSrc){
     const heroSrc=dGallery.length?dGallery[0].full:(d.photoUrl||U(d.im,1000));
-    const img=new Image();img.src=heroSrc;img.alt=dGallery.length?(dGallery[0].alt||''):'';img.onerror=function(){h.classList.add('nophoto');this.remove()};h.insertBefore(img,h.firstChild);
-    h.style.setProperty('--dhero-bg','url("'+heroSrc+'")');
+    const img=new Image();img.src=heroSrc;img.alt=dGallery.length?(dGallery[0].alt||''):'';img.onerror=function(){h.classList.add('nophoto');this.remove()};h.insertBefore(img,h.firstChild);applyFilledCrop(img,dGallery.length&&dGallery[0].crops&&dGallery[0].crops.dish_detail,dGallery.length&&dGallery[0].rotation);
   }
   renderGallery('d',dGallery);
   if(!dGallery.length){
@@ -1197,7 +1225,6 @@ function addFromDish(){const it=findItem(curDishKey);cart[curDishKey]={n:it.n,p:
 function swapHero(id,i){
   const src=U(id,1000);
   const img=document.querySelector('#d-hero img');if(img)img.src=src;
-  const heroEl=document.getElementById('d-hero');if(heroEl)heroEl.style.setProperty('--dhero-bg','url("'+src+'")');
   document.querySelectorAll('#d-gallery .thumb').forEach((t,j)=>t.classList.toggle('on',j===i));
 }
 
@@ -1244,11 +1271,7 @@ function gallerySet(prefix,i){
   const photo=st.photos[idx];
   const heroImg=document.querySelector('#'+prefix+'-hero img');
   if(heroImg){heroImg.src=photo.full;heroImg.alt=photo.alt||'';}
-  // Размытый фон "большой галереи" (только у блюда — #d-hero, задание:
-  // "фон галереи должен выглядеть аккуратно при несовпадении пропорций") —
-  // тот же URL, что и сам <img>, через CSS custom property (см. .dhero::before).
-  const heroEl=document.getElementById(prefix+'-hero');
-  if(heroEl)heroEl.style.setProperty('--dhero-bg','url("'+photo.full+'")');
+  if(heroImg)applyFilledCrop(heroImg,photo.crops&&photo.crops.dish_detail,photo.rotation);
   const stripEl=document.getElementById(prefix+'-gallery');
   if(stripEl)stripEl.querySelectorAll('.thumb').forEach((t,j)=>t.classList.toggle('on',j===idx));
   const countEl=document.getElementById(prefix+'-gcount');

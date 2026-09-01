@@ -9,7 +9,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { toPublicPhotoDTO, buildPhotoFields, attachPhotoFields } = require('../services/hq/media/publicPhotoDTO');
-const { resolvePrimaryPhoto, ALT_TEXT_MAX, normalizeAltText } = require('../services/hq/media/photoService');
+const { resolvePrimaryPhoto, ALT_TEXT_MAX, normalizeAltText, normalizeCrop, normalizeRotation } = require('../services/hq/media/photoService');
 const { ValidationError } = require('../services/hq/restaurantLifecycle');
 
 const stubProvider = { getPublicUrl: (key) => `https://cdn.test/${key}` };
@@ -23,11 +23,28 @@ function photoRow(overrides) {
   };
 }
 
-test('toPublicPhotoDTO: содержит ТОЛЬКО alt/urls — ничего внутреннего', () => {
+test('toPublicPhotoDTO: содержит только публичные alt/urls/crops — ничего внутреннего', () => {
   const dto = toPublicPhotoDTO(stubProvider, photoRow({ alt_text: 'Зал ресторана' }));
-  assert.deepEqual(Object.keys(dto).sort(), ['alt', 'urls']);
+  assert.deepEqual(Object.keys(dto).sort(), ['alt', 'crops', 'rotation', 'urls']);
   assert.deepEqual(Object.keys(dto.urls).sort(), ['card', 'full', 'thumb']);
   assert.equal(dto.alt, 'Зал ресторана');
+  assert.equal(dto.rotation, 0);
+});
+
+test('toPublicPhotoDTO: отдаёт независимые crops карточки и экрана блюда', () => {
+  const menuCard = { x: 0.1, y: 0.2, width: 0.7, height: 0.3 };
+  const detail = { x: 0.2, y: 0, width: 0.8, height: 0.8 };
+  const dto = toPublicPhotoDTO(stubProvider, photoRow({ menu_card_crop: menuCard, dish_detail_crop: detail }));
+  assert.deepEqual(dto.crops, { menu_card: menuCard, dish_detail: detail });
+});
+
+test('rotation metadata is normalized for 0/90/180/270/360 and isolated per photo DTO', () => {
+  assert.deepEqual([0, 90, 180, 270, 360].map(normalizeRotation), [0, 90, 180, 270, 0]);
+  assert.throws(() => normalizeRotation(45), ValidationError);
+  const first = toPublicPhotoDTO(stubProvider, photoRow({ id: 1, rotation_degrees: 90 }));
+  const second = toPublicPhotoDTO(stubProvider, photoRow({ id: 2, rotation_degrees: 270 }));
+  assert.equal(first.rotation, 90);
+  assert.equal(second.rotation, 270);
 });
 
 test('toPublicPhotoDTO: НЕ содержит storage_key/id/archived_at/admin-метаданные даже как значения дочерних полей', () => {
@@ -78,6 +95,7 @@ test('buildPhotoFields: нет реальных фото, есть legacy photo_
   assert.ok(fields.primary_photo);
   assert.equal(fields.primary_photo.urls.card, 'https://legacy.example.com/old.jpg');
   assert.equal(fields.primary_photo.urls.thumb, fields.primary_photo.urls.full);
+  assert.equal(fields.primary_photo.rotation, 0);
   assert.equal(fields.gallery.length, 1);
 });
 
@@ -124,4 +142,14 @@ test('normalizeAltText: превышение ALT_TEXT_MAX бросает Validat
 test('normalizeAltText: ровно ALT_TEXT_MAX символов — валидно (граница включительно)', () => {
   const exact = 'a'.repeat(ALT_TEXT_MAX);
   assert.equal(normalizeAltText(exact), exact);
+});
+
+test('normalizeCrop: принимает bounded 7:3 и 1:1 crop', () => {
+  assert.deepEqual(normalizeCrop({ x: 0, y: 0.2, width: 0.7, height: 0.3 }, 'menu_card'), { x: 0, y: 0.2, width: 0.7, height: 0.3 });
+  assert.deepEqual(normalizeCrop('{"x":0.2,"y":0,"width":0.8,"height":0.8}', 'dish_detail'), { x: 0.2, y: 0, width: 0.8, height: 0.8 });
+});
+
+test('normalizeCrop: отклоняет выход за master и неверный aspect ratio', () => {
+  assert.throws(() => normalizeCrop({ x: 0.5, y: 0, width: 0.6, height: 0.6 }, 'dish_detail'), ValidationError);
+  assert.throws(() => normalizeCrop({ x: 0, y: 0, width: 1, height: 1 }, 'menu_card'), ValidationError);
 });

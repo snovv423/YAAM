@@ -54,6 +54,7 @@ function renderDishRow({ item, linkBasePath, restaurantId }) {
           <span class="dish-name">${esc(item.name)}</span>
           <span class="dish-meta">${money(item.price)} · ${esc(itemStatusLabel(item))}</span>
         </span>
+        <span class="dish-photo-count">${Number(item.photo_count) || 0} фото</span>
         <span class="dish-chevron" aria-hidden="true"></span>
       </a>
     </li>`;
@@ -270,7 +271,7 @@ function renderCategoryEditForm({ restaurant, category, error, csrfToken, linkBa
 // «Сделать недоступным» не используется. Физического удаления нет: блюдо,
 // участвовавшее в заказах, только архивируется.
 function renderMenuItemForm({
-  restaurant, item, categories, error, csrfToken, linkBasePath, isNew,
+  restaurant, item, categories, error, notice, csrfToken, linkBasePath, isNew,
   photos = [], mediaConfigured = false, maxPhotos = 0, presetCategoryId = null,
 }) {
   const v = item || {};
@@ -357,7 +358,7 @@ function renderMenuItemForm({
       photos, mediaConfigured, maxPhotos,
       uploadAction: `${base}/items/${v.id}/photos`,
       actionBase: `${base}/items/${v.id}/photos`,
-      csrfToken,
+      csrfToken, dishCrops: true, notice,
     }) : ''}
     <a class="btn ghost compact" href="${base}">← К меню</a>
   `;

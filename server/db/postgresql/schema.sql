@@ -263,9 +263,16 @@ CREATE TABLE IF NOT EXISTS menu_item_photos (
   alt_text TEXT NOT NULL DEFAULT '',
   sort_order INTEGER NOT NULL DEFAULT 0,
   is_primary INTEGER NOT NULL DEFAULT 0,    -- 0/1
+  menu_card_crop JSONB,
+  dish_detail_crop JSONB,
+  rotation_degrees INTEGER NOT NULL DEFAULT 0 CHECK (rotation_degrees IN (0, 90, 180, 270)),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE menu_item_photos ADD COLUMN IF NOT EXISTS menu_card_crop JSONB;
+ALTER TABLE menu_item_photos ADD COLUMN IF NOT EXISTS dish_detail_crop JSONB;
+ALTER TABLE menu_item_photos ADD COLUMN IF NOT EXISTS rotation_degrees INTEGER NOT NULL DEFAULT 0;
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_menu_item_photos_one_primary
   ON menu_item_photos (menu_item_id) WHERE is_primary = 1;

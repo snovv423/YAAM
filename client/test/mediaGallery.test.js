@@ -28,6 +28,7 @@ function apiPhoto(suffix, alt) {
   return {
     alt: alt || '',
     urls: { thumb: `https://cdn.test/${suffix}-thumb.webp`, card: `https://cdn.test/${suffix}-card.webp`, full: `https://cdn.test/${suffix}-full.webp` },
+    crops: { menu_card: null, dish_detail: null },
   };
 }
 
@@ -46,6 +47,32 @@ test('normalizeRestaurant: ресторан с primary_photo и gallery — ко
   assert.equal(r.gallery.length, 2);
   assert.equal(r.gallery[0].full, 'https://cdn.test/a-full.webp');
   assert.equal(r.gallery[1].alt, 'Зал');
+  teardown(sandbox);
+});
+
+test('normalizeRestaurant: сохраняет независимые crop-параметры блюда', () => {
+  const sandbox = freshApp({ apiBaseUrl: 'https://api-pg.yaam.su' });
+  const photo = apiPhoto('dish', '');
+  photo.crops = { menu_card: { x: 0, y: 0.2, width: 0.7, height: 0.3 }, dish_detail: { x: 0.1, y: 0, width: 0.9, height: 0.9 } };
+  photo.rotation = 90;
+  const value = { id: 1, name: 'Кафе', menu: [{ name: 'Кат', items: [{ id: 2, name: 'Блюдо', price: 100, primary_photo: photo, gallery: [photo] }] }] };
+  const normalized = JSON.parse(evalInContext(sandbox, `JSON.stringify(normalizeRestaurant(${toContextLiteral(value)}))`));
+  assert.deepEqual(normalized.menu[0].items[0].photoCrop, photo.crops.menu_card);
+  assert.deepEqual(normalized.menu[0].items[0].gallery[0].crops.dish_detail, photo.crops.dish_detail);
+  assert.equal(normalized.menu[0].items[0].photoRotation, 90);
+  assert.equal(normalized.menu[0].items[0].gallery[0].rotation, 90);
+  teardown(sandbox);
+});
+
+test('filled crop painter keeps persisted rotation and uses cover geometry for crop and fallback', () => {
+  const sandbox = freshApp({ apiBaseUrl: 'https://api-pg.yaam.su' });
+  const result = JSON.parse(evalInContext(sandbox, `(()=>{const parent={getBoundingClientRect:()=>({width:700,height:300})};const img={naturalWidth:900,naturalHeight:1600,parentElement:parent,style:{},complete:true};applyFilledCrop(img,{x:0,y:0.35,width:1,height:3/7},90);return JSON.stringify(img.style)})()`));
+  assert.match(result.transform, /^matrix\(0,1,-1,0,/);
+  assert.ok(parseFloat(result.width) >= 700);
+  assert.ok(parseFloat(result.height) >= 300);
+  const fallback = JSON.parse(evalInContext(sandbox, `(()=>{const parent={getBoundingClientRect:()=>({width:300,height:300})};const img={naturalWidth:1600,naturalHeight:900,parentElement:parent,style:{},complete:true};applyFilledCrop(img,null,0);return JSON.stringify(img.style)})()`));
+  assert.equal(parseFloat(fallback.height), 300);
+  assert.ok(parseFloat(fallback.width) > 300);
   teardown(sandbox);
 });
 

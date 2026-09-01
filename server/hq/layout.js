@@ -261,6 +261,7 @@ function layout({ title, active, body, csrfToken, linkBasePath = '/hq' }) {
   .dish-main{flex:1;min-width:0;display:flex;flex-direction:column}
   .dish-name{font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .dish-meta{color:var(--txt2);font-size:12px;margin-top:2px}
+  .dish-photo-count{flex:0 0 auto;color:var(--txt2);font-size:12px;white-space:nowrap}
   /* Шеврон — CSS-треугольник из границ, не типографский символ. */
   .dish-chevron{flex:0 0 auto;width:7px;height:7px;border-right:2px solid var(--txt2);border-top:2px solid var(--txt2);transform:rotate(45deg);opacity:.6}
   .archive-row{gap:10px;flex-wrap:wrap}
@@ -400,17 +401,51 @@ function layout({ title, active, body, csrfToken, linkBasePath = '/hq' }) {
      набор классов для обоих разделов (hq/photosViews.js) — минимализм:
      карточка = превью + primary-бейдж + компактные действия, без лишней
      хромированности "CMS-таблицы файлов". */
-  .photo-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;margin-top:14px}
-  .photo-card{position:relative;border:1px solid var(--bord);border-radius:12px;overflow:hidden;background:rgba(255,255,255,.03)}
-  .photo-card img{display:block;width:100%;aspect-ratio:4/3;object-fit:cover;object-position:center;background:rgba(255,255,255,.04)}
-  .photo-badge{position:absolute;top:8px;left:8px;background:var(--amber);color:#3a1c00;font-size:10px;font-weight:800;padding:2px 8px;border-radius:999px;letter-spacing:.02em;text-transform:uppercase}
+  .photo-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:14px;margin-top:14px}
+  .photo-grid-dish{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .photo-card{position:relative;border:1px solid var(--bord);border-radius:16px;background:rgba(255,255,255,.03);transition:border-color .18s,box-shadow .18s,transform .18s;min-width:0}
+  .photo-card:hover{border-color:rgba(255,255,255,.28);transform:translateY(-1px)}
+  .photo-card:focus-within{box-shadow:0 0 0 3px rgba(255,154,46,.2)}
+  .photo-card.is-primary{border:2px solid var(--amber);box-shadow:0 12px 30px rgba(0,0,0,.18)}
+  .photo-open{display:block;width:100%;padding:0;border:0;border-radius:14px 14px 0 0;overflow:hidden;background:#101614;position:relative;color:#fff;text-align:left}
+  .photo-open .photo-master-preview{display:block;width:100%;aspect-ratio:4/3;object-fit:cover;object-position:center;background:rgba(255,255,255,.04);transition:transform .2s}
+  .photo-open:hover .photo-master-preview{transform:scale(1.025)}
+  .photo-edit-label{position:absolute;left:10px;right:10px;bottom:10px;padding:8px 10px;border-radius:9px;background:rgba(8,22,16,.84);backdrop-filter:blur(8px);font-size:12px;font-weight:700;text-align:center}
+  .photo-badge{position:absolute;z-index:2;top:9px;left:9px;background:var(--amber);color:#3a1c00;font-size:10px;font-weight:800;padding:5px 9px;border-radius:999px;letter-spacing:.02em;text-transform:uppercase;box-shadow:0 5px 16px rgba(0,0,0,.25)}
   .photo-body{padding:10px}
-  .photo-actions{display:flex;flex-wrap:wrap;gap:6px}
+  .photo-actions{display:flex;flex-wrap:wrap;gap:7px;align-items:center;justify-content:space-between}
   .photo-actions form{margin:0}
   .photo-actions button{padding:7px 10px;font-size:12px}
+  .primary-choice{background:transparent!important;color:var(--amber)!important;border:1px solid rgba(255,154,46,.55)!important}
+  .primary-selected{font-size:12px;font-weight:750;color:var(--amber)}
   .photo-upload{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;margin-top:14px}
   .photo-upload .field{flex:1 1 320px;min-width:180px}
   .photo-meta{font-size:12px;color:var(--txt2);margin-top:10px}
+  .photo-editor{display:none;grid-column:1/-1;margin:0 -1px -1px;padding:20px;border-top:1px solid var(--bord);background:rgba(5,18,12,.55);border-radius:0 0 15px 15px}
+  .photo-editor.is-open{display:block}
+  .photo-card:has(.photo-editor.is-open){grid-column:1/-1}
+  .photo-card:has(.photo-editor.is-open)>.photo-open{max-width:280px;border-radius:14px 0 0 0}
+  .photo-card:has(.photo-editor.is-open)>.photo-body{position:absolute;left:280px;top:0;right:0;min-height:100px}
+  .photo-editor-heading{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:16px}
+  .photo-editor-heading strong{display:block;font-size:18px}.photo-editor-heading span{display:block;color:var(--txt2);font-size:12px;margin-top:4px}
+  .crop-preset-tabs{display:flex;gap:8px;margin-bottom:18px;padding:4px;background:rgba(255,255,255,.045);border-radius:12px;width:max-content;max-width:100%}
+  .crop-preset-tabs button{background:transparent;color:var(--txt2);box-shadow:none;padding:10px 14px;font-size:13px}
+  .crop-preset-tabs button span{opacity:.65;margin-left:4px}.crop-preset-tabs button.is-active{background:var(--amber);color:#3a1c00}
+  .rotation-controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:-8px 0 16px}.rotation-controls>span{font-size:12px;color:var(--txt2);margin-right:auto}.rotation-controls strong{color:var(--txt)}
+  .crop-workspace{display:grid;grid-template-columns:minmax(0,1fr) 220px;gap:22px;align-items:start}
+  .crop-form{display:none}.crop-form.is-active{display:block}
+  .crop-title{display:flex;justify-content:space-between;gap:10px;align-items:center;font-size:13px;margin-bottom:10px}.crop-title span{color:var(--txt2);font-weight:500;font-size:11px}
+  .crop-stage{display:flex;align-items:center;justify-content:center;padding:28px;background:rgba(0,0,0,.58);border:1px solid rgba(255,255,255,.09);border-radius:14px;min-height:330px;box-shadow:inset 0 0 50px rgba(0,0,0,.4)}
+  .crop-viewport{position:relative;overflow:hidden;background:#111;touch-action:none;cursor:grab;border:2px solid #fff;border-radius:8px;user-select:none;box-shadow:0 0 0 999px rgba(0,0,0,.32);width:100%;max-height:440px}
+  .crop-viewport:active{cursor:grabbing}.crop-menu_card{aspect-ratio:7/3}.crop-dish_detail{aspect-ratio:1/1}
+  .crop-viewport img{position:absolute;max-width:none!important;max-height:none!important;aspect-ratio:auto!important;object-fit:fill!important;pointer-events:none;transform-origin:center}
+  .crop-guide{position:absolute;inset:0;pointer-events:none;background:linear-gradient(to right,transparent 33.1%,rgba(255,255,255,.35) 33.3%,transparent 33.6%,transparent 66.3%,rgba(255,255,255,.35) 66.6%,transparent 66.9%),linear-gradient(to bottom,transparent 33.1%,rgba(255,255,255,.35) 33.3%,transparent 33.6%,transparent 66.3%,rgba(255,255,255,.35) 66.6%,transparent 66.9%)}
+  .crop-controls{display:flex;gap:10px;align-items:center;margin-top:12px}.crop-controls button{flex:0 0 auto}
+  .crop-zoom{display:flex;align-items:center;gap:10px;flex:1;margin:0;font-size:12px;text-transform:none;letter-spacing:0}.crop-zoom input{margin:0;padding:0;min-width:80px;width:100%}
+  .crop-preview-heading{font-size:12px;font-weight:750;margin-bottom:12px}.crop-preview-card{margin-bottom:14px}.crop-preview-label{display:flex;justify-content:space-between;color:var(--txt2);font-size:11px;margin-bottom:6px}.crop-preview-label strong{color:var(--txt);font-size:12px}
+  .crop-preview{position:relative;overflow:hidden;border-radius:10px;background:#111;border:1px solid var(--bord)}.crop-preview img{position:absolute;max-width:none!important;max-height:none!important;aspect-ratio:auto!important;object-fit:fill!important;transform-origin:center}
+  @media(max-width:900px){.photo-grid-dish{grid-template-columns:repeat(2,minmax(0,1fr))}.crop-workspace{grid-template-columns:1fr}.crop-live-previews{display:grid;grid-template-columns:1fr 1fr;gap:12px}.crop-preview-heading{grid-column:1/-1;margin:0}}
+  @media(max-width:620px){.photo-grid-dish{grid-template-columns:1fr 1fr;gap:10px}.photo-card:has(.photo-editor.is-open)>.photo-open{max-width:none}.photo-card:has(.photo-editor.is-open)>.photo-body{position:static}.photo-editor{padding:14px}.photo-editor-heading{align-items:center}.crop-stage{padding:14px;min-height:220px}.crop-preset-tabs{display:grid;grid-template-columns:1fr 1fr;width:100%}.crop-preset-tabs button{padding:10px 8px}.rotation-controls>span{flex:1 1 100%}.rotation-controls button{flex:1;min-height:44px;padding:9px 6px}.crop-title{align-items:flex-start;flex-direction:column}.crop-controls{flex-wrap:wrap}.crop-zoom{flex:1 1 100%}.crop-live-previews{grid-template-columns:1fr 1fr}.dish-photo-count{font-size:11px}}
 
   /* Мобильный responsive-table: превращает строки в компактные карточки без
      дублирования разметки (задание, раздел 14 — "на mobile строки заказов

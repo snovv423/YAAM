@@ -125,6 +125,17 @@ test('processImage: результат не содержит EXIF/метадан
   assert.equal(meta.exif, undefined, 'обработанный вариант не должен содержать EXIF исходника');
 });
 
+test('processImage: EXIF orientation from iPhone/camera is applied before editor rotation metadata', async () => {
+  const portraitPixelsWithLandscapeExif = await sharp({
+    create: { width: 90, height: 160, channels: 3, background: { r: 40, g: 80, b: 120 } },
+  }).withMetadata({ orientation: 6 }).jpeg().toBuffer();
+  const result = await processImage(portraitPixelsWithLandscapeExif);
+  assert.equal(result.variants.full.width, 160);
+  assert.equal(result.variants.full.height, 90);
+  const metadata = await sharp(result.variants.full.buffer).metadata();
+  assert.equal(metadata.orientation, undefined);
+});
+
 // --- Stage 5B.1: master-вариант (сохранение для будущей повторной генерации) ---
 
 test('PUBLIC_VARIANT_NAMES: содержит ровно thumb/card/full, БЕЗ master (не публичный вариант)', () => {
