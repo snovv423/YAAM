@@ -283,7 +283,8 @@ test('mobile axis-lock is permanent: diagonal horizontal drag captures and preve
   });
 
   hero.dispatchEvent(event('pointerdown', 11, 250, 150, 0));
-  const belowThreshold = event('pointermove', 11, 244, 146, 20);
+  // Меньше порога активации (6px) — жест ещё ничей.
+  const belowThreshold = event('pointermove', 11, 246, 147, 20);
   hero.dispatchEvent(belowThreshold);
   assert.equal(evalInContext(sandbox, 'galleryState.d.drag.axis'), null);
   assert.equal(belowThreshold.defaultPrevented, false);
@@ -341,6 +342,106 @@ test('swipe decision combines distance and velocity; first/last edges rubber-ban
   assert.ok(resistedStart > 0 && resistedStart < 120);
   assert.ok(resistedEnd < 0 && resistedEnd > -120);
   assert.equal(evalInContext(sandbox, 'galleryRubberBand(-120,300,1,3)'), -120, 'между кадрами сопротивления нет');
+  teardown(sandbox);
+});
+
+test('диагональ достаётся вертикальному скроллу, пока горизонталь не преобладает явно', () => {
+  const sandbox = freshApp({ apiBaseUrl: 'https://api-pg.yaam.su' });
+  const axis = (dx, dy) => evalInContext(sandbox, `resolveGalleryAxis(${dx},${dy})`);
+
+  // Ниже порога активации решения нет вовсе.
+  assert.equal(axis(4, 3), null);
+  assert.equal(axis(-5, 1), null);
+
+  // Ровно 45° и всё, что круче, — это скролл страницы, а не галерея. Раньше
+  // такой жест решался дрожанием в один пиксель и «прилипал» то туда, то сюда.
+  assert.equal(axis(20, 20), 'vertical', '45° не должен воровать жест у скролла');
+  assert.equal(axis(-20, 20), 'vertical');
+  assert.equal(axis(22, 20), 'vertical', 'слабое преобладание горизонтали ещё не галерея');
+  assert.equal(axis(30, 20), 'horizontal', 'явная горизонталь забирает жест');
+  assert.equal(axis(-40, 8), 'horizontal');
+
+  // Почти чистая вертикаль всегда остаётся нативной.
+  assert.equal(axis(3, 40), 'vertical');
+  teardown(sandbox);
+});
+
+test('non-passive touchmove гасит нативный скролл только для горизонтального жеста', () => {
+  const sandbox = freshApp({ apiBaseUrl: 'https://api-pg.yaam.su' });
+  const photos = [apiPhotoNormalized('a', ''), apiPhotoNormalized('b', ''), apiPhotoNormalized('c', '')];
+  const hero = sandbox.document.getElementById('d-hero');
+  hero.getBoundingClientRect = () => ({ width: 300, height: 300, top: 0, left: 0, right: 300, bottom: 300 });
+  evalInContext(sandbox, `renderGallery('d', ${toContextLiteral(photos)})`);
+
+  const touch = (type, x, y, timeStamp) => ({
+    type, timeStamp, cancelable: true, defaultPrevented: false,
+    touches: [{ clientX: x, clientY: y }],
+    preventDefault() { this.defaultPrevented = true; },
+  });
+  const pointer = (type, x, y, timeStamp) => ({
+    type, pointerId: 1, pointerType: 'touch', isPrimary: true,
+    clientX: x, clientY: y, timeStamp, cancelable: true, defaultPrevented: false,
+    preventDefault() { this.defaultPrevented = true; },
+  });
+
+  // Горизонталь: touchmove обязан отменить скролл — на iOS это единственный
+  // способ удержать страницу, preventDefault на pointermove там не работает.
+  hero.dispatchEvent(pointer('pointerdown', 250, 150, 0));
+  const horizontalTouch = touch('touchmove', 220, 154, 30);
+  hero.dispatchEvent(horizontalTouch);
+  assert.equal(evalInContext(sandbox, 'galleryState.d.drag.axis'), 'horizontal');
+  assert.equal(horizontalTouch.defaultPrevented, true, 'горизонтальный жест обязан остановить скролл страницы');
+  hero.dispatchEvent(pointer('pointerup', 220, 154, 40));
+  finishDishSnap(sandbox);
+
+  // Вертикаль: touchmove не трогается, страница скроллится нативно.
+  hero.dispatchEvent(pointer('pointerdown', 180, 150, 100));
+  const verticalTouch = touch('touchmove', 176, 190, 130);
+  hero.dispatchEvent(verticalTouch);
+  assert.equal(evalInContext(sandbox, 'galleryState.d.drag.axis'), 'vertical');
+  assert.equal(verticalTouch.defaultPrevented, false, 'вертикальный жест обязан остаться нативным');
+
+  // Ось не переигрывается: последующий резко горизонтальный touchmove внутри
+  // того же жеста скролл уже не отменяет.
+  const laterHorizontal = touch('touchmove', 40, 196, 170);
+  hero.dispatchEvent(laterHorizontal);
+  assert.equal(evalInContext(sandbox, 'galleryState.d.drag.axis'), 'vertical');
+  assert.equal(laterHorizontal.defaultPrevented, false);
+  hero.dispatchEvent(pointer('pointerup', 40, 196, 180));
+  teardown(sandbox);
+});
+
+test('touchmove снимается вместе с остальными listeners при повторном render', () => {
+  const sandbox = freshApp({ apiBaseUrl: 'https://api-pg.yaam.su' });
+  const photos = [apiPhotoNormalized('a', ''), apiPhotoNormalized('b', '')];
+  const hero = sandbox.document.getElementById('d-hero');
+  hero.getBoundingClientRect = () => ({ width: 300, height: 300, top: 0, left: 0, right: 300, bottom: 300 });
+  evalInContext(sandbox, `renderGallery('d', ${toContextLiteral(photos)})`);
+  const afterFirst = (hero.listeners && hero.listeners.touchmove ? hero.listeners.touchmove.length : 0);
+  assert.equal(afterFirst, 1, 'должен быть ровно один touchmove listener');
+  evalInContext(sandbox, `renderGallery('d', ${toContextLiteral(photos)})`);
+  const afterSecond = (hero.listeners && hero.listeners.touchmove ? hero.listeners.touchmove.length : 0);
+  assert.equal(afterSecond, 1, 'повторный render не должен накапливать listeners');
+  teardown(sandbox);
+});
+
+test('длительность snap зависит от остатка пути и скорости отпускания', () => {
+  const sandbox = freshApp({ apiBaseUrl: 'https://api-pg.yaam.su' });
+  const dur = (remaining, width, velocity) => evalInContext(sandbox, `gallerySnapDuration(${remaining},${width},${velocity})`);
+
+  const far = dur(280, 300, 0);
+  const near = dur(20, 300, 0);
+  assert.ok(far > near, 'дальше идти — дольше анимация');
+
+  // Резкий flick завершается быстрее, чем такое же расстояние после медленного
+  // отпускания: иначе после броска картинка «доезжает» вязко.
+  assert.ok(dur(280, 300, 2) < dur(280, 300, 0), 'быстрый flick должен доводиться быстрее');
+
+  // Границы диапазона соблюдаются в любом случае.
+  for (const [r, w, v] of [[0, 300, 0], [900, 300, 0], [300, 300, 9], [-300, 300, -9]]) {
+    const d = dur(r, w, v);
+    assert.ok(d >= 170 && d <= 340, `длительность ${d} вне диапазона 170..340`);
+  }
   teardown(sandbox);
 });
 

@@ -77,6 +77,10 @@ function makeFakeElement(id) {
     onclick: null,
     setAttribute(name, value) { this.attributes[name] = String(value); },
     removeAttribute(name) { delete this.attributes[name]; },
+    // Открыто наружу, чтобы тест мог убедиться, что повторный render не
+    // копит обработчики (утечка listeners на dish-hero один раз уже приводила
+    // к тому, что один свайп обрабатывался дважды).
+    listeners,
     addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
     removeEventListener(type, fn) {
       if (!listeners[type]) return;

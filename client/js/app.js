@@ -1234,7 +1234,18 @@ function swapHero(id,i){
 // оставляет вертикальную прокрутку браузеру; индекс, счётчик и thumbnail
 // фиксируются только после завершения snap-анимации.
 const GALLERY_SNAP_MS=260;
-const GALLERY_AXIS_LOCK_PX=8;
+const GALLERY_SNAP_MIN_MS=170;
+const GALLERY_SNAP_MAX_MS=340;
+// Порог опущен с 8 до 6 px намеренно: решение об оси обязано состояться на
+// первом же реальном touchmove. Safari решает, начинать ли инерционный
+// scroll, ровно на нём — если мы опоздали с preventDefault, страница уже
+// поехала, и дальше её не остановить.
+const GALLERY_AXIS_LOCK_PX=6;
+// Горизонталь забирает жест только при явном преобладании. При строгом
+// |dx|>|dy| диагональ ~45° решалась дрожанием в один пиксель, и жест
+// «прилипал» то к галерее, то к скроллу. Спорная диагональ должна доставаться
+// вертикальному скроллу страницы — это привычнее и безопаснее.
+const GALLERY_AXIS_BIAS=1.25;
 const GALLERY_DISTANCE_RATIO=.22;
 const GALLERY_MIN_DISTANCE_PX=52;
 const GALLERY_VELOCITY_PX_MS=.48;
@@ -1245,6 +1256,23 @@ function galleryHeroWidth(hero){
   return Math.max(1,Number(box&&box.width)||Number(hero&&hero.clientWidth)||1);
 }
 function galleryTrackX(index,width,dragX=0){return-index*width+dragX;}
+// Единственное место, где определяется ось. Вызывается и из pointermove, и из
+// touchmove: порядок доставки этих двух событий различается между браузерами,
+// а решение должно быть одинаковым и приниматься на самом раннем из них.
+function resolveGalleryAxis(dx,dy){
+  if(Math.max(Math.abs(dx),Math.abs(dy))<GALLERY_AXIS_LOCK_PX)return null;
+  return Math.abs(dx)>Math.abs(dy)*GALLERY_AXIS_BIAS?'horizontal':'vertical';
+}
+// Длительность snap зависит от того, сколько осталось пройти и как быстро
+// отпустили: после резкого flick’а фиксированные 260 мс ощущаются вязкими, а
+// после медленного отпускания у самой границы — рывком.
+function gallerySnapDuration(remainingPx,width,velocityX){
+  const span=Math.max(1,width);
+  const ratio=Math.min(1,Math.abs(remainingPx)/span);
+  const speed=Math.min(2.4,Math.abs(velocityX)||0);
+  const base=GALLERY_SNAP_MIN_MS+ratio*(GALLERY_SNAP_MAX_MS-GALLERY_SNAP_MIN_MS);
+  return Math.round(Math.max(GALLERY_SNAP_MIN_MS,Math.min(GALLERY_SNAP_MAX_MS,base-speed*70)));
+}
 function galleryRubberBand(dragX,width,index,count){
   const beyondStart=index===0&&dragX>0;
   const beyondEnd=index===count-1&&dragX<0;
@@ -1282,16 +1310,19 @@ function finishGallerySnap(prefix,target,sequence){
   if(st.snapTimer){clearTimeout(st.snapTimer);st.snapTimer=null;}
   if(st.snapEnd&&st.track)st.track.removeEventListener('transitionend',st.snapEnd);
   st.snapEnd=null;st.snapping=false;
-  if(st.track)st.track.classList.remove('snapping');
+  if(st.track){st.track.classList.remove('snapping');st.track.style.transitionDuration='';}
   updateGalleryChrome(prefix,target);
   setGalleryTrackPosition(st,target);
 }
-function snapGalleryTrack(prefix,target){
+function snapGalleryTrack(prefix,target,durationMs){
   const st=galleryState[prefix];
   if(!st||!st.track||st.snapping)return;
   const clamped=Math.max(0,Math.min(st.photos.length-1,target));
   const sequence=(st.snapSequence||0)+1;
   st.snapSequence=sequence;st.snapping=true;
+  const duration=Number.isFinite(durationMs)?durationMs:GALLERY_SNAP_MS;
+  st.snapDuration=duration;
+  st.track.style.transitionDuration=duration+'ms';
   st.track.classList.add('snapping');
   // Фиксируем текущий drag-transform до задания snap-точки: переход всегда
   // начинается из фактического положения под пальцем, а не из прошлого кадра.
@@ -1300,7 +1331,7 @@ function snapGalleryTrack(prefix,target){
   st.snapEnd=done;
   st.track.addEventListener('transitionend',done);
   setGalleryTrackPosition(st,clamped);
-  st.snapTimer=setTimeout(()=>finishGallerySnap(prefix,clamped,sequence),GALLERY_SNAP_MS+90);
+  st.snapTimer=setTimeout(()=>finishGallerySnap(prefix,clamped,sequence),duration+90);
 }
 function createDishGalleryTrack(hero,photos){
   const track=document.createElement('div');
@@ -1317,6 +1348,19 @@ function createDishGalleryTrack(hero,photos){
   hero.insertBefore(track,hero.firstChild);
   images.forEach((img,i)=>{const photo=photos[i];applyFilledCrop(img,photo.crops&&photo.crops.dish_detail,photo.rotation);});
   return{track,images};
+}
+// Фиксация оси, общая для pointer- и touch-слоя. Возвращает решение или null,
+// пока движения ещё недостаточно.
+function lockGalleryAxis(prefix,dx,dy){
+  const st=galleryState[prefix];
+  const drag=st&&st.drag;
+  if(!drag)return null;
+  if(drag.axis)return drag.axis;
+  const axis=resolveGalleryAxis(dx,dy);
+  if(!axis)return null;
+  drag.axis=axis;
+  if(axis==='horizontal'&&st.hero)st.hero.classList.add('dragging');
+  return axis;
 }
 function bindGalleryDrag(prefix,enabled){
   if(galleryDragCleanup[prefix]){
@@ -1340,20 +1384,18 @@ function bindGalleryDrag(prefix,enabled){
     if(!drag||e.pointerId!==drag.pointerId)return;
     const dx=e.clientX-drag.startX,dy=e.clientY-drag.startY;
     if(!drag.axis){
-      if(Math.max(Math.abs(dx),Math.abs(dy))<GALLERY_AXIS_LOCK_PX)return;
-      // Намерение определяется ровно один раз на первых 8 px. Прежняя
-      // «неопределённая» диагональная зона позволяла Safari начать scroll,
-      // а следующему move — внезапно перевести тот же жест в gallery drag.
-      // При равных осях приоритет остаётся у нативного vertical scroll.
-      drag.axis=Math.abs(dx)>Math.abs(dy)?'horizontal':'vertical';
-      if(drag.axis==='vertical')return;
-      hero.classList.add('dragging');
+      // Намерение определяется ровно один раз, на первых пикселях, и внутри
+      // жеста уже не меняется. Спорную диагональ resolveGalleryAxis отдаёт
+      // вертикальному скроллу.
+      lockGalleryAxis(prefix,dx,dy);
+      if(!drag.axis||drag.axis==='vertical')return;
       if(hero.setPointerCapture)try{hero.setPointerCapture(e.pointerId);drag.captured=true;}catch(err){}
     }
     if(drag.axis!=='horizontal')return;
     // Только уже зафиксированный horizontal-жест принадлежит галерее.
-    // Listener намеренно non-passive; vertical-жест сюда не попадает и
-    // продолжает полностью обслуживаться Safari благодаря touch-action:pan-y.
+    // Отмена здесь нужна для мыши и для браузеров, где pointermove
+    // действительно отменяет прокрутку; на iOS ту же работу делает
+    // non-passive touchmove ниже — Safari слушает именно его.
     if(e.cancelable&&typeof e.preventDefault==='function')e.preventDefault();
     const now=eventTime(e),dt=Math.max(1,now-drag.lastTime);
     const instant=(e.clientX-drag.lastX)/dt;
@@ -1371,23 +1413,47 @@ function bindGalleryDrag(prefix,enabled){
     if(drag.axis!=='horizontal'){setGalleryTrackPosition(st,st.index);return;}
     if(e.cancelable&&typeof e.preventDefault==='function')e.preventDefault();
     const dx=e.clientX-drag.startX;
-    const target=cancelled?st.index:gallerySwipeTarget(st.index,st.photos.length,dx,drag.velocityX,galleryHeroWidth(hero));
-    snapGalleryTrack(prefix,target);
+    const width=galleryHeroWidth(hero);
+    const target=cancelled?st.index:gallerySwipeTarget(st.index,st.photos.length,dx,drag.velocityX,width);
+    // Осталось пройти от текущего положения пальца до точки прилипания.
+    const settled=galleryRubberBand(dx,width,st.index,st.photos.length);
+    const remaining=(target-st.index)*width*-1-settled;
+    snapGalleryTrack(prefix,target,gallerySnapDuration(remaining,width,drag.velocityX));
   };
   const onUp=e=>endDrag(e,false);
   const onCancel=e=>endDrag(e,true);
   const onResize=()=>{if(!st.drag&&!st.snapping)setGalleryTrackPosition(st,st.index);};
+  // iOS Safari отменяет прокрутку ТОЛЬКО через non-passive touchmove:
+  // preventDefault() на pointermove там ничего не делает. Из-за этого при
+  // диагональном жесте страница продолжала ехать по Y, пока трек уже шёл за
+  // пальцем по X — ровно то «дёрганье», которое и ощущалось как сломанный
+  // свайп. Этот слушатель — единственное, что реально удерживает страницу.
+  //
+  // Ось он определяет сам, а не полагается на то, что pointermove пришёл
+  // раньше: порядок доставки pointer/touch между браузерами не одинаков, а
+  // опоздать здесь нельзя — Safari принимает решение о скролле на первом же
+  // touchmove.
+  const onTouchMove=e=>{
+    const drag=st.drag;
+    if(!drag)return;
+    const touch=e.touches&&e.touches.length?e.touches[0]:null;
+    if(touch)lockGalleryAxis(prefix,touch.clientX-drag.startX,touch.clientY-drag.startY);
+    if(drag.axis!=='horizontal')return;
+    if(e.cancelable&&typeof e.preventDefault==='function')e.preventDefault();
+  };
   const moveOptions={passive:false};
   hero.addEventListener('pointerdown',onDown);
   hero.addEventListener('pointermove',onMove,moveOptions);
   hero.addEventListener('pointerup',onUp);
   hero.addEventListener('pointercancel',onCancel);
+  hero.addEventListener('touchmove',onTouchMove,moveOptions);
   window.addEventListener('resize',onResize,{passive:true});
   galleryDragCleanup[prefix]=()=>{
     hero.removeEventListener('pointerdown',onDown);
     hero.removeEventListener('pointermove',onMove,moveOptions);
     hero.removeEventListener('pointerup',onUp);
     hero.removeEventListener('pointercancel',onCancel);
+    hero.removeEventListener('touchmove',onTouchMove,moveOptions);
     window.removeEventListener('resize',onResize);
   };
 }
