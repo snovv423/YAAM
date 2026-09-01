@@ -153,7 +153,9 @@ test('public markup and CSS remove circular gallery arrows and keep vertical tou
   assert.match(dragSource, /pointerdown/);
   assert.match(dragSource, /pointermove/);
   assert.match(dragSource, /pointerup/);
-  assert.doesNotMatch(dragSource, /preventDefault/);
+  assert.match(dragSource, /preventDefault/);
+  assert.match(dragSource, /\{passive:false\}/);
+  assert.match(dragSource, /setPointerCapture/);
 });
 
 test('renderGallery: одна фотография — тумб-стрип и счётчик скрыты', () => {
@@ -259,6 +261,71 @@ test('dish drag follows pointer live, reveals neighbour, snaps after release, an
   hero.dispatchEvent({ type: 'pointerup', pointerId: 3, pointerType: 'touch', clientX: 160, clientY: 162, timeStamp: 410 });
   finishDishSnap(sandbox);
   assert.equal(count.textContent, '2 / 3', 'короткий медленный drag плавно возвращается');
+  teardown(sandbox);
+});
+
+test('mobile axis-lock is permanent: diagonal horizontal drag captures and prevents, vertical drag stays native', () => {
+  const sandbox = freshApp({ apiBaseUrl: 'https://api-pg.yaam.su' });
+  const photos = [apiPhotoNormalized('a', ''), apiPhotoNormalized('b', ''), apiPhotoNormalized('c', '')];
+  const hero = sandbox.document.getElementById('d-hero');
+  hero.getBoundingClientRect = () => ({ width: 300, height: 300, top: 0, left: 0, right: 300, bottom: 300 });
+  const captured = [];
+  const released = [];
+  hero.setPointerCapture = pointerId => captured.push(pointerId);
+  hero.releasePointerCapture = pointerId => released.push(pointerId);
+  evalInContext(sandbox, `renderGallery('d', ${toContextLiteral(photos)})`);
+  const track = evalInContext(sandbox, 'galleryState.d.track');
+  const event = (type, pointerId, x, y, timeStamp) => ({
+    type, pointerId, pointerType: 'touch', isPrimary: true,
+    clientX: x, clientY: y, timeStamp, cancelable: true,
+    defaultPrevented: false,
+    preventDefault() { this.defaultPrevented = true; },
+  });
+
+  hero.dispatchEvent(event('pointerdown', 11, 250, 150, 0));
+  const belowThreshold = event('pointermove', 11, 244, 146, 20);
+  hero.dispatchEvent(belowThreshold);
+  assert.equal(evalInContext(sandbox, 'galleryState.d.drag.axis'), null);
+  assert.equal(belowThreshold.defaultPrevented, false);
+  assert.deepEqual(captured, []);
+
+  const horizontalLock = event('pointermove', 11, 238, 142, 40);
+  hero.dispatchEvent(horizontalLock);
+  assert.equal(evalInContext(sandbox, 'galleryState.d.drag.axis'), 'horizontal');
+  assert.equal(horizontalLock.defaultPrevented, true, 'horizontal lock должен остановить native Y-scroll');
+  assert.deepEqual(captured, [11]);
+  assert.equal(track.style.transform, 'translate3d(-12px,0,0)');
+
+  const diagonalAfterLock = event('pointermove', 11, 150, 290, 140);
+  hero.dispatchEvent(diagonalAfterLock);
+  assert.equal(evalInContext(sandbox, 'galleryState.d.drag.axis'), 'horizontal', 'ось нельзя переопределить внутри жеста');
+  assert.equal(diagonalAfterLock.defaultPrevented, true);
+  assert.equal(track.style.transform, 'translate3d(-100px,0,0)', 'после lock трек следует только за X пальца');
+  const horizontalUp = event('pointerup', 11, 150, 290, 150);
+  hero.dispatchEvent(horizontalUp);
+  assert.equal(horizontalUp.defaultPrevented, true);
+  assert.deepEqual(released, [11]);
+  finishDishSnap(sandbox);
+  assert.equal(evalInContext(sandbox, 'galleryState.d.index'), 1);
+
+  const settledTransform = track.style.transform;
+  hero.dispatchEvent(event('pointerdown', 12, 180, 150, 200));
+  const verticalLock = event('pointermove', 12, 175, 161, 225);
+  hero.dispatchEvent(verticalLock);
+  assert.equal(evalInContext(sandbox, 'galleryState.d.drag.axis'), 'vertical');
+  assert.equal(verticalLock.defaultPrevented, false, 'vertical lock должен остаться полностью нативным');
+  assert.deepEqual(captured, [11], 'vertical жест не захватывает pointer');
+
+  const horizontalLater = event('pointermove', 12, 30, 166, 260);
+  hero.dispatchEvent(horizontalLater);
+  assert.equal(evalInContext(sandbox, 'galleryState.d.drag.axis'), 'vertical', 'vertical lock нельзя сменить на horizontal');
+  assert.equal(horizontalLater.defaultPrevented, false);
+  assert.equal(track.style.transform, settledTransform, 'vertical жест никогда не двигает gallery track');
+  const verticalUp = event('pointerup', 12, 30, 166, 270);
+  hero.dispatchEvent(verticalUp);
+  assert.equal(verticalUp.defaultPrevented, false);
+  assert.equal(evalInContext(sandbox, 'galleryState.d.index'), 1);
+  assert.deepEqual(released, [11], 'vertical жест не пытается освободить несуществующий capture');
   teardown(sandbox);
 });
 

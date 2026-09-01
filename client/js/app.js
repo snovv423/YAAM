@@ -1341,13 +1341,20 @@ function bindGalleryDrag(prefix,enabled){
     const dx=e.clientX-drag.startX,dy=e.clientY-drag.startY;
     if(!drag.axis){
       if(Math.max(Math.abs(dx),Math.abs(dy))<GALLERY_AXIS_LOCK_PX)return;
-      if(Math.abs(dy)>Math.abs(dx)*1.1){drag.axis='vertical';return;}
-      if(Math.abs(dx)>Math.abs(dy)*1.1){
-        drag.axis='horizontal';hero.classList.add('dragging');
-        if(hero.setPointerCapture)try{hero.setPointerCapture(e.pointerId);}catch(err){}
-      }else return;
+      // Намерение определяется ровно один раз на первых 8 px. Прежняя
+      // «неопределённая» диагональная зона позволяла Safari начать scroll,
+      // а следующему move — внезапно перевести тот же жест в gallery drag.
+      // При равных осях приоритет остаётся у нативного vertical scroll.
+      drag.axis=Math.abs(dx)>Math.abs(dy)?'horizontal':'vertical';
+      if(drag.axis==='vertical')return;
+      hero.classList.add('dragging');
+      if(hero.setPointerCapture)try{hero.setPointerCapture(e.pointerId);drag.captured=true;}catch(err){}
     }
     if(drag.axis!=='horizontal')return;
+    // Только уже зафиксированный horizontal-жест принадлежит галерее.
+    // Listener намеренно non-passive; vertical-жест сюда не попадает и
+    // продолжает полностью обслуживаться Safari благодаря touch-action:pan-y.
+    if(e.cancelable&&typeof e.preventDefault==='function')e.preventDefault();
     const now=eventTime(e),dt=Math.max(1,now-drag.lastTime);
     const instant=(e.clientX-drag.lastX)/dt;
     drag.velocityX=drag.velocityX*.35+instant*.65;
@@ -1360,8 +1367,9 @@ function bindGalleryDrag(prefix,enabled){
     const drag=st.drag;
     if(!drag||e.pointerId!==drag.pointerId)return;
     st.drag=null;hero.classList.remove('dragging');
-    if(hero.releasePointerCapture)try{hero.releasePointerCapture(e.pointerId);}catch(err){}
+    if(drag.captured&&hero.releasePointerCapture)try{hero.releasePointerCapture(e.pointerId);}catch(err){}
     if(drag.axis!=='horizontal'){setGalleryTrackPosition(st,st.index);return;}
+    if(e.cancelable&&typeof e.preventDefault==='function')e.preventDefault();
     const dx=e.clientX-drag.startX;
     const target=cancelled?st.index:gallerySwipeTarget(st.index,st.photos.length,dx,drag.velocityX,galleryHeroWidth(hero));
     snapGalleryTrack(prefix,target);
@@ -1369,14 +1377,15 @@ function bindGalleryDrag(prefix,enabled){
   const onUp=e=>endDrag(e,false);
   const onCancel=e=>endDrag(e,true);
   const onResize=()=>{if(!st.drag&&!st.snapping)setGalleryTrackPosition(st,st.index);};
+  const moveOptions={passive:false};
   hero.addEventListener('pointerdown',onDown);
-  hero.addEventListener('pointermove',onMove);
+  hero.addEventListener('pointermove',onMove,moveOptions);
   hero.addEventListener('pointerup',onUp);
   hero.addEventListener('pointercancel',onCancel);
   window.addEventListener('resize',onResize,{passive:true});
   galleryDragCleanup[prefix]=()=>{
     hero.removeEventListener('pointerdown',onDown);
-    hero.removeEventListener('pointermove',onMove);
+    hero.removeEventListener('pointermove',onMove,moveOptions);
     hero.removeEventListener('pointerup',onUp);
     hero.removeEventListener('pointercancel',onCancel);
     window.removeEventListener('resize',onResize);
