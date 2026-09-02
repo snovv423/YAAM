@@ -414,7 +414,7 @@ test('B: полный HTTP-цикл категория+блюдо, доступ�
     const auditUnavailable = await db.query("SELECT action FROM hq_audit_log WHERE action = 'menu_item_unavailable'");
     assert.equal(auditUnavailable.length, 1);
     menuPage = await getPage(base, cookie, `${restaurantPath}/menu`);
-    assert.match(menuPage.html, /Снято с витрины/);
+    assert.match(menuPage.html, /Нет в наличии/);
 
     // Вернуть доступность.
     res = await postForm(base, cookie, `${restaurantPath}/menu/items/${itemId}/available`, { _csrf: menuPage.csrf, available: '1' });
@@ -439,7 +439,7 @@ test('B: полный HTTP-цикл категория+блюдо, доступ�
     const auditRestored = await db.query("SELECT action FROM hq_audit_log WHERE action = 'menu_item_restored'");
     assert.equal(auditRestored.length, 1);
     menuPage = await getPage(base, cookie, `${restaurantPath}/menu`);
-    assert.match(menuPage.html, /Снято с витрины/, 'восстановленное блюдо остаётся снятым с витрины, не возвращается на неё автоматически');
+    assert.match(menuPage.html, /Нет в наличии/, 'восстановленное блюдо остаётся без наличия, само в него не возвращается');
   } finally {
     await stopApp(instance);
   }

@@ -168,8 +168,35 @@ async function restaurantById(id) {
   return rows[0] || null;
 }
 
+// Стоп-лист показывает ровно то, что сейчас видит клиент на сайте:
+// архивированное блюдо и блюдо в архивированной категории в рабочем меню не
+// существуют, и переключать им наличие бессмысленно — HQ такую попытку прямо
+// отклоняет (menuAdminService.setMenuItemAvailability: «сначала восстановите»).
+// Без этого фильтра бот и HQ показывали бы разные наборы блюд.
 async function menuItemsByRestaurant(restaurantId) {
-  return db.query('SELECT * FROM menu_items WHERE restaurant_id = $1 ORDER BY sort_order', [restaurantId]);
+  return db.query(
+    `SELECT mi.* FROM menu_items mi
+       JOIN categories c ON c.id = mi.category_id
+      WHERE mi.restaurant_id = $1 AND mi.archived_at IS NULL AND c.archived_at IS NULL
+      ORDER BY mi.sort_order, mi.id`,
+    [restaurantId],
+  );
+}
+
+// callback_data приходит от клиента Telegram и может быть отправлена
+// повторно/подделана, поэтому блюдо ищется В ПРЕДЕЛАХ ресторана этого чата —
+// иначе ресторан мог бы переключить наличие в чужом меню. Те же условия
+// архива, что и в списке выше: кнопка из старого сообщения не должна оживлять
+// уже архивированное блюдо.
+async function toggleableMenuItem(restaurantId, id) {
+  const rows = await db.query(
+    `SELECT mi.* FROM menu_items mi
+       JOIN categories c ON c.id = mi.category_id
+      WHERE mi.id = $1 AND mi.restaurant_id = $2
+        AND mi.archived_at IS NULL AND c.archived_at IS NULL`,
+    [id, restaurantId],
+  );
+  return rows[0] || null;
 }
 
 async function menuItemById(id) {
@@ -510,8 +537,16 @@ async function handleCallbackQuery(bot, query) {
       }
     } else if (action === 'toggle_item') {
       const id = Number(parts[1]);
-      const item = await menuItemById(id);
-      if (item) await db.execute('UPDATE menu_items SET is_available = 1 - is_available WHERE id = $1', [id]);
+      const restaurant = await restaurantByChat(chatId);
+      const item = restaurant ? await toggleableMenuItem(restaurant.id, id) : null;
+      // Тот же столбец is_available, которым управляет HQ («Нет в наличии» /
+      // «Вернуть в наличие»): состояние у бота и у кабинета всегда одно.
+      if (item) {
+        await db.execute(
+          'UPDATE menu_items SET is_available = 1 - is_available WHERE id = $1 AND restaurant_id = $2',
+          [id, restaurant.id],
+        );
+      }
     }
     await bot.answerCallbackQuery(query.id);
   } catch (err) {

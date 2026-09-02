@@ -13,11 +13,15 @@ const { esc, renderBackLink } = require('./layout');
 const { money } = require('./restaurantsViews');
 const { renderPhotoManager } = require('./photosViews');
 
-// «На витрине» / «Снято с витрины» — продуктовые формулировки спецификации.
-// «Сделать недоступным»/«Временно недоступно» больше не используются нигде.
+// Наличие и архив — две РАЗНЫЕ вещи, и подписи это должны показывать.
+// «Нет в наличии» — то же самое is_available, которым ресторан управляет из
+// Telegram (/stoplist): блюдо остаётся на сайте, но серым и незаказываемым.
+// «В архиве» — блюдо ушло и с сайта, и из рабочего меню. Прежние формулировки
+// про витрину смешивали одно с другим: «снято с витрины» звучало как «убрано
+// с сайта», хотя блюдо там оставалось.
 function itemStatusLabel(item) {
   if (item.archived_at) return 'В архиве';
-  return item.is_available ? 'На витрине' : 'Снято с витрины';
+  return item.is_available ? 'В наличии' : 'Нет в наличии';
 }
 
 function pluralDishes(n) {
@@ -320,10 +324,12 @@ function renderCategoryEditForm({ restaurant, category, error, csrfToken, linkBa
 // Форма блюда (создание и редактирование — общая разметка)
 // ===========================================================================
 //
-// Внизу — Сохранить / Снять с витрины (или Вернуть на витрину) /
-// Архивировать (спецификация, раздел «Редактирование блюда»). Формулировка
-// «Сделать недоступным» не используется. Физического удаления нет: блюдо,
-// участвовавшее в заказах, только архивируется.
+// Внизу — Сохранить / Нет в наличии (или Вернуть в наличие) / Архивировать.
+// Первая кнопка переключает is_available — ровно то же поле, что и
+// Telegram /stoplist, поэтому состояние у HQ и у бота всегда одно.
+// Архивирование — отдельная операция: оно убирает блюдо и с сайта, и из
+// рабочего меню. Физического удаления здесь нет: блюдо, участвовавшее в
+// заказах, только архивируется (окончательное удаление живёт в архиве).
 function renderMenuItemForm({
   restaurant, item, categories, error, notice, csrfToken, linkBasePath, isNew,
   photos = [], mediaConfigured = false, maxPhotos = 0, presetCategoryId = null,
@@ -341,10 +347,10 @@ function renderMenuItemForm({
       <form method="post" action="${base}/items/${v.id}/available">
         <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
         <input type="hidden" name="available" value="${v.is_available ? '0' : '1'}">
-        <button type="submit" class="ghost compact">${v.is_available ? 'Снять с витрины' : 'Вернуть на витрину'}</button>
+        <button type="submit" class="ghost compact">${v.is_available ? 'Нет в наличии' : 'Вернуть в наличие'}</button>
       </form>
       <form method="post" action="${base}/items/${v.id}/archive"
-            data-confirm="Архивировать «${esc(v.name || '')}»? Блюдо исчезнет из меню и с витрины, история заказов сохранится."
+            data-confirm="Архивировать «${esc(v.name || '')}»? Блюдо исчезнет и с сайта, и из рабочего меню — останется в архиве. История заказов сохранится."
             data-confirm-title="Архивировать блюдо"
             data-confirm-ok="Архивировать">
         <input type="hidden" name="_csrf" value="${esc(csrfToken)}">

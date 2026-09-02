@@ -700,17 +700,17 @@ test('E1: /stoplist — список блюд с текущим состояни
 });
 
 test('E2: toggle_item — добавить в стоп-лист, затем убрать (двойной toggle возвращает исходное состояние)', async () => {
-  const restaurant = await pgCreateRestaurant();
+  const restaurant = await pgCreateRestaurant({ telegramChatId: 'chat-e2' });
   const category = await pgCreateCategory(restaurant.id);
   const item = await pgCreateMenuItem(restaurant.id, category.id, { isAvailable: 1 });
   const fakeBot = new FakeTelegramBot();
   const handlers = botModule.createBotHandlers(fakeBot);
   try {
-    await fakeBot.triggerCallbackQuery({ id: '1', data: `toggle_item:${item.id}`, chatId: 'c', messageId: 1 });
+    await fakeBot.triggerCallbackQuery({ id: '1', data: `toggle_item:${item.id}`, chatId: 'chat-e2', messageId: 1 });
     let rows = await db.query('SELECT is_available FROM menu_items WHERE id = $1', [item.id]);
     assert.equal(rows[0].is_available, 0);
 
-    await fakeBot.triggerCallbackQuery({ id: '2', data: `toggle_item:${item.id}`, chatId: 'c', messageId: 1 });
+    await fakeBot.triggerCallbackQuery({ id: '2', data: `toggle_item:${item.id}`, chatId: 'chat-e2', messageId: 1 });
     rows = await db.query('SELECT is_available FROM menu_items WHERE id = $1', [item.id]);
     assert.equal(rows[0].is_available, 1);
     assert.equal(fakeBot.answeredCallbacks.length, 2);
@@ -730,31 +730,83 @@ test('E3: toggle_item отсутствующего блюда — без пад�
   }
 });
 
-test('E4 (документирует унаследованное ограничение): toggle_item не проверяет принадлежность ресторана', async () => {
-  const restaurant = await pgCreateRestaurant();
+// Раньше здесь фиксировался унаследованный от SQLite-оригинала пробел: любой
+// чат мог переключить наличие в ЧУЖОМ меню, потому что блюдо искалось по
+// одному id. callback_data приходит от клиента Telegram и может быть
+// отправлена повторно или подделана, поэтому блюдо теперь ищется в пределах
+// ресторана этого чата.
+test('E4: toggle_item из чужого чата ничего не меняет', async () => {
+  const restaurant = await pgCreateRestaurant({ telegramChatId: 'chat-e4-свой' });
   const category = await pgCreateCategory(restaurant.id);
   const item = await pgCreateMenuItem(restaurant.id, category.id, { isAvailable: 1 });
+  const other = await pgCreateRestaurant({ telegramChatId: 'chat-e4-чужой' });
+  assert.ok(other.id !== restaurant.id);
   const fakeBot = new FakeTelegramBot();
   const handlers = botModule.createBotHandlers(fakeBot);
   try {
-    await fakeBot.triggerCallbackQuery({ id: '1', data: `toggle_item:${item.id}`, chatId: 'chat-совсем-другого-ресторана', messageId: 1 });
-    const rows = await db.query('SELECT is_available FROM menu_items WHERE id = $1', [item.id]);
-    assert.equal(rows[0].is_available, 0, '"чужой" чат смог переключить блюдо — известный, унаследованный от SQLite-оригинала пробел, не Stage 3');
+    await fakeBot.triggerCallbackQuery({ id: '1', data: `toggle_item:${item.id}`, chatId: 'chat-e4-чужой', messageId: 1 });
+    let rows = await db.query('SELECT is_available FROM menu_items WHERE id = $1', [item.id]);
+    assert.equal(rows[0].is_available, 1, 'чужой чат не должен менять наличие в этом меню');
+    assert.equal(fakeBot.answeredCallbacks.length, 1, 'но callback обязан быть отвечен — Telegram не должен ждать');
+
+    // Неподключённый чат — тоже мимо.
+    await fakeBot.triggerCallbackQuery({ id: '2', data: `toggle_item:${item.id}`, chatId: 'chat-без-ресторана', messageId: 1 });
+    rows = await db.query('SELECT is_available FROM menu_items WHERE id = $1', [item.id]);
+    assert.equal(rows[0].is_available, 1);
+
+    // А свой — работает.
+    await fakeBot.triggerCallbackQuery({ id: '3', data: `toggle_item:${item.id}`, chatId: 'chat-e4-свой', messageId: 1 });
+    rows = await db.query('SELECT is_available FROM menu_items WHERE id = $1', [item.id]);
+    assert.equal(rows[0].is_available, 0);
+  } finally {
+    handlers.stop();
+  }
+});
+
+// Архив и наличие — разные вещи: архивированное блюдо в рабочем меню не
+// существует, поэтому его нет ни в /stoplist, ни среди переключаемых. HQ
+// такую попытку тоже отклоняет (setMenuItemAvailability).
+test('E4.1: архивированное блюдо не попадает в стоп-лист и не переключается', async () => {
+  const restaurant = await pgCreateRestaurant({ telegramChatId: 'chat-e41' });
+  const category = await pgCreateCategory(restaurant.id);
+  const live = await pgCreateMenuItem(restaurant.id, category.id, { name: 'Живое', isAvailable: 1 });
+  const archived = await pgCreateMenuItem(restaurant.id, category.id, { name: 'В архиве', isAvailable: 0, sortOrder: 1 });
+  await db.query('UPDATE menu_items SET archived_at = NOW() WHERE id = $1', [archived.id]);
+
+  const inArchivedCategory = await pgCreateCategory(restaurant.id, { name: 'Старая категория' });
+  const orphan = await pgCreateMenuItem(restaurant.id, inArchivedCategory.id, { name: 'В архивной категории', isAvailable: 1, sortOrder: 2 });
+  await db.query('UPDATE categories SET archived_at = NOW() WHERE id = $1', [inArchivedCategory.id]);
+
+  const fakeBot = new FakeTelegramBot();
+  const handlers = botModule.createBotHandlers(fakeBot);
+  try {
+    await fakeBot.triggerText('chat-e41', '/stoplist');
+    assert.deepEqual(fakeBot.sentMessages[0].opts.reply_markup.inline_keyboard, [[
+      { text: '✓ Живое', callback_data: `toggle_item:${live.id}` },
+    ]], 'в стоп-листе только то, что реально есть в рабочем меню');
+
+    for (const hidden of [archived, orphan]) {
+      const before = await db.query('SELECT is_available FROM menu_items WHERE id = $1', [hidden.id]);
+      await fakeBot.triggerCallbackQuery({ id: `x${hidden.id}`, data: `toggle_item:${hidden.id}`, chatId: 'chat-e41', messageId: 1 });
+      const after = await db.query('SELECT is_available FROM menu_items WHERE id = $1', [hidden.id]);
+      assert.equal(after[0].is_available, before[0].is_available,
+        'наличие архивированного блюда не переключается кнопкой из старого сообщения');
+    }
   } finally {
     handlers.stop();
   }
 });
 
 test('E5: два конкурентных toggle одного блюда — детерминированный результат (чётное число переключений = исходное состояние), без потери апдейта', async () => {
-  const restaurant = await pgCreateRestaurant();
+  const restaurant = await pgCreateRestaurant({ telegramChatId: 'chat-e5' });
   const category = await pgCreateCategory(restaurant.id);
   const item = await pgCreateMenuItem(restaurant.id, category.id, { isAvailable: 1 });
   const fakeBot = new FakeTelegramBot();
   const handlers = botModule.createBotHandlers(fakeBot);
   try {
     await Promise.all([
-      fakeBot.triggerCallbackQuery({ id: '1', data: `toggle_item:${item.id}`, chatId: 'c', messageId: 1 }),
-      fakeBot.triggerCallbackQuery({ id: '2', data: `toggle_item:${item.id}`, chatId: 'c', messageId: 1 }),
+      fakeBot.triggerCallbackQuery({ id: '1', data: `toggle_item:${item.id}`, chatId: 'chat-e5', messageId: 1 }),
+      fakeBot.triggerCallbackQuery({ id: '2', data: `toggle_item:${item.id}`, chatId: 'chat-e5', messageId: 1 }),
     ]);
     const rows = await db.query('SELECT is_available FROM menu_items WHERE id = $1', [item.id]);
     assert.equal(rows[0].is_available, 1, 'два конкурентных toggle сериализуются построчной блокировкой — чётное число флипов возвращает исходное состояние');

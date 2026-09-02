@@ -8,7 +8,7 @@
 //     без Telegram/выплат/юридических данных.
 // B — обзор ресторана: заказы сегодня/за всё время, оборот, доход YAAM.
 // C — блок «Выплаты»: состояния и невозможность выплаты при блокерах.
-// D — меню: категория, блюдо внутри категории, витрина, архив, восстановление,
+// D — меню: категория, блюдо внутри категории, наличие, архив, восстановление,
 //     перенос блюд при архивации категории, порядок перетаскиванием.
 // E — заказы: только фильтр по датам, полная карточка заказа.
 // F — оценки и статистика: без технического пояснения и без дублирующей
@@ -412,7 +412,7 @@ test('C3: реквизиты не заполнены -> «Не готово к �
 // ===========================================================================
 // D — меню
 // ===========================================================================
-test('D1: категория, блюдо внутри категории, витрина, архив и восстановление', async () => {
+test('D1: категория, блюдо внутри категории, наличие, архив и восстановление', async () => {
   const databaseUrl = await freshDatabase('stage11_menu');
   process.env.DATABASE_URL = databaseUrl;
   const { db } = requireFreshModules();
@@ -447,19 +447,20 @@ test('D1: категория, блюдо внутри категории, вит
     menu = await getPage(base, cookie, `/hq/restaurants/${restId}/menu`);
     assert.match(menu.html, /Хинкал/);
     assert.match(menu.html, /450 ₽/);
-    assert.match(menu.html, /На витрине/);
+    assert.match(menu.html, /В наличии/);
     assert.match(menu.html, /1 блюдо/);
 
     const itemRows = await dbAgain.query('SELECT id FROM menu_items WHERE restaurant_id = $1', [restId]);
     const itemId = itemRows[0].id;
 
-    // Снять с витрины.
+    // Убрать из наличия — то же поле is_available, что и Telegram /stoplist.
     const itemPage = await getPage(base, cookie, `/hq/restaurants/${restId}/menu/items/${itemId}`);
-    assert.match(itemPage.html, /Снять с витрины/);
+    assert.match(itemPage.html, /Нет в наличии/);
     assert.doesNotMatch(itemPage.html, /Сделать недоступным/, 'формулировка запрещена спецификацией');
+    assert.doesNotMatch(itemPage.html, /витрин/i, 'наличие и архив больше не описываются через «витрину»');
     await postForm(base, cookie, `/hq/restaurants/${restId}/menu/items/${itemId}/available`, { _csrf: itemPage.csrf, available: '0' });
     menu = await getPage(base, cookie, `/hq/restaurants/${restId}/menu`);
-    assert.match(menu.html, /Снято с витрины/);
+    assert.match(menu.html, /Нет в наличии/);
 
     // Архивировать -> появляется в архиве, исчезает из меню.
     const itemPage2 = await getPage(base, cookie, `/hq/restaurants/${restId}/menu/items/${itemId}`);
