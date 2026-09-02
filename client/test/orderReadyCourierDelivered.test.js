@@ -15,6 +15,17 @@ function freshApp(opts) {
   return sandbox;
 }
 
+// Загрузка приложения сама по себе ходит за списком ресторанов (главная), и в
+// песочнице этот запрос закономерно не удаётся — появляется свой toast. К
+// проверяемому здесь подтверждению получения он отношения не имеет, поэтому
+// перед действием ждём, пока стартовая часть договорит, и чистим поле toast:
+// иначе тест сравнивал бы своё сообщение с чужим, случайно пришедшим позже.
+async function settleBoot(sandbox) {
+  for (let i = 0; i < 20; i += 1) await Promise.resolve();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  sandbox.document.getElementById('toast').textContent = '';
+}
+
 function accessToken(byte) {
   return `yaam_ord_v1_${Buffer.alloc(32, byte).toString('base64url')}`;
 }
@@ -157,6 +168,7 @@ test('confirmOrderReceipt(): успешный вызов показывает to
     api.confirmOrderReceipt=async()=>({});
     api.getOrder=async()=>({public_code:${JSON.stringify(code)},status:'delivered',items_total:500,fulfillment_type:'delivery',restaurant_phone:null,rating:null});
   `);
+  await settleBoot(sandbox);
   await evalInContext(sandbox, 'confirmOrderReceipt()');
   assert.equal(sandbox.document.getElementById('toast').textContent, 'Заказ получен.');
   // Немедленный ре-опрос уже применил delivered — форма оценки должна появиться
@@ -176,6 +188,7 @@ test('confirmOrderReceipt(): ошибка API показывает сообще�
   evalInContext(sandbox, `
     api.confirmOrderReceipt=async()=>{throw new Error('заказ ещё не передан курьеру — подтвердить получение нельзя');};
   `);
+  await settleBoot(sandbox);
   await evalInContext(sandbox, 'confirmOrderReceipt()');
   assert.equal(
     sandbox.document.getElementById('toast').textContent,

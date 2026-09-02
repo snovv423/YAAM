@@ -307,13 +307,75 @@ function supportedCities(){
 function persistSelectedCity(city){
   try{localStorage.setItem(CITY_STORAGE_KEY,city);}catch(e){/* приватный режим — просто не запомним */}
 }
+function applySelectedCity(city){
+  selectedCity=city;
+  document.querySelectorAll('#cities .citychip').forEach(ch=>ch.classList.toggle('sel',ch.textContent.trim()===city));
+}
+// Возвращает true, если у посетителя есть СОБСТВЕННЫЙ, осознанный выбор
+// города — только его нажатие на чип (persistSelectedCity). Такой выбор
+// главнее любой автоматики и не переопределяется ничем.
 function restoreSelectedCity(){
   let saved=null;
   try{saved=localStorage.getItem(CITY_STORAGE_KEY);}catch(e){}
+  if(!saved||!supportedCities().includes(saved))return false;
+  applySelectedCity(saved);
+  return true;
+}
+
+// Город по умолчанию — тот, где сейчас БОЛЬШЕ ВСЕГО опубликованных
+// ресторанов, а не зашитая строка. Сегодня это может быть Аргун, завтра
+// Грозный: список ресторанов ведётся в HQ и меняется без участия клиента,
+// поэтому и стартовый город обязан считаться из данных, а не подбираться
+// руками в коде.
+//
+// При равенстве побеждает город, который стоит раньше в разметке — иначе
+// выбор «прыгал» бы между равными городами от загрузки к загрузке.
+// Ресторан учитывается в КАЖДОМ своём городе: cities — список, и ресторан,
+// работающий в двух городах, реально доступен в обоих.
+function pickDefaultCity(restaurantList,cities){
+  if(!Array.isArray(cities)||!cities.length)return null;
+  const counts=new Map(cities.map(c=>[c,0]));
+  for(const r of(Array.isArray(restaurantList)?restaurantList:[])){
+    for(const city of(Array.isArray(r&&r.cities)?r.cities:[])){
+      if(counts.has(city))counts.set(city,counts.get(city)+1);
+    }
+  }
+  let best=null,bestCount=-1;
+  for(const city of cities){
+    const n=counts.get(city)||0;
+    if(n>bestCount){best=city;bestCount=n;}
+  }
+  // Ни одного ресторана нигде — навязывать «самый пустой» город незачем,
+  // остаёмся на том, что стоит в разметке по умолчанию.
+  return bestCount>0?best:null;
+}
+
+// Автовыбор НЕ сохраняется в localStorage намеренно: сохранённый ключ означает
+// «человек выбрал сам». Записав туда автоматику, мы заморозили бы сегодняшнюю
+// картину навсегда — и когда рестораны появятся в другом городе, стартовый
+// экран остался бы в прежнем.
+// Возвращает {list, failed} — тот самый ответ, из которого вызывающий код
+// нарисует главную, не запрашивая те же данные второй раз. failed:true
+// означает «в сеть уже сходили и не получилось»: повторять запрос не нужно,
+// нужно показать ту же ошибку, что показал бы обычный renderList.
+async function applyDefaultCityFromData(){
   const cities=supportedCities();
-  if(!saved||!cities.includes(saved))return;
-  selectedCity=saved;
-  document.querySelectorAll('#cities .citychip').forEach(ch=>ch.classList.toggle('sel',ch.textContent.trim()===saved));
+  let list=[],failed=false;
+  if(USE_API){
+    // Один запрос без фильтра по городу отдаёт все опубликованные рестораны
+    // вместе с их списками городов — этого достаточно, отдельная ручка не нужна.
+    try{
+      const response=await api.getRestaurants('');
+      list=Array.isArray(response)?response:[];
+    }catch(e){failed=true;}
+  }else{
+    list=restaurants;
+  }
+  if(!failed&&cities.length){
+    const best=pickDefaultCity(list,cities);
+    if(best&&best!==selectedCity)applySelectedCity(best);
+  }
+  return{list,failed};
 }
 
 
@@ -376,10 +438,23 @@ function cardHTML(r){
     </div></div>`;
 }
 
-async function renderList(instant,city=selectedCity,renderSeq=null){
+// preloaded — уже полученный список ВСЕХ опубликованных ресторанов (см.
+// applyDefaultCityFromData). Отдаётся сюда, чтобы первый заход стоил ровно
+// одного запроса: сначала по этому же ответу считается стартовый город, потом
+// из него же рисуется список. Фильтр по городу здесь тот же, что и на сервере
+// (cities содержит выбранный город), поэтому результат совпадает.
+async function renderList(instant,city=selectedCity,renderSeq=null,preloaded=null){
   let base;
   let loadFailed=false;
-  if(USE_API){
+  if(preloaded){
+    // Массив (в том числе пустой) означает «данные уже получены выше» —
+    // повторного запроса за тем же быть не должно ни при успехе, ни при сбое.
+    // Ответ мог оказаться не списком (сбой/неожиданный формат) — ведём себя
+    // так же, как обычная ветка: пустой список, без исключения наружу.
+    base=(Array.isArray(preloaded.list)?preloaded.list:[]).map(normalizeRestaurant).filter(r=>r.cities.includes(city));
+    loadFailed=!!preloaded.failed;
+    if(preloaded.failed)showToast('Не удалось загрузить рестораны — проверьте соединение');
+  }else if(USE_API){
     try{
       const response=await api.getRestaurants(city);
       if(renderSeq!==null&&renderSeq!==cityRenderSeq)return false;
@@ -1457,6 +1532,14 @@ function lockGalleryAxis(prefix,dx,dy){
   if(axis==='horizontal'&&st.hero)st.hero.classList.add('dragging');
   return axis;
 }
+// Страница увеличена системным pinch-to-zoom. Пока это так, галерея обязана
+// молчать: свайп в увеличенном виде — это перемещение по странице, чтобы
+// разглядеть фото, а не листание кадров. Вернулись к 1x — свайп снова
+// работает сам собой, никакого состояния сбрасывать не нужно.
+function isPageZoomed(){
+  const vv=typeof window!=='undefined'&&window.visualViewport;
+  return !!(vv&&typeof vv.scale==='number'&&vv.scale>1.01);
+}
 function bindGalleryDrag(prefix,enabled){
   if(galleryDragCleanup[prefix]){
     galleryDragCleanup[prefix]();
@@ -1467,8 +1550,21 @@ function bindGalleryDrag(prefix,enabled){
   if(!hero)return;
   const st=galleryState[prefix];
   const eventTime=e=>Number.isFinite(e.timeStamp)?e.timeStamp:Date.now();
+  // Полный отказ от жеста в пользу браузера: трек возвращается на свой кадр,
+  // ничего не отменяется и не «доводится» — дальше страницей распоряжается
+  // системный zoom/скролл.
+  const yieldToBrowser=()=>{
+    if(!st.drag)return;
+    st.drag=null;
+    hero.classList.remove('dragging');
+    setGalleryTrackPosition(st,st.index);
+  };
   const onDown=e=>{
     if(st.snapping||e.isPrimary===false||(e.pointerType==='mouse'&&e.button!==0))return;
+    // Второй палец на экране — это pinch: начатое одним пальцем листание
+    // сворачивается, жест целиком уходит браузеру.
+    if(st.drag){yieldToBrowser();return;}
+    if(isPageZoomed())return;
     if(e.target!==hero&&e.target&&e.target.closest&&e.target.closest('button,a'))return;
     const now=eventTime(e);
     st.drag={pointerId:e.pointerId,startX:e.clientX,startY:e.clientY,lastX:e.clientX,lastTime:now,velocityX:0,axis:null};
@@ -1477,6 +1573,7 @@ function bindGalleryDrag(prefix,enabled){
   const onMove=e=>{
     const drag=st.drag;
     if(!drag||e.pointerId!==drag.pointerId)return;
+    if(isPageZoomed()){yieldToBrowser();return;}
     const dx=e.clientX-drag.startX,dy=e.clientY-drag.startY;
     if(!drag.axis){
       // Намерение определяется ровно один раз, на первых пикселях, и внутри
@@ -1528,9 +1625,17 @@ function bindGalleryDrag(prefix,enabled){
   // раньше: порядок доставки pointer/touch между браузерами не одинаков, а
   // опоздать здесь нельзя — Safari принимает решение о скролле на первом же
   // touchmove.
+  // Двухпальцевый жест не принадлежит галерее ни одним кадром: ни ось не
+  // фиксируем, ни preventDefault не зовём — иначе Safari, приняв решение на
+  // первом же touchmove, просто не начнёт увеличивать страницу.
+  const onTouchStart=e=>{
+    if(e.touches&&e.touches.length>1)yieldToBrowser();
+  };
   const onTouchMove=e=>{
     const drag=st.drag;
     if(!drag)return;
+    if(e.touches&&e.touches.length>1){yieldToBrowser();return;}
+    if(isPageZoomed()){yieldToBrowser();return;}
     const touch=e.touches&&e.touches.length?e.touches[0]:null;
     if(touch)lockGalleryAxis(prefix,touch.clientX-drag.startX,touch.clientY-drag.startY);
     if(drag.axis!=='horizontal')return;
@@ -1541,6 +1646,7 @@ function bindGalleryDrag(prefix,enabled){
   hero.addEventListener('pointermove',onMove,moveOptions);
   hero.addEventListener('pointerup',onUp);
   hero.addEventListener('pointercancel',onCancel);
+  hero.addEventListener('touchstart',onTouchStart,{passive:true});
   hero.addEventListener('touchmove',onTouchMove,moveOptions);
   window.addEventListener('resize',onResize,{passive:true});
   galleryDragCleanup[prefix]=()=>{
@@ -1548,6 +1654,7 @@ function bindGalleryDrag(prefix,enabled){
     hero.removeEventListener('pointermove',onMove,moveOptions);
     hero.removeEventListener('pointerup',onUp);
     hero.removeEventListener('pointercancel',onCancel);
+    hero.removeEventListener('touchstart',onTouchStart,{passive:true});
     hero.removeEventListener('touchmove',onTouchMove,moveOptions);
     window.removeEventListener('resize',onResize);
   };
@@ -2895,8 +3002,10 @@ document.addEventListener('click',e=>{
 
 // Pull-to-refresh
 let ptrY=0,ptrActive=false;
-document.addEventListener('touchstart',e=>{if(window.scrollY===0)ptrY=e.touches[0].clientY;},{passive:true});
-document.addEventListener('touchmove',e=>{if(window.scrollY===0&&e.touches[0].clientY-ptrY>60&&cur('home')){document.getElementById('ptr').classList.add('show');ptrActive=true;}},{passive:true});
+// touches.length>1 — системный zoom, а не «потянули страницу вниз»: индикатор
+// обновления не должен выскакивать посреди щипка.
+document.addEventListener('touchstart',e=>{if(e.touches.length>1){ptrActive=false;return;}if(window.scrollY===0)ptrY=e.touches[0].clientY;},{passive:true});
+document.addEventListener('touchmove',e=>{if(e.touches.length>1){ptrActive=false;return;}if(window.scrollY===0&&e.touches[0].clientY-ptrY>60&&cur('home')){document.getElementById('ptr').classList.add('show');ptrActive=true;}},{passive:true});
 document.addEventListener('touchend',()=>{if(ptrActive){renderList();setTimeout(()=>document.getElementById('ptr').classList.remove('show'),600);}ptrActive=false;});
 
 // History API. В SPA позицию меню восстанавливаем сами: автоматический
@@ -3038,22 +3147,34 @@ async function openVote(){
 }
 function closeVote(){document.getElementById('vote-overlay').classList.remove('on');document.getElementById('vote-sheet').classList.remove('on');document.getElementById('vote-chip').classList.remove('lit');document.body.style.overflow='';}
 let voteStartY=0,voteCurY=0,voteDragging=false;
-function voteTouchStart(e){voteStartY=e.touches[0].clientY;voteCurY=0;voteDragging=true;document.getElementById('vote-sheet').style.transition='none';}
+// Штора поднимается снизу, поэтому закрывающий жест — вниз. Порог и сама
+// механика те же, что были у верхнего варианта, изменено только направление.
+const VOTE_CLOSE_DISTANCE_PX=55;
+function voteTouchStart(e){
+  // Двухпальцевый жест — не перетаскивание шторы, а системный zoom страницы.
+  if(e.touches&&e.touches.length>1){voteDragging=false;return;}
+  voteStartY=e.touches[0].clientY;voteCurY=0;voteDragging=true;
+  document.getElementById('vote-sheet').style.transition='none';
+}
 function voteTouchMove(e){
   if(!voteDragging)return;
+  if(e.touches&&e.touches.length>1){voteTouchEnd();return;}
   e.preventDefault();
   voteCurY=e.touches[0].clientY-voteStartY;
   const sh=document.getElementById('vote-sheet');
-  // Штора висит сверху и полностью открыта в состоянии покоя — тянуть "вниз"
-  // (в сторону, противоположную закрытию) её попросту некуда: раньше здесь был
-  // лёгкий сдвиг вниз (voteCurY*0.3), который открывал щель у верхнего края.
-  // Двигаем только вверх (закрытие), вниз — держим на месте.
-  const y=Math.min(0,voteCurY);
+  // Открытая штора уже прижата к нижнему краю — тянуть её ВВЕРХ некуда, там
+  // нет ни экрана, ни содержимого. Ведём только вниз (закрытие), вверх держим
+  // на месте, иначе над шторой открывалась бы пустая щель.
+  const y=Math.max(0,voteCurY);
   sh.style.transform=`translateX(-50%) translateY(${y}px)`;
 }
 function voteTouchEnd(){
-  const sh=document.getElementById('vote-sheet');sh.style.transition='';voteDragging=false;
-  if(voteCurY<-55)closeVote();
+  const sh=document.getElementById('vote-sheet');
+  // Сначала возвращаем transition, потом одним кадром снимаем и класс .on, и
+  // инлайновый transform: штора доезжает вниз одним непрерывным движением из
+  // той точки, где её отпустили, а не прыгает сначала в открытое положение.
+  sh.style.transition='';voteDragging=false;
+  if(voteCurY>VOTE_CLOSE_DISTANCE_PX)closeVote();
   sh.style.transform='';
 }
 
@@ -3103,8 +3224,18 @@ async function openRouteFromLocation(){
   return openRouteTarget(route);
 }
 
-restoreSelectedCity();
-renderList();
+// Сохранённый выбор применяется синхронно и рисует список сразу — тем же
+// единственным запросом, что и раньше. Когда своего выбора нет, стартовый
+// город считается из полного списка ресторанов, и главная рисуется ИЗ ТОГО ЖЕ
+// ответа: запрос по-прежнему ровно один и уходит в том же такте, что и
+// прежний renderList(), просто теперь он без фильтра по городу.
+if(restoreSelectedCity()){
+  renderList();
+}else{
+  applyDefaultCityFromData()
+    .catch(()=>({list:[],failed:true}))
+    .then(data=>renderList(false,selectedCity,null,data));
+}
 // Ссылка «Поделиться» (#shared=CODE:TOKEN) обрабатывается ДО восстановления
 // собственной сессии посетителя — иначе tryRestoreSession() перехватила бы
 // экран своим активным заказом. Без бэкенда (USE_API=false, demo-режим)

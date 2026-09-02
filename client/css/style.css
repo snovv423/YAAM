@@ -469,11 +469,14 @@
      (тот же неоновый зелёный, что и у вспышки логотипа, #39ff14). Тумблер
      без мерцания: тап — мгновенно загорается ярче, неоном по кромке,
      повторный тап — гаснет сразу же (см. openVote/closeVote — класс .lit). */
+  /* Кнопка живёт под списком ресторанов, поэтому ей нужен собственный воздух
+     сверху и снизу — раньше она стояла вплотную к intro-слою и отступ был
+     рассчитан на то место. */
   .vote-chip{
-    display:block;width:max-content;margin:10px auto 0;padding:7px 18px;border-radius:999px;
+    display:block;width:max-content;margin:22px auto 6px;padding:9px 20px;border-radius:999px;
     background:linear-gradient(180deg,rgba(52,211,140,.75),rgba(20,140,90,.55));
     border:1.5px solid rgba(150,255,190,.45);
-    color:#fff;font-size:11px;font-weight:700;letter-spacing:.3px;
+    color:#fff;font-size:12px;font-weight:700;letter-spacing:.3px;
     cursor:pointer;
     box-shadow:0 6px 16px rgba(20,120,70,.35);
     transition:transform .12s ease,filter .12s ease;
@@ -489,22 +492,34 @@
      список кандидатов. Раньше хват лежал внутри общего overflow:auto шторки —
      при длинном списке он уезжал за экран, и дотянуться до него для закрытия
      было невозможно без прокрутки всего списка. */
-  .vote-sheet{position:fixed;top:0;left:50%;transform:translateX(-50%) translateY(calc(-100% - 60px));width:100%;max-width:480px;z-index:63;border-radius:0 0 30px 30px;
+  /* Штора поднимается СНИЗУ — как корзина и как ожидается от мобильного
+     bottom sheet. Закрытое состояние выражено transform'ом, а не display, и
+     единственная анимируемая величина — тот же transform: открытие и закрытие
+     идут одним непрерывным движением, без скачка раскладки и без дёрганья.
+     Хват — сверху (см. разметку), закрывающий свайп — вниз. */
+  .vote-sheet{position:fixed;bottom:0;top:auto;left:50%;transform:translateX(-50%) translateY(calc(100% + 60px));width:100%;max-width:480px;z-index:63;border-radius:30px 30px 0 0;
     background:linear-gradient(180deg,rgba(8,26,16,.46),rgba(4,16,10,.40));
     backdrop-filter:blur(22px) saturate(170%);-webkit-backdrop-filter:blur(22px) saturate(170%);
-    border-bottom:1px solid rgba(255,255,255,.18);
-    box-shadow:0 30px 70px rgba(0,0,0,.55),inset 0 1px 0 rgba(255,255,255,.45),inset 0 -1px 0 rgba(255,255,255,.07);
-    transition:transform .42s cubic-bezier(.25,1,.2,1);max-height:88vh;
-    display:flex;flex-direction:column;overflow:hidden}
-  .vote-sheet::before{content:"";position:absolute;inset:0;pointer-events:none;border-radius:0 0 30px 30px;
+    border-top:1px solid rgba(255,255,255,.18);
+    box-shadow:0 -30px 70px rgba(0,0,0,.55),inset 0 1px 0 rgba(255,255,255,.45),inset 0 -1px 0 rgba(255,255,255,.07);
+    transition:transform .42s cubic-bezier(.25,1,.2,1);
+    /* Высота фиксирована, а не «по содержимому»: список кандидатов
+       догружается запросом уже во время открытия, и штора, растущая на ходу,
+       дёргала бы верхний край вверх прямо посреди анимации. Список скроллится
+       внутри — геометрия шторы от него больше не зависит вовсе. */
+    height:70vh;max-height:88vh;
+    display:flex;flex-direction:column;overflow:hidden;
+    padding-bottom:env(safe-area-inset-bottom);
+    will-change:transform}
+  .vote-sheet::before{content:"";position:absolute;inset:0;pointer-events:none;border-radius:30px 30px 0 0;
     background:linear-gradient(118deg,rgba(255,255,255,.22) 0%,rgba(255,255,255,0) 20%,rgba(255,255,255,0) 80%,rgba(255,255,255,.10) 100%)}
   .vote-sheet::after{content:"";position:absolute;top:0;left:6%;right:6%;height:1px;pointer-events:none;
     background:linear-gradient(90deg,transparent,rgba(255,255,255,.6),transparent)}
-  .vs-draghandle{flex:0 0 auto;padding:10px 0 24px;cursor:grab;touch-action:none}
+  .vs-draghandle{flex:0 0 auto;padding:14px 0 6px;cursor:grab;touch-action:none}
   .vs-draghandle:active{cursor:grabbing}
   .vs-drag{width:46px;height:5px;border-radius:999px;background:rgba(255,255,255,.4);margin:0 auto;position:relative;z-index:2}
   .vote-sheet.on{transform:translateX(-50%) translateY(0)}
-  .vs-head{flex:0 0 auto;padding:16px 22px 6px}
+  .vs-head{flex:0 0 auto;padding:10px 22px 6px}
   .vs-title{font-weight:800;font-size:21px}
   .vs-sub{color:var(--txt2);font-size:13px;font-weight:600;margin-top:4px;line-height:1.5}
   .vote-list{flex:1 1 auto;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:16px 18px 4px;display:flex;flex-direction:column;gap:11px}
@@ -605,6 +620,8 @@
   .menu-sticky-group{top:env(safe-area-inset-top)}
 
   /* Штора голосования выезжает сверху — её заголовок обязан быть под вырезом. */
-  .vs-head{padding-top:calc(16px + env(safe-area-inset-top))}
+  /* Штора теперь снизу: под индикатором дома должен быть отступ у СПИСКА,
+     а не у заголовка (тот больше не касается верхней кромки экрана). */
+  .vote-list{padding-bottom:calc(4px + env(safe-area-inset-bottom))}
 
   @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}.card.reveal{opacity:1!important;transform:none!important}}

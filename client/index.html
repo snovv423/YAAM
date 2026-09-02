@@ -111,10 +111,13 @@
     <h2 class="intro-title">Твой город уже в меню.</h2>
     <p class="intro-text">YAAM собирает рестораны твоего города в одном спокойном месте — чтобы не теряться в лишнем&nbsp;шуме.</p>
   </div>
-  <div class="vote-chip" id="vote-chip" onclick="openVote()">кого ждём</div>
   <div class="ptr" id="ptr">Обновление…</div>
   <div class="sec"><h2>Открыто сейчас</h2></div>
   <div class="list" id="list"></div>
+  <!-- «Кого ждём» стоит ПОСЛЕ списка ресторанов выбранного города: сначала
+       человек смотрит, что уже есть, и только потом ему предлагают позвать
+       недостающее. Раньше кнопка висела над списком и перебивала его. -->
+  <div class="vote-chip" id="vote-chip" onclick="openVote()">кого ждём</div>
   <a class="help-link" href="https://t.me/YAAMHELP" target="_blank" rel="noopener">HELP</a>
   <footer class="site-footer">
     <a href="legal/offer.html" target="_blank" rel="noopener">Публичная оферта</a>
@@ -301,16 +304,17 @@
   </div>
 </div>
 <!-- Штора голосования -->
-<div class="vote-overlay" id="vote-overlay" onclick="closeVote()" ontouchmove="event.preventDefault()"></div>
-<div class="vote-sheet" id="vote-sheet">
+<div class="vote-overlay" id="vote-overlay" onclick="closeVote()" ontouchmove="if(event.touches.length<2)event.preventDefault()"></div>
+<div class="vote-sheet" id="vote-sheet" role="dialog" aria-modal="true" aria-labelledby="vs-title">
+  <!-- Хват сверху: штора поднимается снизу, значит закрывающий свайп — вниз,
+       за верхний край. Так же, как штора корзины, и так же, как ожидает
+       любой, кто пользовался мобильными приложениями. -->
+  <div class="vs-draghandle" ontouchstart="voteTouchStart(event)" ontouchmove="voteTouchMove(event)" ontouchend="voteTouchEnd(event)"><div class="vs-drag"></div></div>
   <div class="vs-head">
-    <div class="vs-title">Какой ресторан вы ждёте в YAAM?</div>
+    <div class="vs-title" id="vs-title">Какой ресторан вы ждёте в YAAM?</div>
     <div class="vs-sub">Голосуйте за ресторан, которого не хватает — у кого больше голосов, того подключим следующим.</div>
   </div>
   <div class="vote-list" id="vote-list"></div>
-  <!-- Хват снизу — эта штора спускается сверху вниз, значит закрывающий свайп вверх
-       логично тянуть за нижний край, а не за верхний (зеркально шторе корзины). -->
-  <div class="vs-draghandle" ontouchstart="voteTouchStart(event)" ontouchmove="voteTouchMove(event)" ontouchend="voteTouchEnd(event)"><div class="vs-drag"></div></div>
 </div>
 
 <div class="cartbar" id="cartbar" style="display:none">

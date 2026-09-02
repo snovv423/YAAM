@@ -69,8 +69,14 @@ test('низ документа и всплывающие панели учит�
   assert.match(rule('.sheet'), /padding-bottom:calc\(28px \+ env\(safe-area-inset-bottom\)\)/);
 });
 
-test('штора голосования выезжает сверху — её заголовок тоже под вырезом', () => {
-  assert.match(rule('.vs-head'), /padding-top:calc\(16px \+ env\(safe-area-inset-top\)\)/);
+// Штора голосования переехала вниз (bottom sheet), поэтому и safe-area у неё
+// теперь нижняя: заголовок больше не касается выреза, а вот список упирался бы
+// в индикатор дома.
+test('нижняя штора голосования уважает нижнюю safe-area', () => {
+  assert.match(rule('.vote-sheet'), /padding-bottom:env\(safe-area-inset-bottom\)/);
+  assert.match(rule('.vote-list'), /padding-bottom:calc\(4px \+ env\(safe-area-inset-bottom\)\)/);
+  assert.doesNotMatch(rule('.vs-head'), /safe-area-inset-top/,
+    'верхняя safe-area у шторы больше не при делах — она не касается выреза');
 });
 
 test('переход между экранами короткий и без transform, ломающего fixed-панели', () => {
