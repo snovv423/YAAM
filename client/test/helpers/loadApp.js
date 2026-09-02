@@ -125,7 +125,7 @@ function makeFakeElement(id) {
   return element;
 }
 
-function createSandbox({ apiBaseUrl, locationSearch, locationHref, useProductionDefault = false } = {}) {
+function createSandbox({ apiBaseUrl, locationSearch, locationHref, locationHash, cityChips, useProductionDefault = false } = {}) {
   const store = {};
   const localStorage = {
     getItem: (k) => (Object.prototype.hasOwnProperty.call(store, k) ? store[k] : null),
@@ -142,13 +142,25 @@ function createSandbox({ apiBaseUrl, locationSearch, locationHref, useProduction
   };
 
   const elementCache = new Map();
+  // Чипы городов существуют в реальной разметке (index.html) и являются
+  // единственным источником списка городов для app.js (supportedCities()).
+  // Стаб отдаёт их только тому селектору, который их и ищет — все прочие
+  // querySelectorAll по-прежнему возвращают [], как и раньше.
+  const cityChipElements = (cityChips || []).map((name) => {
+    const el = makeFakeElement('citychip-' + name);
+    el.textContent = name;
+    return el;
+  });
   const documentStub = {
     getElementById(id) {
       if (!elementCache.has(id)) elementCache.set(id, makeFakeElement(id));
       return elementCache.get(id);
     },
     querySelector() { return makeFakeElement('__qs'); },
-    querySelectorAll() { return []; },
+    querySelectorAll(selector) {
+      if (selector === '#cities .citychip') return cityChipElements;
+      return [];
+    },
     createElement() { return makeFakeElement('__created'); },
     addEventListener() {},
     removeEventListener() {},
@@ -157,6 +169,14 @@ function createSandbox({ apiBaseUrl, locationSearch, locationHref, useProduction
   };
 
   let webLockTail = Promise.resolve();
+  // Объявлена до sandbox и замыкается на него: history.pushState вызывается
+  // уже после создания объекта.
+  const applyUrl = (url) => {
+    if (typeof url !== 'string' || url === '') return;
+    const hashAt = url.indexOf('#');
+    sandbox.location.hash = hashAt < 0 ? '' : url.slice(hashAt);
+    sandbox.location.href = 'https://yaam.su' + url;
+  };
   const sandbox = {
     console,
     localStorage,
@@ -175,14 +195,27 @@ function createSandbox({ apiBaseUrl, locationSearch, locationHref, useProduction
     crypto: webcrypto,
     Uint8Array,
     btoa: (value) => Buffer.from(value, 'binary').toString('base64'),
-    history: { pushState() {}, replaceState() {} },
+    // История записывает то, что реально важно для маршрутизации: какой адрес
+    // приложение положило в адресную строку. Как и в браузере, pushState/
+    // replaceState с url меняют location.hash — иначе тест не смог бы
+    // отличить «экран сменился» от «адрес блюда действительно записан».
+    history: {
+      entries: [],
+      pushState(state, title, url) { this.entries.push({ type: 'push', state, url }); applyUrl(url); },
+      replaceState(state, title, url) { this.entries.push({ type: 'replace', state, url }); applyUrl(url); },
+    },
     // Реальные URL/URLSearchParams (Node built-ins) — Stage 11A staging-
     // activation логика в api.js их использует; без них resolveApiBaseUrl()
     // просто безопасно откатывается на demo (try/catch), но чтобы РЕАЛЬНО
     // протестировать саму активацию, они здесь нужны настоящими.
     URL,
     URLSearchParams,
-    location: { href: locationHref || ('https://yaam.su/' + (locationSearch || '')), search: locationSearch || '' },
+    location: {
+      href: locationHref || ('https://yaam.su/' + (locationSearch || '') + (locationHash || '')),
+      search: locationSearch || '',
+      pathname: '/',
+      hash: locationHash || '',
+    },
     requestAnimationFrame: (fn) => fn(),
     AbortController,
     setInterval, clearInterval, setTimeout, clearTimeout,

@@ -13,6 +13,7 @@ const CART_TTL_MS=30*60*1000;   // корзина без оформления з
 const TOAST_DURATION_MS=2600;
 const FLY_ANIM_MS=750;
 const CART_STORAGE_KEY='yaam_cart_state';
+const CITY_STORAGE_KEY='yaam_selected_city';
 const ORDER_STORAGE_KEY='yaam_active_order';
 const PENDING_ORDER_CREDENTIALS_KEY='yaam_pending_order_credentials';
 const DEMO_SEQ_KEY='yaam_demo_order_seq';
@@ -223,10 +224,96 @@ function normalizeRestaurant(r){
 }
 let restaurantsCache=[];
 
+// ---------------------------------------------------------------------------
+// Адрес открытого ресторана/блюда (#/r/<id> и #/r/<id>/d/<dish>)
+// ---------------------------------------------------------------------------
+//
+// ЗАЧЕМ. До этого экран жил только в памяти вкладки: go() клал в историю
+// {screen:'dish'}, но адрес оставался голым "/". Любой refresh на карточке
+// блюда (и любая попытка поделиться ссылкой, и «открыть в новой вкладке»)
+// приводил на главную — состояние взять было неоткуда.
+//
+// ПОЧЕМУ ХЭШ, А НЕ ПУТЬ. Клиент — статические файлы без серверного роутера
+// (client/, отдаётся как есть). Путь /r/1/d/5 при прямом заходе ушёл бы на
+// хостинг и вернул 404: понадобился бы rewrite на каждом хостинге и в
+// service worker. Хэш не отправляется на сервер вообще, работает при любом
+// способе раздачи и уже используется здесь же для #shared=CODE:TOKEN.
+//
+// ПОЧЕМУ id БЛЮДА, А НЕ ЕГО ПОЗИЦИЯ В МЕНЮ. Внутренний ключ блюда —
+// "<индекс категории>_<индекс блюда>", он меняется, как только владелец
+// переставит меню в HQ (перетаскиванием). Сохранённая или перезагруженная
+// ссылка обязана открывать ТО ЖЕ блюдо, поэтому в адрес идёт id из API.
+// В demo-режиме (USE_API=false) у блюд id нет вовсе — там и только там
+// используется позиционная запись cNiM.
+function parseRouteHash(){
+  const m=/^#\/r\/(\d+)(?:\/d\/([A-Za-z0-9_-]{1,40}))?$/.exec(location.hash||'');
+  if(!m)return null;
+  const rest=Number(m[1]);
+  if(!Number.isInteger(rest)||rest<1)return null;
+  return{rest,dish:m[2]||null};
+}
+function dishRouteId(rest,key){
+  if(!rest||!key)return null;
+  const[ci,ii]=String(key).split('_').map(Number);
+  const cat=rest.menu&&rest.menu[ci];
+  const item=cat&&cat.items&&cat.items[ii];
+  if(!item)return null;
+  return item.id!=null?String(item.id):`c${ci}i${ii}`;
+}
+function dishKeyFromRouteId(rest,dishId){
+  if(!rest||!rest.menu||!dishId)return null;
+  const pos=/^c(\d+)i(\d+)$/.exec(dishId);
+  if(pos){
+    const ci=Number(pos[1]),ii=Number(pos[2]);
+    return(rest.menu[ci]&&rest.menu[ci].items&&rest.menu[ci].items[ii])?`${ci}_${ii}`:null;
+  }
+  for(let ci=0;ci<rest.menu.length;ci++){
+    const items=rest.menu[ci].items||[];
+    for(let ii=0;ii<items.length;ii++){
+      if(items[ii].id!=null&&String(items[ii].id)===String(dishId))return`${ci}_${ii}`;
+    }
+  }
+  return null;
+}
+// Адрес для текущего экрана. Экраны корзины/оплаты/статуса своего адреса не
+// имеют (и не должны: их состояние живёт в yaam_active_order, а не в ссылке) —
+// для них адрес очищается до базового, чтобы refresh на оплате не открывал
+// вдруг карточку блюда.
+function routeUrlForScreen(id){
+  const base=location.pathname+location.search;
+  if(id==='menu'&&curRest)return`${base}#/r/${curRest.id}`;
+  if(id==='dish'&&curRest){
+    const dishId=dishRouteId(curRest,curDishKey);
+    return dishId?`${base}#/r/${curRest.id}/d/${dishId}`:`${base}#/r/${curRest.id}`;
+  }
+  return base;
+}
+
+// Выбранный город переживает refresh сам по себе, а не только «прицепом» к
+// сохранённой корзине: до этого прямой заход/обновление всегда возвращали
+// человека в город по умолчанию, даже если он смотрел другой.
+// Список городов не дублируется в JS — берётся из тех же чипов разметки.
+function supportedCities(){
+  return[...document.querySelectorAll('#cities .citychip')].map(ch=>ch.textContent.trim()).filter(Boolean);
+}
+function persistSelectedCity(city){
+  try{localStorage.setItem(CITY_STORAGE_KEY,city);}catch(e){/* приватный режим — просто не запомним */}
+}
+function restoreSelectedCity(){
+  let saved=null;
+  try{saved=localStorage.getItem(CITY_STORAGE_KEY);}catch(e){}
+  const cities=supportedCities();
+  if(!saved||!cities.includes(saved))return;
+  selectedCity=saved;
+  document.querySelectorAll('#cities .citychip').forEach(ch=>ch.classList.toggle('sel',ch.textContent.trim()===saved));
+}
+
+
 let cityRenderSeq=0;
 async function selectCity(c){
   if(c===selectedCity)return;
   selectedCity=c;
+  persistSelectedCity(c);
   const renderSeq=++cityRenderSeq;
   document.querySelectorAll('#cities .citychip').forEach(ch=>ch.classList.toggle('sel',ch.textContent===c));
   const list=document.getElementById('list');
@@ -2648,7 +2735,7 @@ async function openSharedOrder(code,token){
 }
 
 function cur(id){return document.getElementById(id).classList.contains('active');}
-function go(id){document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));document.getElementById(id).classList.add('active');document.querySelector('.dish-add').style.display=(id==='dish')?'block':'none';if(id!=='status'&&id!=='rejected')document.getElementById('statusbg').style.display='none';window.scrollTo(0,0);updateBar();if(id==='home'&&introFadeHandler)introFadeHandler();try{if(id!=='home')history.pushState({screen:id},'');else history.replaceState({screen:'home'},'');}catch(e){}}
+function go(id){document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));document.getElementById(id).classList.add('active');document.querySelector('.dish-add').style.display=(id==='dish')?'block':'none';if(id!=='status'&&id!=='rejected')document.getElementById('statusbg').style.display='none';window.scrollTo(0,0);updateBar();if(id==='home'&&introFadeHandler)introFadeHandler();try{const url=routeUrlForScreen(id);if(id!=='home')history.pushState({screen:id},'',url);else history.replaceState({screen:'home'},'',url);}catch(e){}}
 function resetAll(){
   const orderCodeForClear=currentOrderCode,orderTokenForClear=currentOrderAccessToken;
   clearInterval(preTimer);clearTimeout(preAutoTimer);preDeadline=null;stopQRTimer();qrDeadline=null;stopOrderPolling();showRestaurantPhone(null);showOrderDot(false);cart={};curRest=null;currentOrderCode=null;currentOrderAccessToken=null;currentCreateIdempotencyKey=null;currentRetryIdempotencyKey=null;currentPaymentUrl=null;currentOrderAmount=null;currentOrderRestaurantId=null;currentOrderItems=[];currentOrderAddress=null;currentOrderComment=null;orderCreatedAtMs=null;initialRecoveryBlocked=false;demoStage='qr';
@@ -2969,6 +3056,46 @@ function voteTouchEnd(){
   if(el)el.addEventListener('input',saveCartState);
 });
 
+// Открыть ресторан/блюдо по адресу (#/r/N[/d/M]) — прямой заход, refresh,
+// «открыть в новой вкладке», ссылка из мессенджера.
+//
+// Порядок восстановления истории здесь принципиален. Запись, на которой
+// человек оказался после refresh, приводится к чистой главной (тот же
+// pathname без хэша), и уже поверх неё doOpenRest/openDish кладут свои
+// записи меню и блюда. Тогда «назад» после обновления страницы проходит
+// ровно тот же путь, что и при обычной навигации: блюдо -> меню -> главная,
+// без записи-двойника с адресом блюда, но с главной на экране.
+async function openRouteTarget(route){
+  await doOpenRest(route.rest);
+  // doOpenRest не сумел открыть ресторан (нет сети, ресторан снят с
+  // публикации) — остаёмся на главной, а не на пустом экране меню.
+  if(!curRest||curRest.id!==route.rest)return false;
+  if(route.dish){
+    const key=dishKeyFromRouteId(curRest,route.dish);
+    // Блюда больше нет в меню (архивировано в HQ) — остаёмся на меню
+    // ресторана: ближайшее осмысленное место, а не главная и не пустая карточка.
+    if(key)openDish(key);
+  }
+  return true;
+}
+async function openRouteFromLocation(){
+  const route=parseRouteHash();
+  if(!route)return false;
+  try{history.replaceState({screen:'home'},'',location.pathname+location.search);}catch(e){/* не критично */}
+
+  // Корзина другого ресторана — ровно тот конфликт, для которого в приложении
+  // уже есть явный вопрос (openRest). Ссылка не даёт права молча стереть
+  // чужую корзину: согласится — откроем; откажется — останется на главной со
+  // своей корзиной, ровно как до этого исправления.
+  if(Object.keys(cart).length>0&&curRest&&curRest.id!==route.rest){
+    const other=restaurantsCache.find(r=>r.id===route.rest);
+    yaamConfirm(`В корзине блюда из «${curRest.name}». Очистить корзину и открыть «${other?other.name:'другой ресторан'}»?`,()=>{openRouteTarget(route);});
+    return true;
+  }
+  return openRouteTarget(route);
+}
+
+restoreSelectedCity();
 renderList();
 // Ссылка «Поделиться» (#shared=CODE:TOKEN) обрабатывается ДО восстановления
 // собственной сессии посетителя — иначе tryRestoreSession() перехватила бы
@@ -2979,6 +3106,15 @@ if(sharedLink){
   try{history.replaceState(history.state||{},'',location.pathname+location.search);}catch(e){/* не критично */}
   openSharedOrder(sharedLink.code,sharedLink.token);
 }else{
-  tryRestoreSession();
+  // Активный заказ важнее адреса: человек с незавершённым заказом должен
+  // видеть его статус, даже если открыл ссылку на блюдо. Проверяем не
+  // возвращаемое значение tryRestoreSession (оно одинаково true и для
+  // восстановленного заказа, и для одной лишь корзины), а фактическое
+  // состояние: экран занят, только если заказ действительно есть или его
+  // восстановление упёрлось в ошибку и показывает свой экран.
+  tryRestoreSession().then(()=>{
+    if(currentOrderCode||initialRecoveryBlocked)return;
+    return openRouteFromLocation();
+  }).catch(()=>{});
 }
 initIntroLayerFX();
