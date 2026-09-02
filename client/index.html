@@ -10,6 +10,42 @@
      установленного приложения с домашнего экрана. -->
 <meta name="color-scheme" content="dark">
 <style>html{background-color:#0A2417}</style>
+<!-- Прямое открытие или перезагрузка адреса блюда (#/r/N[/d/M]).
+     Маршрут распознаётся ЗДЕСЬ, до разбора <body>, — иначе главная успевает
+     отрисоваться первым кадром (её разметка в документе помечена active) и
+     видна вспышкой, пока app.js асинхронно поднимает ресторан и блюдо.
+     Пока стоит .route-boot, не показывается ни один экран, а холст остаётся
+     тем же тёмным #0A2417, что и до навигации: первый кадр стабилен.
+     Класс снимает app.js, когда маршрут восстановлен, и слушатель error ниже,
+     если скрипт вообще не загрузился, — «застрять» в этом состоянии нельзя. -->
+<style>
+  html.route-boot .screen{display:none!important}
+  html.route-boot #route-boot{display:flex}
+  #route-boot{display:none;position:fixed;inset:0;align-items:center;justify-content:center;background:#0A2417;z-index:9999}
+  /* Индикатор проявляется только если восстановление реально затянулось:
+     на быстром соединении маршрут открывается раньше, и никакой лишней
+     «крутилки» человек не видит вовсе. Это оформление, а не логика — состояние
+     экрана им не управляется. */
+  #route-boot::after{content:"";width:26px;height:26px;border-radius:50%;border:2px solid rgba(255,255,255,.16);border-top-color:rgba(255,255,255,.5);opacity:0;animation:route-boot-spin .7s linear infinite,route-boot-in .25s ease-out .45s forwards}
+  @keyframes route-boot-spin{to{transform:rotate(360deg)}}
+  @keyframes route-boot-in{to{opacity:1}}
+  @media (prefers-reduced-motion:reduce){#route-boot::after{animation:route-boot-in .25s ease-out .45s forwards}}
+</style>
+<script>
+  (function(){
+    // Тот же формат маршрута, что разбирает parseRouteHash() в js/app.js.
+    // Совпадение этих двух мест закреплено тестом (client/test/routeBootFlash.test.js):
+    // разойдясь, они вернут либо вспышку главной, либо тёмный экран без причины.
+    if(!/^#\/r\/[1-9]\d*(?:\/d\/[A-Za-z0-9_-]{1,40})?$/.test(window.location.hash||''))return;
+    document.documentElement.classList.add('route-boot');
+    // Страховка ровно на два случая: скрипт приложения не загрузился (ошибка
+    // ресурса, ловится в capture-фазе) или упал с необработанной ошибкой. Тогда
+    // показываем обычную главную вместо тёмного экрана. Таймеров здесь нет.
+    window.addEventListener('error',function(){
+      document.documentElement.classList.remove('route-boot');
+    },true);
+  })();
+</script>
 <title>YAAM — доставка еды в Чечне</title>
 <meta name="description" content="YAAM — локальный агрегатор доставки еды в Грозном, Аргуне, Гудермесе и Шали. Закажите из любимых ресторанов, оплата по СБП.">
 <meta property="og:title" content="YAAM — доставка еды в Чечне">
@@ -43,6 +79,10 @@
 <script defer src="js/pwa.js?v=__CACHE_BUST__"></script>
 </head>
 <body>
+
+<!-- Нейтральная заставка на время восстановления маршрута из адреса.
+     Видна только под html.route-boot (см. <style> в <head>). -->
+<div id="route-boot" aria-hidden="true"></div>
 
 <div id="statusbg"></div>
 <!-- Полоса под статус-баром установленного приложения. В обычной вкладке

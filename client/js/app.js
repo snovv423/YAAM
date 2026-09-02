@@ -289,6 +289,14 @@ function routeUrlForScreen(id){
   return base;
 }
 
+// Снимает предпаинтовую заставку (html.route-boot, поставлена инлайновым
+// скриптом в <head> index.html). Вызывается ровно один раз — когда решено,
+// ЧТО показать: восстановленный маршрут, экран активного заказа или обычную
+// главную. Идемпотентна: повторный вызов ничего не делает.
+function finishRouteBoot(){
+  try{document.documentElement.classList.remove('route-boot');}catch(e){/* не критично */}
+}
+
 // Выбранный город переживает refresh сам по себе, а не только «прицепом» к
 // сохранённой корзине: до этого прямой заход/обновление всегда возвращали
 // человека в город по умолчанию, даже если он смотрел другой.
@@ -3104,6 +3112,7 @@ renderList();
 const sharedLink=USE_API?parseSharedHash():null;
 if(sharedLink){
   try{history.replaceState(history.state||{},'',location.pathname+location.search);}catch(e){/* не критично */}
+  finishRouteBoot();
   openSharedOrder(sharedLink.code,sharedLink.token);
 }else{
   // Активный заказ важнее адреса: человек с незавершённым заказом должен
@@ -3112,9 +3121,12 @@ if(sharedLink){
   // восстановленного заказа, и для одной лишь корзины), а фактическое
   // состояние: экран занят, только если заказ действительно есть или его
   // восстановление упёрлось в ошибку и показывает свой экран.
+  // finally, а не then: заставка обязана сняться и когда маршрут восстановлен,
+  // и когда экран занял активный заказ, и когда что-то пошло не так — иначе
+  // человек остался бы перед тёмным экраном.
   tryRestoreSession().then(()=>{
     if(currentOrderCode||initialRecoveryBlocked)return;
     return openRouteFromLocation();
-  }).catch(()=>{});
+  }).catch(()=>{}).finally(finishRouteBoot);
 }
 initIntroLayerFX();
