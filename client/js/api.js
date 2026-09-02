@@ -64,6 +64,8 @@ const api = {
   // вызывается вовсе — см. renderVote() в app.js, fallback на
   // CANDIDATE_RESTAURANTS из data.js.
   getRestaurantCandidates: () => apiRequest('/api/restaurant-candidates'),
+  // Текст на главной — редактируется владельцем в HQ, в клиенте не хранится.
+  getHomeContent: () => apiRequest('/api/home-content'),
   // Stage 29.1, п.3 — реальный приём голоса. deviceId — анонимный
   // localStorage-идентификатор устройства (см. getVoterDeviceId() в
   // app.js), НЕ персональные данные.

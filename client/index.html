@@ -102,14 +102,21 @@
         <span class="citychip" onclick="selectCity('Гудермес')">Гудермес</span>
         <span class="citychip" onclick="selectCity('Шали')">Шали</span>
       </div>
-      <div class="partners"><div class="ptrack"><span class="pname">Рестораны подключаются</span><span class="pname">Скоро здесь появятся новые места</span><span class="pname">Рестораны подключаются</span><span class="pname">Скоро здесь появятся новые места</span></div></div>
+      <!-- Бегущая строка собирается из реальных опубликованных ресторанов
+           (js/app.js, renderMarquee): названий в разметке нет намеренно —
+           иначе после подключения нового ресторана здесь осталась бы вторая,
+           устаревшая копия списка. -->
+      <div class="partners" id="partners" hidden><div class="ptrack" id="ptrack"></div></div>
     </div>
   </div>
   <!-- Intro вместо поиска: слоган живёт как отдельный слой между шапкой и карточками —
        initIntroLayerFX() в app.js мягко приглушает/сдвигает его при скролле. -->
   <div class="intro" id="intro" onclick="toggleIntroLight(this)">
-    <h2 class="intro-title">Твой город уже в меню.</h2>
-    <p class="intro-text">YAAM собирает рестораны твоего города в одном спокойном месте — чтобы не теряться в лишнем&nbsp;шуме.</p>
+    <!-- Текст приходит из HQ («Обзор» -> «Текст на главной», GET
+         /api/home-content). В разметке его нет: копия в вёрстке разошлась бы
+         с сохранённым, как только владелец что-нибудь поправит. -->
+    <h2 class="intro-title" id="intro-title"></h2>
+    <p class="intro-text" id="intro-text"></p>
   </div>
   <div class="ptr" id="ptr">Обновление…</div>
   <div class="sec"><h2>Открыто сейчас</h2></div>

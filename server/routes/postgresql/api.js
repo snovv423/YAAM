@@ -55,6 +55,7 @@ const mediaProvider = createMediaProviderFromEnv(process.env);
 // media-провайдер выше, публичный routes/postgresql/api.js уже импортирует
 // services/hq/* для сущностей, которые ОБА контура читают/пишут.
 const candidateService = require('../../services/hq/restaurantCandidateService');
+const homeContentService = require('../../services/hq/homeContentService');
 
 const router = express.Router();
 
@@ -390,6 +391,20 @@ function setNoCacheHeader(req, res, next) {
   res.set('Cache-Control', 'no-cache');
   next();
 }
+
+// Текст на главной странице сайта. Отдельная маленькая ручка, а не поле внутри
+// /restaurants: текст не зависит ни от города, ни от списка ресторанов, и
+// клиент запрашивает его один раз при загрузке. Значения всегда непустые —
+// сервис подставляет встроенные, если владелец ничего не менял, поэтому
+// клиенту не нужно держать собственную копию текста.
+router.get('/home-content', setNoCacheHeader, async (req, res) => {
+  try {
+    res.json(await homeContentService.getHomeContent());
+  } catch (err) {
+    console.error('[api-postgresql] GET /home-content failed:', err.message);
+    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
+  }
+});
 
 router.get('/restaurants', setNoCacheHeader, async (req, res) => {
   try {

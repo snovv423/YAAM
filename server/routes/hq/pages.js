@@ -19,6 +19,7 @@ const fiscalReceiptService = require('../../services/fiscalization/fiscalReceipt
 const settingsViews = require('../../hq/settingsViews');
 const dashboardMetrics = require('../../services/hq/dashboardMetrics');
 const eventLogService = require('../../services/hq/eventLogService');
+const homeContentService = require('../../services/hq/homeContentService');
 const payoutStatusService = require('../../services/hq/payoutStatusService');
 // Сущность выплаты — ОТДЕЛЬНЫЙ сервис от payoutService выше (тот про
 // готовность реквизитов); имя намеренно другое, тем же приёмом, что и в
@@ -122,12 +123,40 @@ function renderEventCenter({ events, now, linkBasePath, csrfToken }) {
     </div>`;
 }
 
-function renderOverview({ period, metrics, events, now, csrfToken, linkBasePath }) {
+// «Текст на главной» — две строки, которые видит посетитель сайта: светящийся
+// заголовок и спокойная строка под ним. Живут в app_settings (см.
+// services/hq/homeContentService.js), в вёрстке клиента их нет вовсе.
+//
+// Поля — textarea, а не input: подтекст может быть в две строки, и владелец
+// должен видеть его целиком, а не в узкой щели. Высота подгоняется под
+// содержимое (hq/static/hq.js, data-autogrow), поэтому короткая строка не
+// оставляет пустого поля на пол-экрана.
+function renderHomeContentBlock({ homeContent, saved, error, csrfToken, linkBasePath }) {
+  return `
+    <div class="panel home-text">
+      <div class="panel-head">
+        <div class="panel-title">Текст на главной</div>
+        ${saved ? '<span class="home-text-saved">Сохранено</span>' : ''}
+      </div>
+      <form method="post" action="${linkBasePath}/home-content" data-single-submit>
+        <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
+        <label for="hc-neon">Неон</label>
+        <textarea id="hc-neon" name="neon" data-autogrow rows="1" maxlength="${homeContentService.NEON_MAX}" required>${esc(homeContent.neon)}</textarea>
+        <label for="hc-subtext">Подтекст</label>
+        <textarea id="hc-subtext" name="subtext" data-autogrow rows="2" maxlength="${homeContentService.SUBTEXT_MAX}" required>${esc(homeContent.subtext)}</textarea>
+        <button type="submit" class="compact">Сохранить</button>
+        ${error ? `<div class="error">${esc(error)}</div>` : ''}
+      </form>
+    </div>`;
+}
+
+function renderOverview({ period, metrics, events, now, csrfToken, linkBasePath, homeContent, saved, error }) {
   return `
     <h1>Обзор</h1>
     ${renderPeriodSwitch(period, linkBasePath)}
     ${renderOverviewMetrics(metrics)}
     ${renderEventCenter({ events, now, linkBasePath, csrfToken })}
+    ${renderHomeContentBlock({ homeContent, saved, error, csrfToken, linkBasePath })}
   `;
 }
 
@@ -377,9 +406,10 @@ function createPagesRouter({ linkBasePath, mediaProvider = null }) {
     try {
       const period = OVERVIEW_PERIODS.some(([key]) => key === req.query.period) ? req.query.period : 'today';
       const now = new Date();
-      const [metrics, events] = await Promise.all([
+      const [metrics, events, homeContent] = await Promise.all([
         dashboardMetrics.getOverviewMetrics({ period, now }),
         eventLogService.listActiveEvents(),
+        homeContentService.getHomeContent(),
       ]);
       const csrfToken = ensureCsrfToken(req);
       res.send(layout({
@@ -387,9 +417,34 @@ function createPagesRouter({ linkBasePath, mediaProvider = null }) {
         active: 'overview',
         csrfToken,
         linkBasePath,
-        body: renderOverview({ period, metrics, events, now, csrfToken, linkBasePath }),
+        body: renderOverview({
+          period, metrics, events, now, csrfToken, linkBasePath, homeContent,
+          saved: req.query.saved === '1',
+          error: req.query.error,
+        }),
       }));
     } catch (err) {
+      next(err);
+    }
+  });
+
+  // Сохранение текста главной. Post/Redirect/Get — тем же приёмом, что и все
+  // остальные мутации HQ: обновление страницы после сохранения не отправляет
+  // форму повторно. Подтверждение — короткая строка «Сохранено» рядом с
+  // заголовком блока, без всплывающих окон и мигания.
+  router.post('/home-content', requireCsrf, async (req, res, next) => {
+    try {
+      const saved = await homeContentService.updateHomeContent(req.body);
+      await logAuditEvent({
+        action: 'home_content_updated',
+        details: `неон: "${saved.neon.slice(0, 40)}", подтекст: ${saved.subtext.length} симв.`,
+        ip: req.ip,
+      });
+      res.redirect(`${linkBasePath}/?saved=1`);
+    } catch (err) {
+      if (err instanceof ValidationError) {
+        return res.redirect(`${linkBasePath}/?error=${encodeURIComponent(err.message)}`);
+      }
       next(err);
     }
   });

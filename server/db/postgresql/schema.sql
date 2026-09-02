@@ -2698,6 +2698,7 @@ ALTER TABLE hq_audit_log ADD CONSTRAINT hq_audit_log_action_check CHECK (action 
   'settlement_document_token_rejected',
   'settlement_adjustment_created',
   'settlement_notification_sent', 'settlement_notification_failed',
+  'home_content_updated',
   -- Stage 22.
   'payment_reconciled',            -- сверка привела платёж к каноническому статусу
   'payment_reconcile_failed',      -- сверка не удалась (временно или окончательно)
@@ -2745,6 +2746,21 @@ ALTER TABLE payout_attempts ADD COLUMN IF NOT EXISTS confirmed_by TEXT;
 -- и никогда не восстанавливается автоматически вместе с ней.
 ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS archived_with_category_id INTEGER
   REFERENCES categories(id);
+
+-- =========================================================================
+-- app_settings (0019) — редактируемые из HQ настройки приложения
+-- =========================================================================
+--
+-- Общий key/value для коротких строк, которыми владелец управляет из HQ
+-- (сейчас — текст на главной странице сайта). Отдельная именная таблица под
+-- каждую такую строку не заводится: у них нет структуры, ради которой
+-- существуют yaam_legal_details/yaam_bank_details. Отсутствие строки означает
+-- «не меняли» — приложение берёт встроенный текст.
+CREATE TABLE IF NOT EXISTS app_settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 
 -- =========================================================================
 -- HQ "Кого ждём" — restaurant_candidates (0007)

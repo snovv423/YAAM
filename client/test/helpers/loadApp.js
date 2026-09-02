@@ -39,6 +39,12 @@ function makeFakeElement(id) {
     // настоящие методы (не свойства style.<name>=...) — .dhero::before
     // читает CSS custom property --dhero-bg, которую app.js выставляет
     // через style.setProperty(), а не прямым присваиванием.
+    hidden: false,
+    // Ширины настраиваются тестом: renderMarquee (client/js/app.js) добирает
+    // повторы, пока половина трека не перекроет экран, и без измеримых
+    // размеров эту логику проверить нечем.
+    scrollWidth: 0,
+    clientWidth: 0,
     style: (() => {
       const store = {};
       return new Proxy(store, {

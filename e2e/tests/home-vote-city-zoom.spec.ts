@@ -226,7 +226,10 @@ test('B: при первом открытии выбирается город с
 
 async function openDish(page: Page, restaurantName: string, dishName: string) {
   await page.goto(CLIENT_BASE_URL!);
-  await page.getByText(restaurantName, { exact: false }).first().click();
+  // Именно карточка в списке, а не любой текст с этим названием: то же
+  // название теперь ездит в бегущей строке, и клик по ней и не сработал бы,
+  // и не дождался бы «стабильности» — лента анимируется непрерывно.
+  await page.locator('#list .card', { hasText: restaurantName }).first().click();
   await expect(page.locator('#menu')).toHaveClass(/active/);
   await page.getByText(dishName, { exact: false }).first().click();
   await expect(page.locator('#dish')).toHaveClass(/active/);

@@ -137,6 +137,8 @@ const ACTIONS = [
   'settlement_adjustment_created',
   'settlement_notification_sent',
   'settlement_notification_failed',
+  // Текст на главной странице сайта (HQ «Обзор» -> «Текст на главной»).
+  'home_content_updated',
 ];
 
 // Единственные поля ресторана, которые вообще могут попасть в текст лога —

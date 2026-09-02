@@ -16,6 +16,9 @@ const { startEmbeddedPostgres } = require('./helpers/embeddedPg');
 const SCHEMA_SQL = fs.readFileSync(path.join(__dirname, '../../db/postgresql/schema.sql'), 'utf8');
 
 const EXPECTED_TABLES = [
+  // Общий key/value для редактируемых из HQ настроек приложения (0019):
+  // сейчас — текст на главной странице сайта.
+  'app_settings',
   // Stage 22 — реестр отвергнутых webhook и счётчик номеров документов.
   'webhook_rejections',
   'document_number_counters',
@@ -236,7 +239,7 @@ async function runSchemaAndInspect(t, databaseName) {
       await client.query(SCHEMA_SQL);
     });
 
-    await t.test('создаются все 45 таблиц', async () => {
+    await t.test('создаются все 46 таблиц', async () => {
       const { rows } = await client.query(
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename`
       );

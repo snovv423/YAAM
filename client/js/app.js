@@ -314,6 +314,11 @@ function applySelectedCity(city){
 // Возвращает true, если у посетителя есть СОБСТВЕННЫЙ, осознанный выбор
 // города — только его нажатие на чип (persistSelectedCity). Такой выбор
 // главнее любой автоматики и не переопределяется ничем.
+function hasStoredCity(){
+  let saved=null;
+  try{saved=localStorage.getItem(CITY_STORAGE_KEY);}catch(e){}
+  return !!saved&&supportedCities().includes(saved);
+}
 function restoreSelectedCity(){
   let saved=null;
   try{saved=localStorage.getItem(CITY_STORAGE_KEY);}catch(e){}
@@ -371,13 +376,107 @@ async function applyDefaultCityFromData(){
   }else{
     list=restaurants;
   }
-  if(!failed&&cities.length){
+  // Сохранённый выбор человека главнее автоматики: он уже применён
+  // restoreSelectedCity() выше и переопределяться не должен.
+  if(!failed&&cities.length&&!hasStoredCity()){
     const best=pickDefaultCity(list,cities);
     if(best&&best!==selectedCity)applySelectedCity(best);
   }
   return{list,failed};
 }
 
+
+// ---------------------------------------------------------------------------
+// Бегущая строка ресторанов
+// ---------------------------------------------------------------------------
+//
+// Собирается из реальных опубликованных ресторанов (тот же ответ
+// /api/restaurants, что и всё остальное на главной), поэтому подключение
+// нового ресторана или снятие с публикации меняют её сами, без правки вёрстки.
+//
+// Бесшовность цикла держится на одном соглашении: трек содержит РОВНО ДВЕ
+// одинаковые половины, а анимация сдвигает его на -50%. В момент зацикливания
+// вторая половина стоит там же, где была первая — рывка нет. Поэтому
+// содержимое собирается один раз строкой и выводится дважды.
+//
+// Разделитель — «·» через ::after у каждого названия (см. .pname в style.css):
+// точка стоит и между половинами тоже, поэтому на шве текст не слипается.
+const MARQUEE_MIN_REPEATS = 2;
+// Запас за краем экрана и потолок на число повторов: на очень широком мониторе
+// с одним коротким названием повторов нужно много, но не бесконечно.
+const MARQUEE_EDGE_PX = 40;
+const MARQUEE_MAX_REPEATS = 200;
+function marqueeNames(list){
+  return (Array.isArray(list) ? list : [])
+    .map((r) => (r && (r.name || r.n)) || '')
+    .map((n) => String(n).trim())
+    .filter(Boolean);
+}
+function renderMarquee(list){
+  const box=document.getElementById('partners');
+  const track=document.getElementById('ptrack');
+  if(!box||!track)return;
+  const names=marqueeNames(list);
+  if(!names.length){
+    // Показывать нечего — пустая лента выглядела бы сломанной полосой.
+    track.innerHTML='';
+    box.hidden=true;
+    return;
+  }
+  box.hidden=false;
+  const half=(times)=>{
+    let out='';
+    for(let i=0;i<times;i++)out+=names.map(n=>`<span class="pname">${esc(n)}</span>`).join('');
+    return out;
+  };
+  let repeats=MARQUEE_MIN_REPEATS;
+  track.innerHTML=half(repeats).repeat(2);
+  // Одна половина обязана перекрывать экран: иначе после сдвига на -50% в
+  // ленте появлялся бы просвет. Меряем фактическую ширину, а не гадаем по
+  // числу символов — длина названий заранее неизвестна. Недостающее число
+  // повторов считается сразу из измеренной ширины, а не подбирается по
+  // одному: одно короткое название на широком экране иначе потребовало бы
+  // десятков проходов.
+  const needed=box.clientWidth+MARQUEE_EDGE_PX;
+  let guard=0;
+  while(track.scrollWidth/2<needed&&guard++<4&&repeats<MARQUEE_MAX_REPEATS){
+    const halfWidth=track.scrollWidth/2||1;
+    repeats=Math.min(MARQUEE_MAX_REPEATS,repeats*Math.max(2,Math.ceil(needed/halfWidth)));
+    track.innerHTML=half(repeats).repeat(2);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Текст на главной (HQ -> «Обзор» -> «Текст на главной»)
+// ---------------------------------------------------------------------------
+//
+// В вёрстке текста нет: сервер всегда отдаёт готовую пару строк (сохранённую
+// владельцем или встроенную). Последнее известное значение кладётся в
+// localStorage и рисуется мгновенно при следующем заходе — иначе блок был бы
+// пустым до ответа сети на каждой загрузке.
+const HOME_CONTENT_KEY='yaam_home_content';
+function applyHomeContent(content){
+  if(!content)return;
+  const title=document.getElementById('intro-title');
+  const text=document.getElementById('intro-text');
+  // textContent, а не innerHTML: это пользовательский текст из HQ.
+  if(title&&typeof content.neon==='string')title.textContent=content.neon;
+  if(text&&typeof content.subtext==='string')text.textContent=content.subtext;
+}
+function cachedHomeContent(){
+  try{return JSON.parse(localStorage.getItem(HOME_CONTENT_KEY)||'null');}catch(e){return null;}
+}
+async function loadHomeContent(){
+  applyHomeContent(cachedHomeContent());
+  if(!USE_API)return null;
+  try{
+    const content=await api.getHomeContent();
+    if(!content||typeof content.neon!=='string')return null;
+    applyHomeContent(content);
+    try{localStorage.setItem(HOME_CONTENT_KEY,JSON.stringify({neon:content.neon,subtext:content.subtext}));}catch(e){/* приватный режим */}
+    return content;
+  }catch(e){return null;}
+}
 
 let cityRenderSeq=0;
 async function selectCity(c){
@@ -3224,18 +3323,20 @@ async function openRouteFromLocation(){
   return openRouteTarget(route);
 }
 
-// Сохранённый выбор применяется синхронно и рисует список сразу — тем же
-// единственным запросом, что и раньше. Когда своего выбора нет, стартовый
-// город считается из полного списка ресторанов, и главная рисуется ИЗ ТОГО ЖЕ
-// ответа: запрос по-прежнему ровно один и уходит в том же такте, что и
-// прежний renderList(), просто теперь он без фильтра по городу.
-if(restoreSelectedCity()){
-  renderList();
-}else{
-  applyDefaultCityFromData()
-    .catch(()=>({list:[],failed:true}))
-    .then(data=>renderList(false,selectedCity,null,data));
-}
+// Сохранённый выбор города применяется синхронно, до всякой сети: если он
+// есть, автоматика его не трогает (см. hasStoredCity в applyDefaultCityFromData).
+restoreSelectedCity();
+// Дальше один-единственный ответ обслуживает всё, что показывает главная:
+// стартовый город (когда своего выбора нет), бегущую строку и сам список
+// ресторанов — запрос уходит в том же такте, что и прежний renderList().
+// Текст главной — вторая, независимая и такая же маленькая загрузка.
+loadHomeContent();
+applyDefaultCityFromData()
+  .catch(()=>({list:[],failed:true}))
+  .then(data=>{
+    renderMarquee(data.list);
+    return renderList(false,selectedCity,null,data);
+  });
 // Ссылка «Поделиться» (#shared=CODE:TOKEN) обрабатывается ДО восстановления
 // собственной сессии посетителя — иначе tryRestoreSession() перехватила бы
 // экран своим активным заказом. Без бэкенда (USE_API=false, demo-режим)

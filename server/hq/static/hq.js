@@ -889,6 +889,33 @@
   });
 })();
 
+// Поля, растущие по содержимому (textarea[data-autogrow]).
+//
+// Высота выставляется из scrollHeight: сначала сбрасывается, иначе поле умеет
+// только расти и после удаления текста осталось бы прежней высоты. Считаем на
+// вводе и один раз при загрузке — уже сохранённый текст должен быть виден
+// целиком сразу, без первого нажатия клавиши.
+(function () {
+  var fields = document.querySelectorAll('textarea[data-autogrow]');
+  if (!fields.length) return;
+
+  function fit(el) {
+    el.style.height = 'auto';
+    // border-box: scrollHeight не включает рамки, поэтому добавляем их сами —
+    // иначе поле каждый раз оказывалось бы на пару пикселей ниже текста.
+    var styles = window.getComputedStyle(el);
+    var borders = parseFloat(styles.borderTopWidth || 0) + parseFloat(styles.borderBottomWidth || 0);
+    el.style.height = (el.scrollHeight + borders) + 'px';
+  }
+
+  fields.forEach(function (el) {
+    fit(el);
+    el.addEventListener('input', function () { fit(el); });
+  });
+  // Ширина поля меняется вместе с окном — вместе с ней меняется и число строк.
+  window.addEventListener('resize', function () { fields.forEach(fit); });
+})();
+
 // Stage 14 — экран «Настройки»: sheet смены пароля, показ/скрытие пароля,
 // защита от повторной отправки.
 //

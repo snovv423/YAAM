@@ -409,6 +409,12 @@ function layout({ title, active, body, csrfToken, linkBasePath = '/hq' }) {
   .panel-head .panel-title{margin-bottom:0}
   .badge.muted{background:rgba(255,255,255,.08);color:var(--txt2)}
   .hint{color:var(--txt2);font-size:12px;line-height:1.5;margin-top:10px}
+  /* «Текст на главной» (HQ «Обзор») — спокойный блок под Центром событий.
+     Поля растут по содержимому (hq.js, data-autogrow), поэтому у них нет
+     собственной прокрутки и минимальной «ямы» на пол-экрана. */
+  .home-text textarea{min-height:0;resize:none;overflow:hidden;line-height:1.5}
+  .home-text button[type=submit]{margin-top:18px}
+  .home-text-saved{color:var(--ok);font-size:12px;font-weight:700;white-space:nowrap}
   .sheet-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:flex-end;justify-content:center;z-index:60}
   .sheet-backdrop.open{display:flex}
   .sheet{background:var(--panel);border:1px solid var(--bord);border-radius:16px 16px 0 0;padding:20px;width:100%;max-width:520px;max-height:88vh;overflow-y:auto;padding-bottom:calc(20px + env(safe-area-inset-bottom))}
