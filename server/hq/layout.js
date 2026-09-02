@@ -272,7 +272,20 @@ function layout({ title, active, body, csrfToken, linkBasePath = '/hq' }) {
   .reorder-failed{outline:2px solid rgba(220,80,80,.75);outline-offset:4px;border-radius:12px}
 
   .dish-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}
-  .dish-row{display:flex;align-items:center;gap:8px;padding:6px 0}
+  /* scroll-margin-top — для НАТИВНОГО перехода по якорю #dish-N (возврат из
+     карточки блюда без JS): иначе строка встаёт вплотную под фиксированную
+     мобильную шапку. Восстановление через hq.js считает смещение само и от
+     этого правила не зависит. */
+  .dish-row{display:flex;align-items:center;gap:8px;padding:6px 0;scroll-margin-top:88px;border-radius:10px}
+  /* Подсветка строки, из которой владелец только что вернулся: строки меню
+     похожи друг на друга, и без неё непонятно, какое блюдо редактировалось.
+     Гаснет сама, класс снимается по animationend (hq.js). */
+  .dish-row-focus{animation:dish-row-focus 2.4s ease-out 1}
+  @keyframes dish-row-focus{
+    0%,45%{background:rgba(255,154,46,.20);box-shadow:0 0 0 6px rgba(255,154,46,.20)}
+    100%{background:transparent;box-shadow:0 0 0 6px rgba(255,154,46,0)}
+  }
+  @media (prefers-reduced-motion: reduce){ .dish-row-focus{animation-duration:.01s} }
   .dish-link{flex:1;min-width:0;display:flex;align-items:center;gap:10px;text-decoration:none;color:inherit;padding:4px 0}
   .dish-link.static{cursor:default}
   .dish-thumb{flex:0 0 auto;width:48px;height:48px;border-radius:8px;object-fit:cover;background:rgba(255,255,255,.05)}

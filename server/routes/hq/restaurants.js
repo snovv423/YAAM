@@ -396,6 +396,11 @@ function createRestaurantsRouter({ linkBasePath, mediaProvider = null }) {
         tabBody: menuViews.renderMenuTab({
           restaurant: req.restaurant, menu, csrfToken, linkBasePath,
           error: req.query.error, notice: req.query.notice,
+          // ?item=N — возврат из карточки блюда: категория этого блюда
+          // раскрывается сервером. Значение из адреса ни к чему не даёт
+          // доступа (блюдо и так видно в этом же меню) — но парсится строго,
+          // чтобы в шаблон никогда не попадала произвольная строка.
+          focusItemId: Number.parseInt(req.query.item, 10) || null,
         }),
       });
       res.send(layout({ title: `Меню — ${req.restaurant.name}`, active: 'restaurants', csrfToken, linkBasePath, body }));

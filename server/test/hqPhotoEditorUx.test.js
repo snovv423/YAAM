@@ -238,10 +238,56 @@ test('кнопка «Назад» ведёт на меню ресторана я
   const menuViews = fs.readFileSync(path.join(__dirname, '../hq/menuViews.js'), 'utf8');
   // На detail-странице блюда ссылка стоит ДО заголовка, поэтому видна сразу.
   const form = menuViews.slice(menuViews.indexOf('function renderMenuItemForm'));
-  const backIdx = form.indexOf('renderBackLink({ href: base })');
+  const backIdx = form.indexOf('renderBackLink({ href:');
   const headingIdx = form.indexOf('<h2>${esc(title)}</h2>');
   assert.ok(backIdx > -1 && headingIdx > -1 && backIdx < headingIdx,
     'renderBackLink должен идти перед заголовком блюда');
+});
+
+// Адрес возврата перестал быть голым `base`: он несёт состояние навигации
+// (?item=N#dish-N), по которому сервер раскрывает нужную категорию, а hq.js
+// возвращает прокрутку. Инвариант прежний и здесь же и проверяется — это
+// по-прежнему ЯВНЫЙ адрес, а не history.back().
+test('«Назад» с карточки блюда возвращает в то же место меню явным адресом', () => {
+  const { renderMenuItemForm } = require('../hq/menuViews');
+  const categories = [{ id: 4, name: 'Салаты', archived_at: null }];
+  const restaurant = { id: 12, name: 'R' };
+
+  const existing = renderMenuItemForm({
+    restaurant, item: { id: 5, name: 'Цезарь', price: 300, category_id: 4, is_available: 1 },
+    categories, csrfToken: 't', linkBasePath: '/hq', isNew: false,
+  });
+  assert.match(existing, /<a class="detail-back" href="\/hq\/restaurants\/12\/menu\?item=5#dish-5">/);
+
+  // У ещё не созданного блюда id нет — возврат ведёт просто в меню.
+  const fresh = renderMenuItemForm({
+    restaurant, item: null, categories, csrfToken: 't', linkBasePath: '/hq', isNew: true,
+  });
+  assert.match(fresh, /<a class="detail-back" href="\/hq\/restaurants\/12\/menu">/);
+
+  // Возврат по-прежнему не полагается на историю браузера.
+  assert.doesNotMatch(script, /history\.back\(\)/);
+});
+
+// Фотографии блюда стоят ВЫШЕ формы: карточку блюда открывают прежде всего
+// ради фотографий, и они не должны быть под полутора десятками полей.
+test('на карточке блюда «Фотографии блюда» идут между статусом и формой', () => {
+  const { renderMenuItemForm } = require('../hq/menuViews');
+  const html = renderMenuItemForm({
+    restaurant: { id: 12, name: 'R' },
+    item: { id: 5, name: 'Цезарь', price: 300, category_id: 4, is_available: 1 },
+    categories: [{ id: 4, name: 'Салаты', archived_at: null }],
+    csrfToken: 't', linkBasePath: '/hq', isNew: false,
+    photos: [], mediaConfigured: true, maxPhotos: 20,
+  });
+  const status = html.indexOf('class="item-status"');
+  const photos = html.indexOf('Фотографии блюда');
+  const name = html.indexOf('id="if-name"');
+  const save = html.indexOf('>Сохранить<');
+  assert.ok(status > -1 && photos > -1 && name > -1 && save > -1);
+  assert.ok(status < photos, 'фотографии идут сразу после статуса блюда');
+  assert.ok(photos < name, 'поля формы — ниже фотографий');
+  assert.ok(name < save, 'форма осталась целой');
 });
 
 // ─────────────────────────── отступы ───────────────────────────

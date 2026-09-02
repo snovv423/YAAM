@@ -40,13 +40,16 @@ function formatArchivedAt(value) {
 // одна ссылка на редактирование; отдельных действий в строке нет.
 // dragHandle — маленький отдельный handle, а НЕ вся строка: на мобильном
 // перетаскивание всей строки конфликтовало бы с обычной прокруткой.
+// id="dish-<id>" — стабильный якорь строки: по нему и «← Назад» (фрагмент
+// в адресе, работает даже без JS), и восстановление позиции в hq.js находят
+// именно то блюдо, из которого владелец ушёл редактировать.
 function renderDishRow({ item, linkBasePath, restaurantId }) {
   const href = `${linkBasePath}/restaurants/${restaurantId}/menu/items/${item.id}`;
   const thumb = item.thumb_url
     ? `<img class="dish-thumb" src="${esc(item.thumb_url)}" alt="" loading="lazy" width="48" height="48">`
     : '<div class="dish-thumb placeholder" aria-hidden="true"></div>';
   return `
-    <li class="dish-row" data-item-id="${item.id}">
+    <li class="dish-row" id="dish-${item.id}" data-item-id="${item.id}">
       <span class="drag-handle" aria-hidden="true" title="Перетащить"></span>
       <a class="dish-link" href="${href}">
         ${thumb}
@@ -63,7 +66,7 @@ function renderDishRow({ item, linkBasePath, restaurantId }) {
 // Категория-аккордеон: <details>/<summary> — раскрытие на той же странице
 // без единой строки JS (спецификация: «раскрывается на той же странице как
 // шторка»), работает и при отключённом JS.
-function renderCategoryBlock({ restaurant, category, csrfToken, linkBasePath, allCategories }) {
+function renderCategoryBlock({ restaurant, category, csrfToken, linkBasePath, allCategories, open = false }) {
   const base = `${linkBasePath}/restaurants/${restaurant.id}/menu`;
   const items = category.items.filter((i) => !i.archived_at);
   const otherCategories = allCategories.filter((c) => !c.archived_at && c.id !== category.id);
@@ -79,7 +82,7 @@ function renderCategoryBlock({ restaurant, category, csrfToken, linkBasePath, al
     : `<a class="btn ghost compact" href="${base}/categories/${category.id}/archive-options">Архивировать</a>`;
 
   return `
-    <details class="cat-block" data-category-id="${category.id}">
+    <details class="cat-block" data-category-id="${category.id}"${open ? ' open' : ''}>
       <summary class="cat-summary">
         <span class="drag-handle cat-handle" aria-hidden="true" title="Перетащить"></span>
         <span class="cat-titles">
@@ -100,15 +103,24 @@ function renderCategoryBlock({ restaurant, category, csrfToken, linkBasePath, al
     </details>`;
 }
 
-function renderMenuTab({ restaurant, menu, csrfToken, linkBasePath, error, notice }) {
+// focusItemId — блюдо, из карточки которого владелец только что вернулся
+// («← Назад» ведёт на /menu?item=N#dish-N). Его категория раскрывается САМИМ
+// СЕРВЕРОМ, атрибутом open: возврат не должен зависеть от того, успел ли
+// выполниться клиентский скрипт, и уж тем более не должен «схлопывать» меню
+// обратно в список закрытых категорий. hq.js добавляет к этому точную
+// позицию прокрутки и раскрытие остальных категорий, которые были открыты.
+function renderMenuTab({ restaurant, menu, csrfToken, linkBasePath, error, notice, focusItemId = null }) {
   const base = `${linkBasePath}/restaurants/${restaurant.id}/menu`;
   const activeCategories = menu.filter((c) => !c.archived_at);
+  const focusCategoryId = focusItemId
+    ? (menu.find((c) => c.items.some((i) => i.id === focusItemId && !i.archived_at)) || {}).id ?? null
+    : null;
 
   return `
     ${error ? `<div class="error" style="margin-bottom:14px">${esc(error)}</div>` : ''}
     ${notice ? `<div class="notice" style="margin-bottom:14px">${esc(notice)}</div>` : ''}
 
-    <div class="menu-toolbar">
+    <div class="menu-toolbar" data-menu-screen="${restaurant.id}">
       <details class="add-cat">
         <summary class="btn compact">+ Добавить категорию</summary>
         <form class="add-cat-form" method="post" action="${base}/categories">
@@ -121,7 +133,7 @@ function renderMenuTab({ restaurant, menu, csrfToken, linkBasePath, error, notic
     </div>
 
     ${activeCategories.length
-      ? `<div class="cat-list" data-reorder="categories" data-endpoint="${base}/reorder-categories">${activeCategories.map((category) => renderCategoryBlock({ restaurant, category, csrfToken, linkBasePath, allCategories: menu })).join('')}</div>`
+      ? `<div class="cat-list" data-reorder="categories" data-endpoint="${base}/reorder-categories">${activeCategories.map((category) => renderCategoryBlock({ restaurant, category, csrfToken, linkBasePath, allCategories: menu, open: category.id === focusCategoryId })).join('')}</div>`
       : '<div class="panel"><div class="empty-state">Категорий пока нет. Начните с добавления категории — блюда создаются внутри неё.</div></div>'}
   `;
 }
@@ -340,10 +352,28 @@ function renderMenuItemForm({
       </form>`}
     </div>`;
 
+  // «← Назад» ведёт не просто «в меню», а в ТО ЖЕ место меню: ?item=N
+  // раскрывает нужную категорию на сервере, #dish-N даёт браузеру нативный
+  // якорь (работает и без JS), а hq.js поверх этого возвращает точную
+  // прокрутку. У нового блюда id ещё нет — возвращаемся в меню как раньше.
+  const backHref = isNew ? base : `${base}?item=${v.id}#dish-${v.id}`;
+
+  // Панель фотографий стоит ВЫШЕ формы: владелец открывает блюдо прежде
+  // всего чтобы посмотреть и поменять фотографии, и не должен ради этого
+  // пролистывать полтора десятка полей (название, цена, состав, КБЖУ).
+  const photoManager = isNew ? '' : renderPhotoManager({
+    title: 'Фотографии блюда',
+    photos, mediaConfigured, maxPhotos,
+    uploadAction: `${base}/items/${v.id}/photos`,
+    actionBase: `${base}/items/${v.id}/photos`,
+    csrfToken, dishCrops: true, notice,
+  });
+
   return `
-    ${renderBackLink({ href: base })}
+    ${renderBackLink({ href: backHref })}
     <h2>${esc(title)}</h2>
     ${!isNew ? `<div class="item-status">${esc(itemStatusLabel(v))}</div>` : ''}
+    ${photoManager}
     <div class="panel">
       <form method="post" action="${action}">
         <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
@@ -399,13 +429,6 @@ function renderMenuItemForm({
       </form>
       ${bottomActions}
     </div>
-    ${!isNew ? renderPhotoManager({
-      title: 'Фотографии блюда',
-      photos, mediaConfigured, maxPhotos,
-      uploadAction: `${base}/items/${v.id}/photos`,
-      actionBase: `${base}/items/${v.id}/photos`,
-      csrfToken, dishCrops: true, notice,
-    }) : ''}
   `;
 }
 

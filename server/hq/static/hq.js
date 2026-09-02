@@ -475,6 +475,153 @@
   });
 })();
 
+// ===========================================================================
+// Вкладка «Меню» — возврат ровно туда, откуда ушли редактировать блюдо.
+// ===========================================================================
+//
+// ЗАДАЧА. Владелец раскрывает категорию, прокручивает до нужного блюда,
+// открывает его карточку — и по «← Назад» обязан вернуться к ТОЙ ЖЕ строке:
+// категория раскрыта, прокрутка на месте, остальные открытые категории тоже
+// остались открытыми.
+//
+// ЧТО ДЕЛАЕТ СЕРВЕР, А ЧТО КЛИЕНТ. Ссылка «← Назад» ведёт на
+// /menu?item=N#dish-N — это и есть состояние навигации, а не догадка:
+//   * ?item=N   — сервер сам рендерит <details open> у категории блюда;
+//   * #dish-N   — браузер сам прокручивает к строке (работает без JS вообще).
+// Этот скрипт добавляет то, чего в адресе быть не может: ТОЧНОЕ смещение
+// строки в окне (та же позиция, что была в момент ухода) и раскрытие всех
+// прочих категорий, открытых владельцем.
+//
+// ПОЧЕМУ sessionStorage, А НЕ ТАЙМЕРЫ. Ничего не откладывается и не
+// «дожидается» — состояние пишется в момент реального события (клик по
+// строке блюда, pagehide) и читается в pageshow, который срабатывает и при
+// обычной загрузке, и при возврате из bfcache. Размеры превью заданы
+// атрибутами width/height, поэтому строки не «прыгают» после подгрузки
+// картинок и измеренное смещение остаётся верным.
+//
+// scrollRestoration='manual' ставится ТОЛЬКО на записи истории этого экрана:
+// иначе браузер сначала восстановил бы свою позицию (снятую до раскрытия
+// категории, то есть неверную), а уже потом её поправил бы этот код —
+// видимый двойной прыжок.
+(function () {
+  var screen = document.querySelector('[data-menu-screen]');
+  if (!screen) return;
+
+  var KEY = 'hq.menu.' + screen.getAttribute('data-menu-screen');
+
+  // sessionStorage может быть недоступен (приватный режим, запрет хранилища).
+  // Тогда экран просто работает как без скрипта: категория раскрыта сервером,
+  // якорь #dish-N отрабатывает браузером.
+  function readState() {
+    try {
+      var raw = window.sessionStorage.getItem(KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch (e) { return null; }
+  }
+  function writeState(state) {
+    try { window.sessionStorage.setItem(KEY, JSON.stringify(state)); } catch (e) { /* хранилище недоступно */ }
+  }
+
+  function openCategoryIds() {
+    return Array.prototype.slice.call(document.querySelectorAll('details.cat-block[open]'))
+      .map(function (el) { return el.getAttribute('data-category-id'); })
+      .filter(function (id) { return /^\d+$/.test(id || ''); });
+  }
+
+  // pendingFocus живёт ровно до ухода со страницы: блюдо запоминается ТОЛЬКО
+  // если владелец ушёл именно в его карточку. Уход куда-либо ещё (вкладка
+  // «Заказы», кнопка «назад» браузера) обязан очистить фокус — иначе
+  // следующее открытие меню утаскивало бы к давно отредактированному блюду
+  // вместо последней реальной позиции чтения.
+  var pendingFocus = null;
+
+  function save(focus) {
+    writeState({
+      open: openCategoryIds(),
+      scrollY: Math.round(window.scrollY || window.pageYOffset || 0),
+      item: focus ? focus.item : null,
+      itemTop: focus ? focus.itemTop : null,
+    });
+  }
+
+  function focusIdFromUrl() {
+    var match = /[?&]item=(\d+)/.exec(window.location.search);
+    return match ? match[1] : null;
+  }
+
+  function restore() {
+    var state = readState();
+    var focusId = focusIdFromUrl() || (state && state.item) || null;
+
+    // 1. Раскрыть категории — ДО измерений: иначе смещение считалось бы по
+    //    ещё свёрнутому списку и прокрутка ушла бы мимо.
+    if (state && state.open) {
+      state.open.forEach(function (id) {
+        if (!/^\d+$/.test(id)) return;
+        var block = document.querySelector('details.cat-block[data-category-id="' + id + '"]');
+        if (block) block.open = true;
+      });
+    }
+
+    // 2. Вернуть позицию. Приоритет — строка блюда: она переживает и правку
+    //    названия, и изменение высоты соседей, в отличие от голого scrollY.
+    var row = focusId ? document.getElementById('dish-' + focusId) : null;
+    if (row) {
+      var block = row.closest('details.cat-block');
+      if (block) block.open = true;
+      var absoluteTop = row.getBoundingClientRect().top + (window.scrollY || window.pageYOffset || 0);
+      var offsetInViewport = state && typeof state.itemTop === 'number'
+        ? state.itemTop
+        : Math.round(window.innerHeight / 3);
+      window.scrollTo(0, Math.max(0, Math.round(absoluteTop - offsetInViewport)));
+      // Короткая подсветка: строк много и они похожи — без неё непонятно,
+      // какое из блюд только что редактировалось. Класс снимается по
+      // animationend, а не по таймеру.
+      row.classList.add('dish-row-focus');
+      row.addEventListener('animationend', function () {
+        row.classList.remove('dish-row-focus');
+      }, { once: true });
+    } else if (state && typeof state.scrollY === 'number') {
+      window.scrollTo(0, state.scrollY);
+    }
+  }
+
+  if ('scrollRestoration' in window.history) {
+    try { window.history.scrollRestoration = 'manual'; } catch (e) { /* браузер не даёт — не критично */ }
+  }
+
+  // Клик по строке блюда — единственный момент, когда точно известно, КУДА
+  // возвращать: запоминаем и само блюдо, и его смещение в окне.
+  document.addEventListener('click', function (event) {
+    var target = event.target;
+    if (!target || !target.closest) return;
+    var link = target.closest('.dish-link');
+    if (!link) return;
+    var row = link.closest('.dish-row');
+    if (!row) return;
+    var id = row.getAttribute('data-item-id');
+    if (!/^\d+$/.test(id || '')) return;
+    pendingFocus = { item: id, itemTop: Math.round(row.getBoundingClientRect().top) };
+    save(pendingFocus);
+  });
+
+  // Уход со страницы любым другим путём (кнопка «назад» браузера, переход по
+  // вкладке, отправка формы) — сохраняем хотя бы раскрытые категории и
+  // прокрутку.
+  window.addEventListener('pagehide', function () { save(pendingFocus); });
+
+  // Скрипт подключён с defer — на обычной загрузке DOM уже готов, и позицию
+  // надо вернуть НЕМЕДЛЕННО, до отрисовки, а не по 'load' (тот ждёт картинки
+  // и дал бы видимый рывок). pageshow нужен только для возврата из bfcache,
+  // где скрипт заново не исполняется вовсе; на обычной загрузке он сработал
+  // бы ВТОРОЙ раз — уже после того, как владелец мог прокрутить страницу
+  // сам, — поэтому там он и отсекается по event.persisted.
+  window.addEventListener('pageshow', function (event) {
+    if (event.persisted) restore();
+  });
+  restore();
+})();
+
 // Живое обновление «Обзора» ресторана (Stage 4, GET .../overview.json)
 // удалено вместе с самим блоком «Активные заказы»: docs/HQ-PRODUCT-SPEC.md
 // прямо исключает оперативную сводку активных заказов из HQ (HQ — кабинет
