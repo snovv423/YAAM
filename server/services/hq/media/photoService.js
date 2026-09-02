@@ -367,6 +367,24 @@ async function deletePhoto(config, ownerId, photoId, provider) {
   return deleted;
 }
 
+// Удаление медиа-объектов блюд, чьи БД-строки уже удалены вместе с самим
+// блюдом/категорией (menuAdminService.deleteMenuItemPermanently /
+// deleteCategoryPermanently). Обычный deletePhoto здесь не подходит: он
+// начинается с чтения строки menu_item_photos, а её уже нет — сервис меню
+// возвращает готовый список storage_key, снятый в той же транзакции ДО
+// удаления. Порядок именно такой (сначала БД-транзакция, потом хранилище)
+// по тому же принципу, что и в deletePhoto: худшее, что может случиться при
+// сбое — orphan-объект в хранилище (безопасен, логируется), а не строка в
+// БД, указывающая на несуществующий файл.
+async function deleteStoredPhotoObjects(provider, storageKeys) {
+  if (!provider || !Array.isArray(storageKeys) || !storageKeys.length) return 0;
+  for (const key of storageKeys) {
+    // eslint-disable-next-line no-await-in-loop
+    await deleteAllVariants(provider, key);
+  }
+  return storageKeys.length;
+}
+
 // ---------------------------------------------------------------------------
 // Публичные обёртки — рестораны
 // ---------------------------------------------------------------------------
@@ -456,6 +474,7 @@ module.exports = {
   resolvePrimaryPhoto,
   variantObjectKey,
   normalizeAltText,
+  deleteStoredPhotoObjects,
   // рестораны
   listRestaurantPhotos,
   getRestaurantPhotoById,

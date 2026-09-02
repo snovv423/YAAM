@@ -585,7 +585,13 @@ async function listMenuArchive(restaurantId) {
   const categories = await db.query(`
     SELECT c.*,
       (SELECT COUNT(*)::int FROM menu_items mi
-        WHERE mi.archived_with_category_id = c.id AND mi.archived_at IS NOT NULL) AS linked_items_count
+        WHERE mi.archived_with_category_id = c.id AND mi.archived_at IS NOT NULL) AS linked_items_count,
+      -- items_count — сколько строк меню исчезнет при окончательном удалении
+      -- категории (deleteCategoryPermanently удаляет её вместе с блюдами).
+      -- Это ДРУГОЕ число, чем linked_items_count: сюда попадают и блюда,
+      -- заархивированные независимо, и блюда, оставшиеся в категории после
+      -- восстановления её самой.
+      (SELECT COUNT(*)::int FROM menu_items mi WHERE mi.category_id = c.id) AS items_count
      FROM categories c
      WHERE c.restaurant_id = $1 AND c.archived_at IS NOT NULL
      ORDER BY c.archived_at DESC NULLS LAST, c.id DESC
@@ -624,6 +630,129 @@ async function restoreMenuItemToCategory(restaurantId, itemId, targetCategoryId 
   return updated.rows[0] || null;
 }
 
+// ---------------------------------------------------------------------------
+// Окончательное удаление из архива меню (docs/HQ-PRODUCT-SPEC.md, раздел
+// «Архив меню»)
+// ---------------------------------------------------------------------------
+//
+// До этого места во всём разделе «Меню» физического DELETE не было вообще:
+// архив — единственный способ убрать блюдо/категорию, и это правильное
+// поведение по умолчанию. Но архив копится и в какой-то момент перестаёт
+// быть архивом: владельцу нужно иметь возможность окончательно убрать
+// заведомо мусорные записи (черновик, дубль, ошибочно созданное блюдо).
+// Удаление доступно ТОЛЬКО из архива и ТОЛЬКО для уже архивированной записи —
+// то есть у него всегда есть обязательный первый шаг «архивировать», а не
+// одна кнопка рядом с рабочим меню.
+//
+// КАРТА ВНЕШНИХ КЛЮЧЕЙ, которые обязано снять это удаление (schema.sql):
+//   menu_item_photos.menu_item_id        -> menu_items  ON DELETE CASCADE
+//   order_items.menu_item_id             -> menu_items  nullable, БЕЗ ON DELETE
+//   menu_items.category_id               -> categories  ON DELETE CASCADE
+//   menu_items.archived_with_category_id -> categories  БЕЗ ON DELETE
+// Две ссылки без ON DELETE снимаются здесь явно, в той же транзакции —
+// иначе DELETE просто упал бы на FK (order_items) или оставил бы ссылку на
+// несуществующую категорию (archived_with_category_id).
+//
+// ИСТОРИЯ ЗАКАЗОВ НЕ ТЕРЯЕТСЯ. order_items хранит СОБСТВЕННЫЙ снимок
+// name/price/qty на момент заказа (см. комментарий в schema.sql), а колонка
+// menu_item_id объявлена nullable именно на этот случай. Обнуление ссылки
+// убирает связь с удалённой строкой меню и не трогает ни одной цифры в
+// истории, расчётах и settlement-снимках (они опираются на orders/
+// order_items, а не на menu_items).
+
+// Возвращает { item, storageKeys, deletedItemsCount } или null, если блюда
+// нет. storageKeys — ключи медиа-объектов, которые вызывающий код обязан
+// удалить из хранилища ПОСЛЕ успешного коммита (сервис намеренно не знает
+// про media provider: тот же принцип разделения, что и во всём разделе).
+async function deleteMenuItemPermanently(restaurantId, itemId) {
+  const item = await getMenuItemById(restaurantId, itemId);
+  if (!item) return null;
+  if (!item.archived_at) throw new ValidationError('Окончательно удалить можно только архивированное блюдо.');
+  return db.transaction(async (client) => {
+    const photos = await db.query(
+      'SELECT storage_key FROM menu_item_photos WHERE menu_item_id = $1',
+      [item.id],
+      client,
+    );
+    await db.execute('UPDATE order_items SET menu_item_id = NULL WHERE menu_item_id = $1', [item.id], client);
+    // Явный DELETE, хотя ON DELETE CASCADE сделал бы то же самое: строки
+    // фотографий и объекты в хранилище должны исчезать одним осознанным
+    // шагом, а не как побочный эффект, о котором легко забыть при чтении.
+    await db.execute('DELETE FROM menu_item_photos WHERE menu_item_id = $1', [item.id], client);
+    const deleted = await db.execute(
+      'DELETE FROM menu_items WHERE id = $1 AND restaurant_id = $2 RETURNING *',
+      [item.id, restaurantId],
+      client,
+    );
+    if (!deleted.rows[0]) return null;
+    return {
+      item: deleted.rows[0],
+      deletedItemsCount: 1,
+      storageKeys: photos.map((p) => p.storage_key),
+    };
+  });
+}
+
+// Категория удаляется ВМЕСТЕ со своими блюдами — той же бизнес-логикой, что
+// и archiveCategoryWithItems() выше («категория и её блюда — одно действие»),
+// но с жёстким предусловием: ни одного НЕархивированного блюда внутри.
+// Это и есть защита от «поломанного меню»: удаление физически не может
+// затронуть ничего, что сейчас видно в рабочем меню или на витрине —
+// удаляются только записи, которые владелец уже отправил в архив.
+// Альтернатива «удалять категорию, а блюда куда-то перевешивать» отвергнута
+// сознательно: она порождает ровно те самые сиротские блюда без внятной
+// категории, которых требуется не допустить.
+//
+// archived_with_category_id обнуляется по ВСЕМ блюдам, ссылающимся на эту
+// категорию, а не только по тем, что лежат в ней: блюдо, восстановленное
+// через restoreMenuItemToCategory в ДРУГУЮ категорию, сохраняет прежнюю
+// метку и иначе уронило бы DELETE на FK.
+async function deleteCategoryPermanently(restaurantId, categoryId) {
+  const category = await getCategoryById(restaurantId, categoryId);
+  if (!category) return null;
+  if (!category.archived_at) throw new ValidationError('Окончательно удалить можно только архивированную категорию.');
+  return db.transaction(async (client) => {
+    const activeRows = await db.query(
+      'SELECT COUNT(*)::int AS n FROM menu_items WHERE category_id = $1 AND restaurant_id = $2 AND archived_at IS NULL',
+      [category.id, restaurantId],
+      client,
+    );
+    if (activeRows[0].n > 0) {
+      throw new ValidationError('В категории есть неархивированные блюда — сначала перенесите или архивируйте их.');
+    }
+    const items = await db.query(
+      'SELECT id FROM menu_items WHERE category_id = $1 AND restaurant_id = $2',
+      [category.id, restaurantId],
+      client,
+    );
+    const itemIds = items.map((r) => r.id);
+    let storageKeys = [];
+    if (itemIds.length) {
+      const photos = await db.query(
+        'SELECT storage_key FROM menu_item_photos WHERE menu_item_id = ANY($1::int[])',
+        [itemIds],
+        client,
+      );
+      storageKeys = photos.map((p) => p.storage_key);
+      await db.execute('UPDATE order_items SET menu_item_id = NULL WHERE menu_item_id = ANY($1::int[])', [itemIds], client);
+      await db.execute('DELETE FROM menu_item_photos WHERE menu_item_id = ANY($1::int[])', [itemIds], client);
+    }
+    await db.execute('UPDATE menu_items SET archived_with_category_id = NULL WHERE archived_with_category_id = $1', [category.id], client);
+    await db.execute('DELETE FROM menu_items WHERE category_id = $1 AND restaurant_id = $2', [category.id, restaurantId], client);
+    const deleted = await db.execute(
+      'DELETE FROM categories WHERE id = $1 AND restaurant_id = $2 RETURNING *',
+      [category.id, restaurantId],
+      client,
+    );
+    if (!deleted.rows[0]) return null;
+    return {
+      category: deleted.rows[0],
+      deletedItemsCount: itemIds.length,
+      storageKeys,
+    };
+  });
+}
+
 module.exports = {
   CATEGORY_NAME_MAX,
   ITEM_NAME_MAX,
@@ -657,4 +786,6 @@ module.exports = {
   moveItemsAndArchiveCategory,
   listMenuArchive,
   restoreMenuItemToCategory,
+  deleteMenuItemPermanently,
+  deleteCategoryPermanently,
 };

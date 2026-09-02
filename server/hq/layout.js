@@ -405,6 +405,24 @@ function layout({ title, active, body, csrfToken, linkBasePath = '/hq' }) {
   .pw-field input{flex:1;min-width:0}
   .pw-toggle{background:none;border:1px solid var(--bord);color:var(--txt2);font-size:12px;padding:8px 10px;border-radius:8px;width:auto;white-space:nowrap;cursor:pointer;margin:0}
   @media(min-width:560px){ .sheet-backdrop{align-items:center} .sheet{border-radius:16px} }
+  /* Диалог подтверждения необратимых действий (hq/static/hq.js, data-confirm).
+     Своя разметка, а не window.confirm: инлайновый onsubmit блокируется CSP,
+     а нативный confirm выглядит чужеродно и на мобильном перекрывается
+     системным «Заблокировать диалоги этой страницы». */
+  .confirm-sheet{max-width:440px}
+  .confirm-title{font-weight:800;font-size:16px;margin-bottom:10px}
+  .confirm-text{color:var(--txt2);font-size:14px;line-height:1.5}
+  .confirm-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:20px;flex-wrap:wrap}
+  .confirm-actions button{min-height:44px}
+  @media(max-width:420px){ .confirm-actions button{flex:1 1 140px} }
+  /* Кнопка удаления в архиве — рядом с «Восстановить», а не вместо неё. */
+  .archive-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .archive-actions form{margin:0}
+  /* На узком экране обе кнопки строки архива получают полноценную площадь
+     нажатия (тот же порог 44px, что у вкладок и кнопок диалога выше):
+     «Удалить навсегда» необратима, промахнуться по ней пальцем — худший из
+     возможных промахов. */
+  @media(max-width:560px){ .archive-actions button{min-height:44px} }
 
   /* Вкладки страницы ресторана (Обзор/Заказы/Оценки/Статистика/Настройки). */
   .tabs{display:flex;gap:4px;border-bottom:1px solid var(--bord);margin-bottom:20px;overflow-x:auto}

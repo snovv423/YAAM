@@ -69,7 +69,10 @@ function renderCategoryBlock({ restaurant, category, csrfToken, linkBasePath, al
   const otherCategories = allCategories.filter((c) => !c.archived_at && c.id !== category.id);
 
   const archiveForm = items.length === 0
-    ? `<form method="post" action="${base}/categories/${category.id}/archive" onsubmit="return confirm('Архивировать пустую категорию «${esc(category.name)}»?')">
+    ? `<form method="post" action="${base}/categories/${category.id}/archive"
+             data-confirm="Архивировать пустую категорию «${esc(category.name)}»? Она исчезнет из рабочего меню и останется в архиве."
+             data-confirm-title="Архивировать категорию"
+             data-confirm-ok="Архивировать">
          <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
          <button type="submit" class="ghost compact">Архивировать</button>
        </form>`
@@ -146,7 +149,10 @@ function renderCategoryArchiveOptions({ restaurant, category, otherCategories, i
         <button type="submit" class="compact" style="margin-top:12px">Перенести и архивировать</button>
       </form>` : '<div class="empty-state" style="margin-bottom:22px">Других активных категорий нет — перенести блюда некуда.</div>'}
 
-      <form method="post" action="${base}/categories/${category.id}/archive-with-items" onsubmit="return confirm('Архивировать категорию вместе с ${itemsCount} ${esc(pluralDishes(itemsCount))}?')">
+      <form method="post" action="${base}/categories/${category.id}/archive-with-items"
+            data-confirm="Архивировать категорию «${esc(category.name)}» вместе с ${itemsCount} ${esc(pluralDishes(itemsCount))}? Блюда не удаляются, история заказов сохраняется."
+            data-confirm-title="Архивировать вместе с блюдами"
+            data-confirm-ok="Архивировать">
         <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
         <button type="submit" class="ghost compact">Архивировать вместе с блюдами</button>
       </form>
@@ -160,6 +166,21 @@ function renderCategoryArchiveOptions({ restaurant, category, otherCategories, i
 
 function renderMenuArchive({ restaurant, archive, activeCategories, csrfToken, linkBasePath }) {
   const base = `${linkBasePath}/restaurants/${restaurant.id}/menu`;
+
+  // Окончательное удаление — единственное необратимое действие раздела
+  // «Меню», поэтому оно и выглядит иначе (красная кнопка), и требует
+  // подтверждения. Подтверждение — data-confirm, который читает
+  // hq/static/hq.js: инлайновый onsubmit="return confirm(...)" под CSP
+  // страницы (script-src 'self') браузер выбрасывает молча, то есть его
+  // «защита» на этом экране была бы фикцией.
+  const deleteForm = ({ action, title, message, okLabel }) => `
+    <form method="post" action="${action}"
+          data-confirm="${esc(message)}"
+          data-confirm-title="${esc(title)}"
+          data-confirm-ok="${esc(okLabel)}">
+      <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
+      <button type="submit" class="danger compact">Удалить навсегда</button>
+    </form>`;
 
   const itemRows = archive.items.map((item) => {
     const thumb = item.thumb_url
@@ -184,12 +205,20 @@ function renderMenuArchive({ restaurant, archive, activeCategories, csrfToken, l
             <span class="dish-meta">${esc(item.category_name || 'Категория удалена')}${archivedAt ? ` · ${esc(archivedAt)}` : ''}</span>
           </span>
         </div>
-        ${canRestore ? `
-        <form class="restore-form" method="post" action="${base}/items/${item.id}/restore">
-          <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
-          ${categorySelect}
-          <button type="submit" class="ghost compact">Восстановить</button>
-        </form>` : '<span class="dish-meta">Нет активных категорий</span>'}
+        <div class="archive-actions">
+          ${canRestore ? `
+          <form class="restore-form" method="post" action="${base}/items/${item.id}/restore">
+            <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
+            ${categorySelect}
+            <button type="submit" class="ghost compact">Восстановить</button>
+          </form>` : '<span class="dish-meta">Нет активных категорий</span>'}
+          ${deleteForm({
+            action: `${base}/items/${item.id}/delete`,
+            title: 'Удалить блюдо навсегда',
+            message: `Блюдо «${item.name}» будет удалено из базы вместе со всеми его фотографиями. Отменить это нельзя. История заказов сохранится: в заказах остаются название, цена и количество на момент покупки.`,
+            okLabel: 'Удалить навсегда',
+          })}
+        </div>
       </li>`;
   }).join('');
 
@@ -201,6 +230,10 @@ function renderMenuArchive({ restaurant, archive, activeCategories, csrfToken, l
   // в это число не входят и второй кнопкой не восстанавливаются никогда.
   const categoryRows = archive.categories.map((c) => {
     const linkedCount = Number(c.linked_items_count) || 0;
+    // items_count — ВСЕ блюда, физически привязанные к категории (см.
+    // listMenuArchive). Именно они исчезнут при окончательном удалении, и
+    // это число, а не linkedCount, обязано стоять в тексте подтверждения.
+    const itemsCount = Number(c.items_count) || 0;
     const restoreButtons = linkedCount > 0
       ? `
         <form class="restore-form" method="post" action="${base}/categories/${c.id}/restore">
@@ -225,7 +258,17 @@ function renderMenuArchive({ restaurant, archive, activeCategories, csrfToken, l
           <span class="dish-meta">Категория${c.archived_at ? ` · ${esc(formatArchivedAt(c.archived_at))}` : ''}${linkedCount > 0 ? ` · вместе с ней архивировано блюд: ${linkedCount}` : ''}</span>
         </span>
       </div>
-      ${restoreButtons}
+      <div class="archive-actions">
+        ${restoreButtons}
+        ${deleteForm({
+          action: `${base}/categories/${c.id}/delete`,
+          title: 'Удалить категорию навсегда',
+          message: itemsCount > 0
+            ? `Категория «${c.name}» будет удалена вместе с ${itemsCount} ${pluralDishes(itemsCount)} из архива и всеми их фотографиями. Отменить это нельзя. История заказов сохранится.`
+            : `Категория «${c.name}» будет удалена из базы. Отменить это нельзя.`,
+          okLabel: 'Удалить навсегда',
+        })}
+      </div>
     </li>`;
   }).join('');
 
@@ -288,7 +331,10 @@ function renderMenuItemForm({
         <input type="hidden" name="available" value="${v.is_available ? '0' : '1'}">
         <button type="submit" class="ghost compact">${v.is_available ? 'Снять с витрины' : 'Вернуть на витрину'}</button>
       </form>
-      <form method="post" action="${base}/items/${v.id}/archive" onsubmit="return confirm('Архивировать «${esc(v.name || '')}»? Блюдо исчезнет из меню и с витрины, история заказов сохранится.')">
+      <form method="post" action="${base}/items/${v.id}/archive"
+            data-confirm="Архивировать «${esc(v.name || '')}»? Блюдо исчезнет из меню и с витрины, история заказов сохранится."
+            data-confirm-title="Архивировать блюдо"
+            data-confirm-ok="Архивировать">
         <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
         <button type="submit" class="ghost compact">Архивировать</button>
       </form>`}

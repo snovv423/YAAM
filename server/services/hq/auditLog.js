@@ -32,6 +32,10 @@ const ACTIONS = [
   'menu_item_archived',
   'menu_item_restored',
   'menu_item_moved',
+  // Окончательное удаление из архива меню — единственные необратимые
+  // события раздела «Меню», поэтому они обязаны быть в аудите поимённо.
+  'menu_item_deleted',
+  'category_deleted',
   // Stage 5B.1 — медиа-система, упрощённый набор (задание, раздел 0: у
   // фотографий нет reorder/archive/restore) — ровно 6 событий: upload/
   // primary/delete на ресторан и на блюдо. Stage 5B изначально вводил 10

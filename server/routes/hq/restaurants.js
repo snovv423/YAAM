@@ -620,6 +620,34 @@ function createRestaurantsRouter({ linkBasePath, mediaProvider = null }) {
     }
   });
 
+  // Окончательное удаление категории из архива — вместе с её блюдами (та же
+  // бизнес-логика «категория и её блюда — одно действие», что и у
+  // archiveCategoryWithItems). Сервис отказывается удалять категорию, в
+  // которой осталось хоть одно НЕархивированное блюдо, поэтому рабочее меню
+  // этой операцией сломать нельзя.
+  router.post('/:id/menu/categories/:categoryId/delete', requireCsrf, async (req, res, next) => {
+    const archiveUrl = `${linkBasePath}/restaurants/${req.restaurant.id}/menu/archive`;
+    try {
+      const name = req.category.name;
+      const result = await menuSvc.deleteCategoryPermanently(req.restaurant.id, req.category.id);
+      if (!result) return res.redirect(archiveUrl);
+      await photoService.deleteStoredPhotoObjects(mediaProvider, result.storageKeys);
+      await logAuditEvent({
+        action: 'category_deleted', restaurantId: req.restaurant.id,
+        details: `name: "${name}", блюд удалено вместе с категорией: ${result.deletedItemsCount}`, ip: req.ip,
+      });
+      const suffix = result.deletedItemsCount
+        ? ` вместе с блюдами (${result.deletedItemsCount}).`
+        : '.';
+      res.redirect(`${archiveUrl}?notice=${encodeURIComponent(`Категория «${name}» удалена навсегда${suffix}`)}`);
+    } catch (err) {
+      if (err instanceof svc.ValidationError) {
+        return res.redirect(`${archiveUrl}?error=${encodeURIComponent(err.message)}`);
+      }
+      next(err);
+    }
+  });
+
   // moveCategory/moveMenuItem (кнопки «Выше»/«Ниже») удалены —
   // docs/HQ-PRODUCT-SPEC.md запрещает их, порядок меняется перетаскиванием
   // через /reorder-categories и /reorder-items выше. Сами сервисные функции
@@ -874,6 +902,30 @@ function createRestaurantsRouter({ linkBasePath, mediaProvider = null }) {
         });
       }
       res.redirect(archiveUrl);
+    } catch (err) {
+      if (err instanceof svc.ValidationError) {
+        return res.redirect(`${archiveUrl}?error=${encodeURIComponent(err.message)}`);
+      }
+      next(err);
+    }
+  });
+
+  // Окончательное удаление блюда из архива. Сервис делает всю работу с БД в
+  // одной транзакции и возвращает ключи медиа-объектов; хранилище чистится
+  // ПОСЛЕ коммита (см. комментарий в photoService.deleteStoredPhotoObjects) —
+  // иначе откат транзакции оставил бы блюдо со ссылками на уже стёртые файлы.
+  router.post('/:id/menu/items/:itemId/delete', requireCsrf, async (req, res, next) => {
+    const archiveUrl = `${linkBasePath}/restaurants/${req.restaurant.id}/menu/archive`;
+    try {
+      const name = req.menuItem.name;
+      const result = await menuSvc.deleteMenuItemPermanently(req.restaurant.id, req.menuItem.id);
+      if (!result) return res.redirect(archiveUrl);
+      await photoService.deleteStoredPhotoObjects(mediaProvider, result.storageKeys);
+      await logAuditEvent({
+        action: 'menu_item_deleted', restaurantId: req.restaurant.id,
+        details: `name: "${name}", фотографий удалено: ${result.storageKeys.length}`, ip: req.ip,
+      });
+      res.redirect(`${archiveUrl}?notice=${encodeURIComponent(`Блюдо «${name}» удалено навсегда.`)}`);
     } catch (err) {
       if (err instanceof svc.ValidationError) {
         return res.redirect(`${archiveUrl}?error=${encodeURIComponent(err.message)}`);

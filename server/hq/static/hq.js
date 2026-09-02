@@ -19,6 +19,112 @@
   window.addEventListener('pageshow', syncLayoutMode);
   window.addEventListener('resize', syncLayoutMode);
 
+  // -------------------------------------------------------------------------
+  // Подтверждение необратимых действий: data-confirm на <form>.
+  //
+  // Инлайновый onsubmit="return confirm(...)" в HQ не работает и работать не
+  // может: CSP страницы (services/hq/securityHeaders.js) — script-src 'self'
+  // без 'unsafe-inline', поэтому обработчик, записанный АТРИБУТОМ, браузер
+  // молча выбрасывает. Единственное CSP-корректное место для подтверждения —
+  // этот внешний скрипт: делегированный слушатель на document + собственный
+  // диалог в стиле остальных sheet'ов HQ.
+  //
+  // Весь текст берётся из data-атрибутов формы и вставляется через
+  // textContent — разметка из данных не собирается ни здесь, ни на сервере,
+  // поэтому имя блюда с кавычками/угловыми скобками безопасно и не ломает
+  // диалог (у инлайнового confirm() с этим были ровно обратные проблемы).
+  //
+  // Слушатель регистрируется ДО double-submit guard ниже и при перехвате
+  // вызывает stopImmediatePropagation(): иначе guard успел бы заблокировать
+  // кнопку формы, которая в итоге так и не отправилась, и повторное нажатие
+  // после «Отмена» стало бы невозможным.
+  //
+  // Без JS форма отправляется как обычно, без диалога — то же осознанное
+  // поведение, что и у остального HQ (перетаскивание, кроп): сама операция
+  // остаётся достижимой, теряется только подтверждение.
+  var confirmUi = null;
+  var pendingForm = null;
+
+  function closeConfirm() {
+    if (!confirmUi) return;
+    confirmUi.backdrop.classList.remove('open');
+    pendingForm = null;
+  }
+
+  function ensureConfirmUi() {
+    if (confirmUi) return confirmUi;
+    var backdrop = document.createElement('div');
+    backdrop.className = 'sheet-backdrop confirm-backdrop';
+    var sheet = document.createElement('div');
+    sheet.className = 'sheet confirm-sheet';
+    sheet.setAttribute('role', 'alertdialog');
+    sheet.setAttribute('aria-modal', 'true');
+    var title = document.createElement('div');
+    title.className = 'confirm-title';
+    var text = document.createElement('div');
+    text.className = 'confirm-text';
+    var actions = document.createElement('div');
+    actions.className = 'confirm-actions';
+    var cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'ghost compact';
+    cancel.textContent = 'Отмена';
+    var ok = document.createElement('button');
+    ok.type = 'button';
+    ok.className = 'danger compact';
+    actions.appendChild(cancel);
+    actions.appendChild(ok);
+    sheet.appendChild(title);
+    sheet.appendChild(text);
+    sheet.appendChild(actions);
+    backdrop.appendChild(sheet);
+    document.body.appendChild(backdrop);
+
+    cancel.addEventListener('click', closeConfirm);
+    backdrop.addEventListener('click', function (event) {
+      if (event.target === backdrop) closeConfirm();
+    });
+    ok.addEventListener('click', function () {
+      var form = pendingForm;
+      closeConfirm();
+      if (!form) return;
+      // Повторная отправка проходит мимо этого же слушателя по флагу
+      // confirmed. requestSubmit(), а не submit(): submit() не порождает
+      // событие submit вовсе, и double-submit guard ниже перестал бы
+      // защищать именно необратимые действия.
+      form.dataset.confirmed = '1';
+      if (typeof form.requestSubmit === 'function') form.requestSubmit();
+      else form.submit();
+    });
+
+    confirmUi = { backdrop: backdrop, sheet: sheet, title: title, text: text, ok: ok, cancel: cancel };
+    return confirmUi;
+  }
+
+  document.addEventListener('submit', function (event) {
+    var form = event.target;
+    if (!(form instanceof HTMLFormElement)) return;
+    var message = form.getAttribute('data-confirm');
+    if (!message) return;
+    if (form.dataset.confirmed === '1') {
+      form.dataset.confirmed = '';
+      return;
+    }
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    var ui = ensureConfirmUi();
+    ui.title.textContent = form.getAttribute('data-confirm-title') || 'Подтвердите действие';
+    ui.text.textContent = message;
+    ui.ok.textContent = form.getAttribute('data-confirm-ok') || 'Подтвердить';
+    pendingForm = form;
+    ui.backdrop.classList.add('open');
+    ui.ok.focus();
+  });
+
+  document.addEventListener('keydown', function (event) {
+    if (event.key === 'Escape' && confirmUi && confirmUi.backdrop.classList.contains('open')) closeConfirm();
+  });
+
   // Double-submit guard — делегированный слушатель на document, работает для
   // любой формы HQ без необходимости давать каждой свой уникальный id/script.
   document.addEventListener('submit', function (event) {
