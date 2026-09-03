@@ -1,5 +1,12 @@
 let curRest=null, cart={}, selectedCity='Грозный';
-const SOLD_OUT={'2_0':true}; // демо: блюдо в стоп-листе (актуально только без бэкенда)
+// Здесь стоял SOLD_OUT={'2_0':true} — демо-заглушка «блюдо в стоп-листе»,
+// адресованная ПОЗИЦИЕЙ в меню (третья категория, первое блюдо). На реальных
+// данных эта позиция попадала в живое блюдо (у RAZRYAD — «Онигири», id 49) и
+// перекрывала его настоящее is_available: БД, публичный API и HQ показывали
+// «в наличии», а на сайте карточка была серой, и ни HQ, ни Telegram починить
+// это не могли — клиент их просто игнорировал. Единственный источник истины о
+// наличии — is_available из API; демо-режим показывает свой пример
+// недоступного блюда тем же полем (available:false в data.js), а не позицией.
 
 // Именованные тайминги/пороги — вместо магических чисел по всему файлу.
 const RATING_MIN_VOTES=5;       // рейтинг на карточке показываем только от стольки оценок
@@ -971,7 +978,7 @@ function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&l
 function key(ci,ii){return ci+'_'+ii;}
 function findItem(k){const[ci,ii]=k.split('_').map(Number);const d=curRest.menu[ci].items[ii];return{n:d.n.replace(/'/g,''),p:d.p,id:d.id||null};}
 function dishCard(d,ci,ii){
-  const k=key(ci,ii);const q=cart[k]?cart[k].q:0;const so=SOLD_OUT[k]||d.available===false;
+  const k=key(ci,ii);const q=cart[k]?cart[k].q:0;const so=d.available===false;
   const hasSrc=!!(d.photoUrl||d.im);
   const photoSrc=hasSrc?(d.photoUrl||U(d.im,700)):'';
   const safePhotoSrc=esc(photoSrc);

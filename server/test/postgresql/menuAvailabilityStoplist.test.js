@@ -157,6 +157,97 @@ const publicItem = (payload, name) => {
 
 // ---------------------------------------------------------------------------
 
+test('D: переключатель наличия отдаёт фактически сохранённое значение, а при ошибке — ничего', async () => {
+  const url = await freshDatabase('yaam_stock_d');
+  const { instance, base } = await startApp(url);
+  const db = require('../../db/postgresql');
+  try {
+    const cookie = await loginHq(base);
+    const { restaurantId, ids } = await seed(db, { chatId: 'chat-stock-d' });
+    const itemPath = `/hq/restaurants/${restaurantId}/menu/items/${ids.shashlyk}`;
+    const page = await getPage(base, cookie, itemPath);
+
+    // Переключатель нарисован состоянием из БД, без дублирующей подписи рядом.
+    assert.match(page.html, /data-stock-toggle data-state="on"/);
+    assert.match(page.html, /role="switch"\s+aria-checked="true"/);
+    assert.doesNotMatch(page.html, />Вернуть в наличие</);
+    assert.doesNotMatch(page.html, />Нет в наличии</);
+
+    const toggle = (available) => fetch(`${base}${itemPath}/available`, {
+      method: 'POST', redirect: 'manual',
+      headers: {
+        Cookie: cookie, Accept: 'application/json',
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({ _csrf: page.csrf, available }).toString(),
+    });
+
+    // OFF: ответ содержит то, что реально сохранилось.
+    let res = await toggle('0');
+    assert.equal(res.status, 200);
+    assert.equal((await res.json()).is_available, 0);
+    assert.equal((await db.query('SELECT is_available FROM menu_items WHERE id = $1', [ids.shashlyk]))[0].is_available, 0);
+
+    // ON: то же самое обратно.
+    res = await toggle('1');
+    assert.equal((await res.json()).is_available, 1);
+    assert.equal((await db.query('SELECT is_available FROM menu_items WHERE id = $1', [ids.shashlyk]))[0].is_available, 1);
+
+    // Страница после перезагрузки показывает ровно состояние БД.
+    let reloaded = await getPage(base, cookie, itemPath);
+    assert.match(reloaded.html, /data-state="on"/);
+    await toggle('0');
+    reloaded = await getPage(base, cookie, itemPath);
+    assert.match(reloaded.html, /data-state="off"/);
+    assert.match(reloaded.html, /aria-checked="false"/);
+
+    // Ошибка: у архивированного блюда наличие не переключается. Ответ 4xx и
+    // БЕЗ нового состояния — переключателю нечего показать как успех.
+    await db.execute('UPDATE menu_items SET archived_at = NOW() WHERE id = $1', [ids.shashlyk]);
+    res = await toggle('1');
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.ok(body.error, 'ошибка обязана быть объяснена');
+    assert.equal(body.is_available, undefined, 'при ошибке новое состояние не отдаётся');
+    assert.equal((await db.query('SELECT is_available FROM menu_items WHERE id = $1', [ids.shashlyk]))[0].is_available, 0,
+      'значение в БД не изменилось');
+
+    // Без CSRF — тоже отказ, и тоже без состояния.
+    const noCsrf = await fetch(`${base}${itemPath}/available`, {
+      method: 'POST', redirect: 'manual',
+      headers: { Cookie: cookie, Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ available: '1' }).toString(),
+    });
+    assert.equal(noCsrf.status, 403);
+    assert.equal((await noCsrf.json()).is_available, undefined);
+  } finally {
+    await stopApp(instance);
+  }
+});
+
+test('E: обычная отправка формы (без JS) переключает наличие тем же адресом', async () => {
+  const url = await freshDatabase('yaam_stock_e');
+  const { instance, base } = await startApp(url);
+  const db = require('../../db/postgresql');
+  try {
+    const cookie = await loginHq(base);
+    const { restaurantId, ids } = await seed(db, { chatId: 'chat-stock-e' });
+    const itemPath = `/hq/restaurants/${restaurantId}/menu/items/${ids.shashlyk}`;
+    const page = await getPage(base, cookie, itemPath);
+
+    // Форма настоящая: у неё есть action и скрытое поле с ЦЕЛЕВЫМ значением.
+    assert.match(page.html, new RegExp(`<form class="stock-form" method="post" action="${itemPath}/available"`));
+    assert.match(page.html, /<input type="hidden" name="available" value="0">/,
+      'у блюда в наличии форма отправляет 0 — то есть выключает');
+
+    const res = await postForm(base, cookie, `${itemPath}/available`, { _csrf: page.csrf, available: '0' });
+    assert.equal(res.status, 302, 'без Accept: application/json остаётся обычный редирект');
+    assert.equal((await db.query('SELECT is_available FROM menu_items WHERE id = $1', [ids.shashlyk]))[0].is_available, 0);
+  } finally {
+    await stopApp(instance);
+  }
+});
+
 test('A: «Нет в наличии» из HQ — блюдо остаётся на сайте, но заказать его нельзя', async () => {
   const url = await freshDatabase('yaam_stock_a');
   const { instance, base } = await startApp(url);
@@ -168,8 +259,7 @@ test('A: «Нет в наличии» из HQ — блюдо остаётся н
 
     // Подписи говорят про наличие, а не про витрину.
     let page = await getPage(base, cookie, itemPath);
-    assert.match(page.html, /В наличии/);
-    assert.match(page.html, />Нет в наличии</, 'у доступного блюда кнопка предлагает убрать его из наличия');
+    assert.match(page.html, /data-stock-toggle data-state="on"/, 'переключатель показывает состояние из БД');
     assert.doesNotMatch(page.html, /витрин/i);
 
     // Убираем из наличия.
@@ -177,9 +267,9 @@ test('A: «Нет в наличии» из HQ — блюдо остаётся н
     assert.equal(res.status, 302);
     assert.equal((await db.query('SELECT is_available FROM menu_items WHERE id = $1', [ids.shashlyk]))[0].is_available, 0);
 
-    // Кнопка стала обратной, статус — «Нет в наличии».
+    // Переключатель перешёл в OFF — ровно то, что в БД.
     page = await getPage(base, cookie, itemPath);
-    assert.match(page.html, />Вернуть в наличие</);
+    assert.match(page.html, /data-stock-toggle data-state="off"/);
     const menuPage = await getPage(base, cookie, `/hq/restaurants/${restaurantId}/menu`);
     assert.match(menuPage.html, /Нет в наличии/);
     assert.match(menuPage.html, /Шашлык/, 'блюдо остаётся в рабочем меню HQ');
@@ -227,7 +317,7 @@ test('B: HQ и Telegram /stoplist переключают одно и то же �
     await fakeBot.triggerCallbackQuery({ id: '1', data: `toggle_item:${ids.shashlyk}`, chatId: 'chat-stock-b', messageId: 1 });
     assert.equal((await db.query('SELECT is_available FROM menu_items WHERE id = $1', [ids.shashlyk]))[0].is_available, 0);
     let page = await getPage(base, cookie, itemPath);
-    assert.match(page.html, />Вернуть в наличие</, 'HQ сразу показывает состояние, выставленное из Telegram');
+    assert.match(page.html, /data-stock-toggle data-state="off"/, 'HQ сразу показывает состояние, выставленное из Telegram');
     const menuPage = await getPage(base, cookie, `/hq/restaurants/${restaurantId}/menu`);
     assert.match(menuPage.html, /Нет в наличии/);
 
@@ -258,9 +348,9 @@ test('C: архив — отдельная операция: блюдо исче
     const itemPath = `/hq/restaurants/${restaurantId}/menu/items/${ids.shashlyk}`;
 
     const page = await getPage(base, cookie, itemPath);
-    // Архивирование — своя кнопка, рядом с наличием, а не вместо него.
+    // Архивирование — своя кнопка, рядом с переключателем, а не вместо него.
     assert.match(page.html, />Архивировать</);
-    assert.match(page.html, />Нет в наличии</);
+    assert.match(page.html, /data-stock-toggle/);
     await postForm(base, cookie, `${itemPath}/archive`, { _csrf: page.csrf });
 
     // Пропало из рабочего меню HQ, но лежит в архиве.

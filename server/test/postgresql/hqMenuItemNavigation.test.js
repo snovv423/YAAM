@@ -151,7 +151,7 @@ async function seed(db, { name }) {
 // A. Карточка блюда — фотографии выше формы
 // ===========================================================================
 
-test('A1: на карточке блюда «Фотографии блюда» стоят между статусом и формой, а не под ней', async () => {
+test('A1: на карточке блюда «Фотографии блюда» стоят между заголовком и формой, а не под ней', async () => {
   const url = await freshDatabase('yaam_item_nav_a1');
   const { instance, base } = await startApp(url);
   const db = require('../../db/postgresql');
@@ -167,14 +167,16 @@ test('A1: на карточке блюда «Фотографии блюда» �
       return index;
     };
     const heading = at('<h2>Шашлык</h2>');
-    const status = at('class="item-status"');
+    // Строка статуса под заголовком осталась только у архивированного блюда:
+    // наличие активного показывает переключатель, а не вторая подпись.
+    const toggle = at('data-stock-toggle');
     const photos = at('Фотографии блюда');
     const nameField = at('id="if-name"');
     const priceField = at('id="if-price"');
     const saveButton = at('>Сохранить<');
 
-    assert.ok(heading < status, 'статус идёт после заголовка');
-    assert.ok(status < photos, 'фотографии идут сразу после статуса блюда');
+    assert.ok(heading < photos, 'фотографии идут сразу после заголовка блюда');
+    assert.ok(photos < toggle, 'переключатель наличия — в действиях под формой');
     assert.ok(photos < nameField, 'название формы — НИЖЕ фотографий');
     assert.ok(nameField < priceField && priceField < saveButton, 'форма осталась целой и в прежнем порядке');
 

@@ -341,14 +341,32 @@ function renderMenuItemForm({
   const selectedCategoryId = v.category_id || (presetCategoryId ? Number(presetCategoryId) : null);
   const title = isNew ? 'Добавить блюдо' : (v.name || 'Блюдо');
 
+  // Переключатель наличия. Форма настоящая: без JS она отправляется как
+  // обычно и страница перезагружается уже с новым состоянием. С JS
+  // (hq/static/hq.js) клик уходит тем же адресом, но ответ приходит JSON'ом,
+  // и переключатель принимает ТОЛЬКО фактически сохранённое значение — при
+  // ошибке он возвращается на место, не показывая мнимого успеха.
+  //
+  // aria-pressed, а не отдельная подпись рядом: состояние читается цветом и
+  // положением ползунка (зелёный ON / красный OFF), а озвучивается
+  // скринридеру — дублирующая надпись рядом только путала бы.
+  const availabilityToggle = v.archived_at ? '' : `
+    <form class="stock-form" method="post" action="${base}/items/${v.id}/available"
+          data-stock-toggle data-state="${v.is_available ? 'on' : 'off'}">
+      <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
+      <input type="hidden" name="available" value="${v.is_available ? '0' : '1'}">
+      <button type="submit" class="stock-toggle" role="switch"
+              aria-checked="${v.is_available ? 'true' : 'false'}"
+              aria-label="Блюдо в наличии">
+        <span class="stock-knob" aria-hidden="true"></span>
+      </button>
+      <span class="stock-error" role="status" hidden></span>
+    </form>`;
+
   const bottomActions = isNew ? '' : `
     <div class="item-actions">
+      ${availabilityToggle}
       ${v.archived_at ? '' : `
-      <form method="post" action="${base}/items/${v.id}/available">
-        <input type="hidden" name="_csrf" value="${esc(csrfToken)}">
-        <input type="hidden" name="available" value="${v.is_available ? '0' : '1'}">
-        <button type="submit" class="ghost compact">${v.is_available ? 'Нет в наличии' : 'Вернуть в наличие'}</button>
-      </form>
       <form method="post" action="${base}/items/${v.id}/archive"
             data-confirm="Архивировать «${esc(v.name || '')}»? Блюдо исчезнет и с сайта, и из рабочего меню — останется в архиве. История заказов сохранится."
             data-confirm-title="Архивировать блюдо"
@@ -378,7 +396,7 @@ function renderMenuItemForm({
   return `
     ${renderBackLink({ href: backHref })}
     <h2>${esc(title)}</h2>
-    ${!isNew ? `<div class="item-status">${esc(itemStatusLabel(v))}</div>` : ''}
+    ${!isNew && v.archived_at ? `<div class="item-status">${esc(itemStatusLabel(v))}</div>` : ''}
     ${photoManager}
     <div class="panel">
       <form method="post" action="${action}">

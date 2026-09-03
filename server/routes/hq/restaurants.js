@@ -845,7 +845,17 @@ function createRestaurantsRouter({ linkBasePath, mediaProvider = null }) {
     }
   });
 
+  // Наличие блюда (is_available) — то же поле, которым управляет Telegram
+  // /stoplist и по которому публичный сайт решает, серая карточка или живая.
+  //
+  // Отвечает либо редиректом (обычная отправка формы, работает без JS), либо
+  // JSON — когда переключатель в HQ просит его явно. JSON содержит ФАКТИЧЕСКИ
+  // сохранённое значение, прочитанное из ответа UPDATE, а не то, что просил
+  // клиент: переключатель обязан показывать состояние БД, а не намерение
+  // пользователя. Ошибка отвечает 4xx и НЕ содержит нового состояния —
+  // переключателю нечего показать как успех.
   router.post('/:id/menu/items/:itemId/available', requireCsrf, async (req, res, next) => {
+    const wantsJson = (req.get('accept') || '').includes('application/json');
     try {
       const available = req.body.available === '1';
       const updated = await menuSvc.setMenuItemAvailability(req.restaurant.id, req.menuItem.id, available);
@@ -860,9 +870,17 @@ function createRestaurantsRouter({ linkBasePath, mediaProvider = null }) {
         const autoClosed = await autoCloseIfNoAvailableDishes(req.restaurant, req.ip);
         if (autoClosed) notice = 'Ресторан закрыт: в меню нет доступных блюд.';
       }
+      if (wantsJson) {
+        // updated === null означает, что блюдо исчезло между загрузкой
+        // страницы и кликом — отдаём то, что реально лежит в БД сейчас.
+        const current = updated || await menuSvc.getMenuItemById(req.restaurant.id, req.menuItem.id);
+        if (!current) return res.status(404).json({ error: 'Блюдо не найдено.' });
+        return res.json({ is_available: current.is_available === 1 ? 1 : 0, notice: notice || null });
+      }
       menuActionRedirect(res, req.restaurant.id, notice ? { notice } : undefined);
     } catch (err) {
       if (err instanceof svc.ValidationError) {
+        if (wantsJson) return res.status(400).json({ error: err.message });
         return menuActionRedirect(res, req.restaurant.id, { error: err.message });
       }
       next(err);

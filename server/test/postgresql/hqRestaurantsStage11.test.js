@@ -454,8 +454,9 @@ test('D1: категория, блюдо внутри категории, нал
     const itemId = itemRows[0].id;
 
     // Убрать из наличия — то же поле is_available, что и Telegram /stoplist.
+    // На карточке это переключатель, состояние которого приходит из БД.
     const itemPage = await getPage(base, cookie, `/hq/restaurants/${restId}/menu/items/${itemId}`);
-    assert.match(itemPage.html, /Нет в наличии/);
+    assert.match(itemPage.html, /data-stock-toggle data-state="on"/);
     assert.doesNotMatch(itemPage.html, /Сделать недоступным/, 'формулировка запрещена спецификацией');
     assert.doesNotMatch(itemPage.html, /витрин/i, 'наличие и архив больше не описываются через «витрину»');
     await postForm(base, cookie, `/hq/restaurants/${restId}/menu/items/${itemId}/available`, { _csrf: itemPage.csrf, available: '0' });

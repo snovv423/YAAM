@@ -889,6 +889,85 @@
   });
 })();
 
+// Переключатель наличия блюда (form[data-stock-toggle]).
+//
+// ГЛАВНОЕ ПРАВИЛО: переключатель показывает то, что РЕАЛЬНО лежит в базе, а не
+// то, что человек нажал. Поэтому он не переключается оптимистично: клик
+// уходит на тот же адрес, что и обычная отправка формы, сервер отвечает
+// фактически сохранённым is_available, и только этот ответ двигает ползунок.
+// Ошибка (валидация, сеть, 4xx/5xx) оставляет прежнее положение и показывает
+// причину рядом — «успешного» вида при неуспешном сохранении не бывает.
+//
+// Без JS форма остаётся обычной формой: браузер отправит её сам и перезагрузит
+// страницу уже с новым состоянием — поведение то же, просто без анимации.
+(function () {
+  var forms = document.querySelectorAll('form[data-stock-toggle]');
+  if (!forms.length) return;
+
+  forms.forEach(function (form) {
+    var toggle = form.querySelector('.stock-toggle');
+    var hidden = form.querySelector('input[name="available"]');
+    var errorEl = form.querySelector('.stock-error');
+    if (!toggle || !hidden) return;
+
+    function showError(message) {
+      if (!errorEl) return;
+      errorEl.textContent = message || '';
+      errorEl.hidden = !message;
+    }
+
+    // Единственное место, где меняется вид переключателя. Принимает уже
+    // сохранённое значение (0/1) и приводит к нему и разметку, и то, что
+    // отправится следующим кликом.
+    function applyState(isAvailable) {
+      form.setAttribute('data-state', isAvailable ? 'on' : 'off');
+      toggle.setAttribute('aria-checked', isAvailable ? 'true' : 'false');
+      hidden.value = isAvailable ? '0' : '1';
+    }
+
+    form.addEventListener('submit', function (event) {
+      if (typeof window.fetch !== 'function') return; // нет fetch — обычная отправка формы
+      event.preventDefault();
+      if (form.hasAttribute('data-busy')) return;
+      form.setAttribute('data-busy', '');
+      toggle.disabled = true;
+      showError('');
+
+      // urlencoded, а не FormData: маршрут читает тело обычным
+      // express.urlencoded (multipart разбирается только на загрузке фото),
+      // и _csrf обязан приехать тем же способом, что и при обычной отправке.
+      fetch(form.action, {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+        },
+        body: new URLSearchParams(new FormData(form)).toString(),
+        credentials: 'same-origin',
+      }).then(function (response) {
+        return response.json().catch(function () { return null; }).then(function (data) {
+          if (!response.ok || !data || typeof data.is_available !== 'number') {
+            throw new Error((data && data.error) || 'Не удалось сохранить. Попробуйте ещё раз.');
+          }
+          return data;
+        });
+      }).then(function (data) {
+        applyState(data.is_available === 1);
+        // Сервер может сообщить о побочном следствии (например, ресторан
+        // закрылся, потому что доступных блюд не осталось) — показываем как
+        // есть, рядом с переключателем.
+        if (data.notice) showError(data.notice);
+      }).catch(function (err) {
+        // Положение НЕ меняем: в базе осталось прежнее значение.
+        showError(err.message || 'Не удалось сохранить.');
+      }).then(function () {
+        form.removeAttribute('data-busy');
+        toggle.disabled = false;
+      });
+    });
+  });
+})();
+
 // Поля, растущие по содержимому (textarea[data-autogrow]).
 //
 // Высота выставляется из scrollHeight: сначала сбрасывается, иначе поле умеет

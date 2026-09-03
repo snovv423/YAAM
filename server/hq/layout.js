@@ -302,6 +302,33 @@ function layout({ title, active, body, csrfToken, linkBasePath = '/hq' }) {
   .item-status{color:var(--txt2);font-size:13px;margin-bottom:14px}
   .item-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px;padding-top:14px;border-top:1px solid var(--bord)}
   .item-actions form{margin:0}
+  /* Переключатель наличия блюда. Состояние читается только цветом и
+     положением ползунка — отдельной подписи рядом нет (её роль выполняет
+     aria-label/aria-checked для скринридера). Зелёный = в наличии,
+     красный = нет. Анимируются transform и цвет, поэтому переключение
+     плавное и на слабом телефоне. */
+  .stock-form{display:flex;align-items:center;gap:10px;margin:0}
+  .stock-toggle{
+    position:relative;width:58px;height:32px;padding:0;border:none;border-radius:999px;
+    background:#c0303c;cursor:pointer;flex:0 0 auto;
+    transition:background .22s ease;
+    -webkit-tap-highlight-color:transparent;
+  }
+  .stock-toggle .stock-knob{
+    position:absolute;top:3px;left:3px;width:26px;height:26px;border-radius:50%;
+    background:#fff;box-shadow:0 2px 6px rgba(0,0,0,.35);
+    transition:transform .22s cubic-bezier(.32,1.2,.4,1);
+  }
+  .stock-form[data-state="on"] .stock-toggle{background:var(--ok)}
+  .stock-form[data-state="on"] .stock-knob{transform:translateX(26px)}
+  /* Пока идёт запрос — переключатель не принимает второй клик и не
+     притворяется, что уже переключился. */
+  .stock-form[data-busy] .stock-toggle{opacity:.65;cursor:progress}
+  .stock-toggle:focus-visible{outline:2px solid var(--amber);outline-offset:3px}
+  .stock-error{color:var(--danger);font-size:12px;font-weight:600}
+  @media (prefers-reduced-motion:reduce){
+    .stock-toggle,.stock-toggle .stock-knob{transition:none}
+  }
 
   /* Фильтр по датам (заказы, свой период статистики). На узком экране
      кнопка уходит на свою строку и не накладывается на поля дат

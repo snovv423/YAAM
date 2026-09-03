@@ -271,23 +271,35 @@ test('«Назад» с карточки блюда возвращает в то
 
 // Фотографии блюда стоят ВЫШЕ формы: карточку блюда открывают прежде всего
 // ради фотографий, и они не должны быть под полутора десятками полей.
-test('на карточке блюда «Фотографии блюда» идут между статусом и формой', () => {
+// Строка статуса под заголовком осталась только у архивированного блюда:
+// наличие у активного показывает переключатель, и вторая, текстовая копия
+// того же состояния рядом делала экран двусмысленным.
+test('на карточке блюда «Фотографии блюда» идут между заголовком и формой', () => {
   const { renderMenuItemForm } = require('../hq/menuViews');
-  const html = renderMenuItemForm({
+  const render = (item) => renderMenuItemForm({
     restaurant: { id: 12, name: 'R' },
-    item: { id: 5, name: 'Цезарь', price: 300, category_id: 4, is_available: 1 },
+    item,
     categories: [{ id: 4, name: 'Салаты', archived_at: null }],
     csrfToken: 't', linkBasePath: '/hq', isNew: false,
     photos: [], mediaConfigured: true, maxPhotos: 20,
   });
-  const status = html.indexOf('class="item-status"');
+
+  const html = render({ id: 5, name: 'Цезарь', price: 300, category_id: 4, is_available: 1 });
+  const heading = html.indexOf('<h2>');
   const photos = html.indexOf('Фотографии блюда');
   const name = html.indexOf('id="if-name"');
   const save = html.indexOf('>Сохранить<');
-  assert.ok(status > -1 && photos > -1 && name > -1 && save > -1);
-  assert.ok(status < photos, 'фотографии идут сразу после статуса блюда');
+  assert.ok(heading > -1 && photos > -1 && name > -1 && save > -1);
+  assert.ok(heading < photos, 'фотографии идут сразу после заголовка блюда');
   assert.ok(photos < name, 'поля формы — ниже фотографий');
   assert.ok(name < save, 'форма осталась целой');
+  assert.equal(html.indexOf('class="item-status"'), -1,
+    'у активного блюда состояние показывает переключатель, а не вторая подпись');
+
+  // У архивированного строка статуса на месте и по-прежнему выше фотографий.
+  const archived = render({ id: 5, name: 'Цезарь', price: 300, category_id: 4, is_available: 0, archived_at: new Date() });
+  const archivedStatus = archived.indexOf('class="item-status"');
+  assert.ok(archivedStatus > -1 && archivedStatus < archived.indexOf('Фотографии блюда'));
 });
 
 // ─────────────────────────── отступы ───────────────────────────
