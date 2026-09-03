@@ -549,6 +549,28 @@
     return match ? match[1] : null;
   }
 
+  // Повторно ставит позицию после нативного перехода к якорю. Событийно:
+  // 'load' наступает уже после того, как браузер обработал фрагмент. Ни одного
+  // таймера — и ни одного шанса перебить прокрутку, начатую самим владельцем.
+  function reassertScroll(target) {
+    var cancelled = false;
+    var cancel = function () { cancelled = true; detach(); };
+    var events = ['wheel', 'touchstart', 'keydown', 'pointerdown'];
+    function detach() {
+      events.forEach(function (type) { window.removeEventListener(type, cancel, true); });
+      window.removeEventListener('load', apply);
+    }
+    function apply() {
+      detach();
+      if (cancelled) return;
+      var current = window.scrollY || window.pageYOffset || 0;
+      if (Math.abs(current - target) > 1) window.scrollTo(0, target);
+    }
+    events.forEach(function (type) { window.addEventListener(type, cancel, true); });
+    if (document.readyState === 'complete') apply();
+    else window.addEventListener('load', apply);
+  }
+
   function restore() {
     var state = readState();
     var focusId = focusIdFromUrl() || (state && state.item) || null;
@@ -573,7 +595,17 @@
       var offsetInViewport = state && typeof state.itemTop === 'number'
         ? state.itemTop
         : Math.round(window.innerHeight / 3);
-      window.scrollTo(0, Math.max(0, Math.round(absoluteTop - offsetInViewport)));
+      var target = Math.max(0, Math.round(absoluteTop - offsetInViewport));
+      window.scrollTo(0, target);
+      // Адрес возврата несёт якорь #dish-N (он и есть версия «без JS»), и
+      // браузер доводит прокрутку к нему САМ — уже после того, как отработал
+      // этот defer-скрипт. На боевой странице меню это было видно: строка
+      // вставала на scroll-margin-top якоря вместо места, где её оставили.
+      // Поэтому позиция подтверждается ещё раз, когда документ дозагрузился и
+      // нативный переход к фрагменту уже случился. Подтверждение снимается,
+      // как только владелец сам тронул прокрутку: спорить с живым человеком
+      // мы не имеем права.
+      reassertScroll(target);
       // Короткая подсветка: строк много и они похожи — без неё непонятно,
       // какое из блюд только что редактировалось. Класс снимается по
       // animationend, а не по таймеру.

@@ -136,7 +136,15 @@ async function runReturnScenario(page: Page, label: string) {
   const row = page.locator(`#dish-${itemId}`);
   await expect(row).toBeVisible();
 
-  // Строка того же блюда вернулась ровно на то же место в окне.
+  // Строка того же блюда вернулась ровно на то же место в окне. Замер делается
+  // ПОСЛЕ полной загрузки: адрес возврата несёт якорь #dish-N, браузер доводит
+  // прокрутку к нему сам и уже после defer-скрипта — на боевой странице это
+  // ставило строку на scroll-margin-top якоря вместо сохранённого места.
+  await page.waitForLoadState('load');
+  await expect.poll(async () => {
+    const box = await row.boundingBox();
+    return Math.round(Math.abs(box!.y - before.y));
+  }, { timeout: 5000 }).toBeLessThanOrEqual(4);
   const after = (await row.boundingBox())!;
   expect(Math.abs(after.y - before.y), `${label}: строка блюда должна вернуться на то же место`).toBeLessThanOrEqual(4);
 
