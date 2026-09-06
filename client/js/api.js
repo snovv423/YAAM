@@ -1,18 +1,17 @@
 // Публичный yaam.su всегда работает с production API. В браузере нет
 // fallback на demo/staging: пустой ответ и ошибка API отображаются честно.
-// Изолированный override существует только для node:vm-тестов и требует
-// явного __YAAM_TEST_MODE__; публичный runtime его не устанавливает.
-const PRODUCTION_API_BASE_URL = 'https://api.yaam.su';
-
-function resolveApiBaseUrl() {
-  if (window.__YAAM_TEST_MODE__ === true
-      && Object.prototype.hasOwnProperty.call(window, '__YAAM_TEST_API_BASE_URL')) {
-    return window.__YAAM_TEST_API_BASE_URL;
-  }
-  return PRODUCTION_API_BASE_URL;
-}
-
-const API_BASE_URL = resolveApiBaseUrl();
+//
+// Адрес — обычная константа, а НЕ переключатель, читающий window. Раньше здесь
+// жила пара тестовых window-глобалов (флаг режима + адрес): механика,
+// существовавшая исключительно ради тестов, но уезжавшая в публичный бандл и
+// позволявшая переназначить endpoint прямо из рантайма страницы. Теперь адрес
+// подменяет тестовая обвязка, переписывая строку ниже при ЗАГРУЗКЕ файла, и
+// живёт она вне production-артефакта:
+//   client/test/helpers/loadApp.js   — node:vm unit-тесты;
+//   e2e/fixtures/test-api-hook.ts    — Playwright (через static-сервер).
+// Обе подстановки fail-closed: если этот литерал переименуют, обвязка упадёт,
+// а не начнёт молча гонять тесты против production (см. e2eTestApiHookContract).
+const API_BASE_URL = 'https://api.yaam.su';
 const USE_API = !!API_BASE_URL;
 const IS_STAGING_MODE = false;
 const CREATE_ORDER_TIMEOUT_MS = 15000;
@@ -35,6 +34,11 @@ async function apiRequest(path, options = {}) {
     if (!res.ok) {
       const err = new Error(data.error || `Ошибка запроса: ${res.status}`);
       err.status = res.status; // нужно отличать однозначный 4xx от неизвестного сетевого результата
+      // Машиночитаемый код отказа. Нужен там, где одного HTTP-статуса мало:
+      // 503 от приложения (гейт, стоящий ДО любой записи) и 503 от
+      // промежуточного слоя после отправки запроса — разные ситуации, а
+      // статус у них один. См. isDeterministicRefusal() в app.js.
+      if (typeof data.code === 'string') err.code = data.code;
       throw err;
     }
     return data;

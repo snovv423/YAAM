@@ -47,6 +47,9 @@ test('1. новый заказ (реальный openQR()) получает orde
     fulfillmentType='delivery';
     document.getElementById('c-name').value='Тест';
     document.getElementById('c-phone').value='+79280000000';
+    // Адрес доставки обязателен с тех пор, как из чекаута убрали
+    // автоподстановку выдуманного адреса (client/test/checkoutContactsPickupDelivery.test.js).
+    document.getElementById('c-addr').value='ул. Тестовая, 1';
     saveLegalAcceptance();
   `);
   const before = Date.now();
@@ -256,6 +259,9 @@ test('19. orderCreatedAtMs захватывается одинаково в demo
     fulfillmentType='delivery';
     document.getElementById('c-name').value='Тест';
     document.getElementById('c-phone').value='+79280000000';
+    // Адрес доставки обязателен с тех пор, как из чекаута убрали
+    // автоподстановку выдуманного адреса (client/test/checkoutContactsPickupDelivery.test.js).
+    document.getElementById('c-addr').value='ул. Тестовая, 1';
     saveLegalAcceptance();
   `;
   evalInContext(demo, setup);

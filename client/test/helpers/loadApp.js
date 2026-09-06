@@ -246,9 +246,13 @@ function createSandbox({ apiBaseUrl, locationSearch, locationHref, locationHash,
     },
   };
   sandbox.window = sandbox; // как в реальном браузере — window === глобальный объект
+  // Не свойство window, которое читал бы сам api.js (такого механизма больше
+  // нет — см. loadAppInSandbox), а указание ЗАГРУЗЧИКУ, какой адрес подставить
+  // в исходник при загрузке. `undefined` означает «оставить production-адрес
+  // как есть», поэтому useProductionDefault грузит ровно тот файл, который
+  // уезжает на yaam.su.
   if (!useProductionDefault) {
-    sandbox.window.__YAAM_TEST_MODE__ = true;
-    sandbox.window.__YAAM_TEST_API_BASE_URL = apiBaseUrl || null;
+    sandbox.__YAAM_TEST_API_BASE_URL__ = apiBaseUrl === undefined ? null : apiBaseUrl;
   }
   // Старые unit-тесты изолированы от production API через test-only override.
   sandbox.fetch = async () => { throw new Error('fetch не должен вызываться в demo-режиме этого теста'); };
@@ -257,12 +261,42 @@ function createSandbox({ apiBaseUrl, locationSearch, locationHref, locationHash,
   return { sandbox, store, elementCache };
 }
 
-function loadAppInSandbox(sandbox) {
-  const clientDir = path.join(__dirname, '..', '..', 'js');
-  for (const file of ['data.js', 'api.js', 'app.js']) {
-    const code = fs.readFileSync(path.join(clientDir, file), 'utf8');
-    vm.runInContext(code, sandbox, { filename: file });
+// Литерал адреса API в client/js/api.js. Тестовая обвязка подменяет его при
+// загрузке файла — вместо прежнего рантайм-переключателя window.__YAAM_TEST_MODE__,
+// который ради этих тестов уезжал в публичный бандл и позволял переназначить
+// endpoint прямо со страницы. Подстановка fail-closed: если строку в api.js
+// переименуют, тесты упадут здесь, а не начнут молча ходить в production.
+const API_BASE_URL_DECLARATION = /^const API_BASE_URL = '[^']*';$/m;
+
+function readClientSource(file) {
+  return fs.readFileSync(path.join(__dirname, '..', '..', 'js', file), 'utf8');
+}
+
+function withTestApiBaseUrl(apiJsSource, apiBaseUrl) {
+  if (!API_BASE_URL_DECLARATION.test(apiJsSource)) {
+    throw new Error(
+      'client/js/api.js: не найдено объявление `const API_BASE_URL = \'...\';` — '
+      + 'тестовая подстановка адреса сломана, поправьте helpers/loadApp.js вместе с api.js',
+    );
   }
+  return apiJsSource.replace(
+    API_BASE_URL_DECLARATION,
+    `const API_BASE_URL = ${JSON.stringify(apiBaseUrl)};`,
+  );
+}
+
+function loadAppInSandbox(sandbox) {
+  // Демо-датасет — фикстура, а не production-ассет: он живёт рядом с тестами
+  // и не публикуется на yaam.su (см. client/test/fixtures/data.js).
+  const fixture = fs.readFileSync(path.join(__dirname, '..', 'fixtures', 'data.js'), 'utf8');
+  vm.runInContext(fixture, sandbox, { filename: 'fixtures/data.js' });
+
+  let apiJs = readClientSource('api.js');
+  if (sandbox.__YAAM_TEST_API_BASE_URL__ !== undefined) {
+    apiJs = withTestApiBaseUrl(apiJs, sandbox.__YAAM_TEST_API_BASE_URL__);
+  }
+  vm.runInContext(apiJs, sandbox, { filename: 'api.js' });
+  vm.runInContext(readClientSource('app.js'), sandbox, { filename: 'app.js' });
 }
 
 // app.js объявляет своё состояние через top-level let/const — такие биндинги

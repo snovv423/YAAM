@@ -94,9 +94,13 @@ function loadServices(databaseUrl) {
   };
 }
 
+// address заполнен: сценарий B в этом файле оформляет заказ САМОВЫВОЗОМ, а
+// самовывоз у ресторана без адреса запрещён (orderService.createOrder) — иначе
+// клиент платил бы за получение неизвестно где.
 async function createRestaurant(db, name) {
   const rows = await db.execute(
-    `INSERT INTO restaurants (name, cities, is_open, published_at) VALUES ($1,'["Грозный"]',1,NOW()) RETURNING id`,
+    `INSERT INTO restaurants (name, cities, address, is_open, published_at)
+     VALUES ($1,'["Грозный"]','г. Грозный, ул. Тестовая, 1',1,NOW()) RETURNING id`,
     [name],
   );
   return rows.rows[0].id;

@@ -127,6 +127,14 @@
   <div class="vote-chip" id="vote-chip" onclick="openVote()">кого ждём</div>
   <a class="help-link" href="https://t.me/YAAMHELP" target="_blank" rel="noopener">HELP</a>
   <footer class="site-footer">
+    <!-- Официальные контакты продавца прямо на главной, а не только внутри
+         юридических страниц: их обязан видеть и обычный посетитель, и
+         платёжный модератор, не проваливаясь в подвал документов. -->
+    <div class="site-contacts">
+      <a href="mailto:supportyaam@gmail.com">supportyaam@gmail.com</a>
+      <a href="tel:+79635820571">+7 963 582-05-71</a>
+      <a href="https://t.me/YAAMHELP" target="_blank" rel="noopener">@YAAMHELP</a>
+    </div>
     <a href="legal/offer.html" target="_blank" rel="noopener">Публичная оферта</a>
     <a href="legal/privacy.html" target="_blank" rel="noopener">Политика обработки персональных данных</a>
     <a href="legal/personal-data-consent.html" target="_blank" rel="noopener">Согласие на обработку персональных данных</a>
@@ -178,14 +186,22 @@
   <div class="ctitle">Оформление</div>
   <div class="csub" id="c-rest"></div>
   <div class="co">
-    <div class="fulfill-toggle">
+    <!-- Скрывается целиком, когда у ресторана нет адреса получения: выбирать
+         тогда не из чего, а показывать неработающий «Самовывоз» нельзя
+         (см. setFulfillment/openCart в js/app.js). -->
+    <div class="fulfill-toggle" id="fulfill-toggle">
       <button type="button" class="fulfill-chip fulfill-on" id="fulfill-delivery" onclick="setFulfillment('delivery')">Доставка</button>
       <button type="button" class="fulfill-chip fulfill-off" id="fulfill-pickup" onclick="setFulfillment('pickup')">Самовывоз</button>
     </div>
     <div class="field"><label>Имя</label><input id="c-name" placeholder="Как к вам обращаться"></div>
-    <div class="field" id="field-addr"><div class="addr-top"><label>Адрес доставки</label><span class="citytag" id="c-city"></span></div><input id="c-addr" value="ул. Маяковского, 18, кв. 7"></div>
+    <!-- Поля контактов пусты по умолчанию. Раньше здесь стояли value с
+         выдуманными адресом и телефоном: они выглядели как уже введённые
+         пользователем данные и уходили в реальный заказ, если их не заметить
+         и не перебить. Пример адреса допустим только как placeholder — он
+         визуально отличим от значения и не отправляется. -->
+    <div class="field" id="field-addr"><div class="addr-top"><label>Адрес доставки</label><span class="citytag" id="c-city"></span></div><input id="c-addr" placeholder="Улица, дом, квартира" autocomplete="street-address"></div>
     <div class="field" id="field-pickup-addr" style="display:none"><label>Заберите здесь</label><div class="pickup-addr-value" id="c-pickup-addr"></div></div>
-    <div class="field"><label>Телефон</label><input id="c-phone" value="+7 928 000-00-00"></div>
+    <div class="field"><label>Телефон</label><input id="c-phone" type="tel" placeholder="+7 ___ ___-__-__" autocomplete="tel"></div>
     <div class="field"><label>Комментарий к заказу</label><input id="c-comment"></div>
     <div class="panel" id="c-items"></div>
     <div class="trust"><span class="ic" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true" focusable="false"><path d="M12 3 5 6v5.2c0 4.4 2.8 7.9 7 9.8 4.2-1.9 7-5.4 7-9.8V6l-7-3Z"/><path d="m9 12 2 2 4-4"/></svg></span><p>Оплата защищена. Не примет ресторан — вернём деньги.</p></div>
@@ -224,7 +240,7 @@
 <div id="status" class="screen">
   <div class="stwrap">
     <div class="stnum">
-      <div class="lbl">Ваш заказ</div><div class="n order-code" id="st-num">YAAM-00001</div><div class="order-time" id="st-time"></div>
+      <div class="lbl">Ваш заказ</div><div class="n order-code" id="st-num"></div><div class="order-time" id="st-time"></div>
     </div>
     <div class="st-spin" id="st-spin"></div>
     <div id="st-content">
@@ -247,8 +263,7 @@
       <div class="st-share-wrap">
         <button class="ghost st-share-btn" id="st-share-btn" style="display:none" onclick="shareOrder()">Поделиться</button>
       </div>
-      <div class="demobar">
-        <button class="pay" id="st-next" onclick="nextStatus()">Следующий статус →</button>
+      <div class="statusbar">
         <!-- Stage 33 — показывается ТОЛЬКО пока order.status==='courier'
              (см. pollOrderOnce() в app.js). Подтверждает физическое
              получение заказа клиентом, courier -> delivered. -->
@@ -259,8 +274,7 @@
             <button class="ghost" onclick="resetAll()">На главную</button>
           </div>
         </div>
-        <div id="st-demowrap"><button class="demolink" onclick="openRejected()">Демо: а если ресторан отклонит →</button></div>
-        <div id="st-cancel-wrap" style="display:none"><button class="demolink" onclick="cancelOrderFlow()">Отменить заказ</button></div>
+        <div id="st-cancel-wrap" style="display:none"><button class="linkbtn" onclick="cancelOrderFlow()">Отменить заказ</button></div>
         <!-- Заказ создан, но оплата ещё не завершена (payment pending) — например,
              пользователь вернулся назад с экрана QR, обновил страницу или закрыл
              вкладку. Отдельное явное состояние вместо пустого/неопределённого экрана. -->
@@ -280,10 +294,15 @@
 <div id="rejected" class="screen">
   <div class="ok">
     <div class="okmark"><svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v4h4"/></svg></div>
-    <h2 id="rej-title">«Кавказ» не смог принять заказ</h2>
+    <h2 id="rej-title">Заказ не принят</h2>
     <p id="rej-explain">Так бывает в часы загрузки — кухня сейчас не берёт новые заказы.</p>
     <p id="rej-refund-line" style="display:none"></p>
     <button class="pay rej-retry" id="rej-action-btn" onclick="resetAll()">Выбрать другой ресторан</button>
+    <!-- Выход с экрана восстановления заказа. Показывается только тогда, когда
+         проверка предыдущей попытки уже завершилась неудачей (см.
+         showInitialOrderRecoveryPending) — без него экран становился тупиком:
+         единственная кнопка вела в ту же самую проверку. -->
+    <div class="center-wrap" id="rej-leave-wrap" style="display:none"><button class="ghost" onclick="leaveInitialOrderRecovery()">← Вернуться к меню</button></div>
     <p class="rej-order-id" id="rej-order-id-wrap" style="display:none">Заказ <span class="order-code" id="rej-order-code"></span></p>
   </div>
 </div>
@@ -328,7 +347,6 @@
   <button class="cartbtn" onclick="openCartBar()"><span><span id="cb-count"></span> <small>· корзина</small></span><span id="cb-sum"></span></button>
 </div>
 
-<script src="js/data.js"></script>
 <script src="js/api.js?v=__CACHE_BUST__"></script>
 <script src="js/app.js?v=__CACHE_BUST__"></script>
 </body>

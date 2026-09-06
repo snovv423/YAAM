@@ -326,8 +326,11 @@ test('openSharedOrder(): рендерит прогресс-статус и ск�
   await evalInContext(sandbox, `openSharedOrder('YAAM-00006', ${JSON.stringify(token)})`);
   assert.equal(sandbox.document.getElementById('st-num').textContent, 'YAAM-00006');
   assert.equal(sandbox.document.getElementById('st-cancel-wrap').style.display, 'none');
-  assert.equal(sandbox.document.getElementById('st-next').style.display, 'none');
-  assert.equal(sandbox.document.getElementById('st-demowrap').style.display, 'none');
+  // st-next / st-demowrap здесь больше не проверяются: это были demo-контролы
+  // («Следующий статус →», «Демо: а если ресторан отклонит →»), которые уезжали
+  // в production-разметку и удалены из неё целиком. Что их там нет —
+  // утверждает client/test/checkoutContactsPickupDelivery.test.js (6.1);
+  // скрывать нечего, если элемента не существует.
   assert.equal(sandbox.document.getElementById('st-pending-pay-wrap').style.display, 'none');
   assert.equal(sandbox.document.getElementById('st-final').style.display, 'none');
   // Требование задания: состав заказа, количество, цены и итоговая сумма

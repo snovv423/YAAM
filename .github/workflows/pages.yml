@@ -28,6 +28,24 @@ jobs:
       # удаляет кэши прошлых версий — старый app.js пережить деплой не может.
       - name: Inject per-deploy cache-busting version (commit SHA)
         run: sed -i "s/__CACHE_BUST__/${{ github.sha }}/g" client/index.html client/sw.js
+      # Артефакт — это ровно то, что уезжает на yaam.su. Каталог client/ помимо
+      # рантайма содержит инструменты разработки, и они публиковались вместе с
+      # ним: https://yaam.su/test/*.test.js отдавались с кодом 200 (33 файла
+      # автотестов + helpers + фикстуры), туда же уходил scripts/check-no-emoji.js
+      # и исходник иконки. Удаляем их из СВЕЖЕГО чекаута перед загрузкой —
+      # репозиторий это не трогает, а в артефакт попадает только рантайм.
+      - name: Strip development-only assets from the published artifact
+        run: |
+          rm -rf client/test client/scripts
+          rm -f client/assets/yaam-app-icon-source.jpg
+          # Fail-closed: если рантайм-ассет случайно окажется под удалёнными
+          # путями, деплой обязан упасть здесь, а не выкатить битый сайт.
+          for asset in index.html sw.js manifest.webmanifest css/style.css js/api.js js/app.js js/pwa.js; do
+            test -f "client/$asset" || { echo "missing runtime asset: $asset"; exit 1; }
+          done
+          # Ни одной РАБОЧЕЙ ссылки на удалённое (упоминания в комментариях —
+          # не ссылки, поэтому проверяются именно src=/href=).
+          ! grep -rnE '(src|href)="[^"]*(js/data\.js|test/|scripts/)' client/index.html client/sw.js
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

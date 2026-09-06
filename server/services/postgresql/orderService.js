@@ -642,7 +642,14 @@ async function createOrder({
 
   const normalizedFulfillment = fulfillmentType === 'pickup' ? 'pickup' : 'delivery';
   const normalizedCustomerName = customerName.trim();
-  const normalizedAddress = address || '';
+  const normalizedAddress = String(address || '').trim();
+  // Адрес доставки обязателен на сервере, а не только в форме. Клиент до этого
+  // никогда не мог прислать пустой адрес (в поле стояла автоподстановка), и
+  // проверки здесь не было; после удаления автоподстановки пустой адрес — уже
+  // достижимое состояние, а прямой вызов API её и вовсе не проходил.
+  if (normalizedFulfillment === 'delivery' && !normalizedAddress) {
+    throw new OrderCreationInputError('укажите адрес доставки');
+  }
   const normalizedComment = comment || '';
   const requestedItems = items.map((item) => {
     const menuItemId = Number(item.menuItemId);
@@ -692,6 +699,13 @@ async function createOrder({
   if (restaurant.archived_at) throw new OrderCreationInputError('ресторан архивирован — заказ невозможен');
   if (!restaurant.published_at) throw new OrderCreationInputError('ресторан ещё не опубликован — заказ невозможен');
   if (!restaurant.is_open) throw new OrderCreationInputError('ресторан сейчас закрыт — заказ невозможен');
+  // Самовывоз без адреса ресторана — оплата за получение неизвестно где.
+  // Клиент такой вариант больше не показывает (client/js/app.js,
+  // isPickupAvailable), но правило обязано жить и на сервере: прямой вызов
+  // API в обход браузера проходит мимо любой формы.
+  if (normalizedFulfillment === 'pickup' && !String(restaurant.address || '').trim()) {
+    throw new OrderCreationInputError('самовывоз недоступен — у ресторана не указан адрес');
+  }
 
   // Клиентские name/price — не источник истины, только menuItemId проверяется
   // и цена/название берутся из БД. Прямой вызов API в обход браузера не может

@@ -5,6 +5,7 @@ import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import type { FullConfig } from '@playwright/test';
 import { startStaticServer } from './fixtures/static-server';
+import { createApiBaseUrlTransform } from './fixtures/test-api-hook';
 
 // Полностью локальный, эфемерный стек для критического smoke-сценария.
 // Ничего из этого не касается staging/production:
@@ -146,7 +147,14 @@ async function globalSetup(_config: FullConfig) {
   await appInstance.start(); // резолвится только после lifecycle.start() — бизнес-маршруты уже ready
 
   const clientPort = await getFreePort();
-  const staticServer = await startStaticServer({ rootDir: CLIENT_DIR, port: clientPort });
+  // Адрес локального backend'а подставляется в client/js/api.js при отдаче
+  // файла — в самом api.js рантайм-переключателя endpoint'а больше нет (он
+  // уезжал в публичный бандл). См. fixtures/test-api-hook.ts.
+  const staticServer = await startStaticServer({
+    rootDir: CLIENT_DIR,
+    port: clientPort,
+    transform: createApiBaseUrlTransform(apiBaseUrl),
+  });
   const clientBaseUrl = `http://127.0.0.1:${clientPort}`;
 
   // Передача в тестовые воркеры — Playwright официально поддерживает чтение

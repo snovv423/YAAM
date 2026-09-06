@@ -33,7 +33,22 @@ export interface StaticServerHandle {
   close(): Promise<void>;
 }
 
-export function startStaticServer({ rootDir, port }: { rootDir: string; port: number }): Promise<StaticServerHandle> {
+// Обобщённое преобразование текстового файла перед отдачей. Сам сервер
+// по-прежнему ничего не знает про YAAM: что и на что менять, решает вызывающий
+// (см. e2e/fixtures/test-api-hook.ts). Раньше связка с локальным backend'ом
+// делалась через page.addInitScript(), выставлявший window-глобалы, которые
+// ради этого приходилось читать в client/js/api.js — то есть тестовый
+// переключатель endpoint'а жил в публичном бандле. Подстановка при отдаче
+// файла оставляет его целиком в тестовой обвязке и, в отличие от перехвата
+// запросов, корректно работает с service worker'ом: в кэш попадает уже
+// преобразованный файл.
+export type FileTransform = (relativePath: string, source: string) => string | null;
+
+const TRANSFORMABLE = new Set(['.js', '.html', '.css', '.json', '.webmanifest', '.svg']);
+
+export function startStaticServer(
+  { rootDir, port, transform }: { rootDir: string; port: number; transform?: FileTransform },
+): Promise<StaticServerHandle> {
   const resolvedRoot = path.resolve(rootDir);
 
   const server = http.createServer((req, res) => {
@@ -58,7 +73,26 @@ export function startStaticServer({ rootDir, port }: { rootDir: string; port: nu
       }
 
       const ext = path.extname(filePath);
-      res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
+      const contentType = MIME[ext] || 'application/octet-stream';
+
+      // Преобразование применяется только к текстовым типам и только если
+      // callback реально что-то вернул: бинарные ассеты (png/jpg/webp) нельзя
+      // прогонять через utf8, а файлы, до которых преобразованию нет дела,
+      // должны отдаваться потоком, как и раньше.
+      if (transform && TRANSFORMABLE.has(ext)) {
+        const relativePath = path.relative(resolvedRoot, filePath).split(path.sep).join('/');
+        const transformed = transform(relativePath, fs.readFileSync(filePath, 'utf8'));
+        if (transformed !== null && transformed !== undefined) {
+          res.writeHead(200, {
+            'Content-Type': contentType,
+            'Content-Length': Buffer.byteLength(transformed),
+          });
+          res.end(transformed);
+          return;
+        }
+      }
+
+      res.writeHead(200, { 'Content-Type': contentType });
       fs.createReadStream(filePath).pipe(res);
     } catch (err) {
       res.writeHead(500);

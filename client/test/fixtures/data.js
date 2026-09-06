@@ -1,4 +1,19 @@
 // Демо-данные прототипа: рестораны, меню, КБЖУ. Замените на реальные при подключении ресторанов.
+// ТЕСТОВАЯ ФИКСТУРА, НЕ PRODUCTION.
+//
+// Раньше этот файл лежал в client/js/ и подключался из index.html, то есть
+// уезжал на yaam.su: шесть вымышленных ресторанов с выдуманными телефонами,
+// адресами, рейтингами и «уже заказали N раз» скачивались с публичного сайта
+// и грузились в рантайм каждой страницы. В UI они не показывались (в
+// API-режиме app.js их не использует), но публиковать их незачем.
+//
+// Все объявленные здесь символы (U/P/G/DETAILS/POOL/M_*/restaurants/
+// CANDIDATE_RESTAURANTS) читаются в app.js ТОЛЬКО из веток demo-режима
+// (USE_API === false). В production USE_API вычисляется из константы
+// API_BASE_URL в client/js/api.js и всегда true, поэтому эти ветки
+// недостижимы, а файл не нужен. Demo-режим существует только под тестовой
+// обвязкой, которая грузит эту фикстуру сама — см.
+// client/test/helpers/loadApp.js.
 const U=(id,w)=>`https://images.unsplash.com/photo-${id}?auto=format&fit=crop&w=${w||900}&q=72`;
 const P={burger:'1568901346375-23c9450c58cd',pizza:'1513104890138-7c749659a591',meat:'1544025162-d76694265947',cake:'1565958011703-44f9829ba187',coffee:'1495474472287-4d71bcdd2085',noodles:'1569718212165-3a8278d5f624',dumpling:'1534422298391-e4f8c172dddb',bread:'1509440159596-0249088772ff'};
 const G={meat:'linear-gradient(135deg,#3d6b4e,#1e4630)',red:'linear-gradient(135deg,#4a6b4a,#234a2f)',honey:'linear-gradient(135deg,#5a6e3c,#2c4a28)',green:'linear-gradient(135deg,#3f7a52,#1c4a30)',cool:'linear-gradient(135deg,#3a6b66,#1f4a40)',pink:'linear-gradient(135deg,#5e5a6b,#2f3a4a)'};

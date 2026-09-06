@@ -106,10 +106,16 @@ async function goToCheckoutWithOneDish(page: Page) {
   await expect(sheetCheckoutButton).toBeVisible();
   await sheetCheckoutButton.click();
 
-  // Экран оформления: обязательное имя + согласие на обработку ПДн.
+  // Экран оформления: обязательные имя, телефон и адрес доставки + согласие
+  // на обработку ПДн. Телефон и адрес заполняются явно с тех пор, как из
+  // production-разметки убрали предзаполненные value («ул. Маяковского, 18,
+  // кв. 7» и «+7 928 000-00-00») — они выглядели как введённые пользователем
+  // данные и уходили в реальный заказ. Раньше этот helper на них и полагался.
   const nameField = page.locator('#c-name');
   await expect(nameField).toBeVisible();
   await nameField.fill('QA Smoke Test');
+  await page.locator('#c-phone').fill('+7 928 123-45-67');
+  await page.locator('#c-addr').fill('ул. E2E, 1, кв. 2');
 
   const pdnCheckbox = page.locator('#chk-pdn');
   if (await pdnCheckbox.count()) {

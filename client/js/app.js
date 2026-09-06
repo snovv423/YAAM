@@ -863,9 +863,7 @@ function renderStatus(){
   // Янтарный фон — только на шаге "В пути" (курьер), которого у самовывоза нет вообще.
   document.getElementById('statusbg').style.background=isCourierStep?bgAmber:bgGreen;
   const last=statusStep===steps.length-1;
-  document.getElementById('st-next').style.display=last?'none':'block';
   document.getElementById('st-final').style.display=last?'block':'none';
-  document.getElementById('st-demowrap').style.display=last?'none':'block';
   if(last){showOrderDot(false);renderRatingStars();}
 }
 
@@ -1208,6 +1206,39 @@ function showRecoveredOrder(order){
   drawQR();startQRTimer();go('qr');startOrderPollingQuiet();
 }
 
+// Код отказа платёжного гейта. Зеркалит ORDERING_UNAVAILABLE_CODE из
+// server/routes/postgresql/api.js (requirePaymentProviderEnabled) — общего
+// бандлера между клиентом и сервером нет, строка продублирована осознанно;
+// при правке одной стороны править и вторую.
+const ORDERING_UNAVAILABLE_CODE='ORDERING_UNAVAILABLE';
+
+// Однозначный отказ сервера: заказ ГАРАНТИРОВАННО не создан, поэтому пару
+// capability можно закрывать, а восстановление запускать нельзя.
+//
+// Что здесь чинится. HTTP-статуса одного мало: 503 бывает и от промежуточного
+// слоя уже ПОСЛЕ того, как запрос дошёл до приложения (тогда исход реально
+// неизвестен), и от нашего собственного гейта платёжного провайдера, который
+// стоит ДО любой записи orderService. Раньше оба случая попадали в «неизвестный
+// исход», и при PAYMENT_PROVIDER=disabled клиент вставал на экран
+// восстановления, из которого нет выхода: /orders/recover закрыт тем же гейтом
+// и отвечает тем же 503. Состояние переживало reload и запирало весь сайт, пока
+// пользователь не очистит localStorage вручную. Различает эти случаи только
+// машиночитаемый code, поэтому сервер его и присылает.
+//
+// 408/429 намеренно НЕ считаются однозначными: их может вернуть промежуточный
+// слой после отправки запроса.
+function isDeterministicRefusal(err){
+  if(err&&err.code===ORDERING_UNAVAILABLE_CODE)return true;
+  return !!err&&Number.isInteger(err.status)&&err.status>=400&&err.status<500
+    &&err.status!==408&&err.status!==429;
+}
+// Отказ гейта на /orders/recover — отдельный случай: он НЕ доказывает, что
+// заказа нет (заказ мог быть создан до отключения провайдера), но и запирать
+// пользователя на экране восстановления нельзя — этот вызов никогда не
+// завершится, пока провайдер выключен. Capability сохраняем, экран — нет.
+function isOrderingUnavailable(err){
+  return !!err&&err.code===ORDERING_UNAVAILABLE_CODE;
+}
 async function recoverSubmittedOrder(credentials){
   return api.recoverOrder(credentials.orderAccessToken,credentials.createIdempotencyKey);
 }
@@ -1246,8 +1277,7 @@ async function resolveInitialOrder({allowCreate=false,apiPayload=null,fallbackCo
       // Валидный клиентский отказ, включая fresh 409, закрывает эту пару.
       // Timeout/rate-limit могут прийти от промежуточного слоя после отправки,
       // поэтому 408/429, как сеть/5xx, остаются submitted и идут через recover.
-      if(Number.isInteger(err.status)&&err.status>=400&&err.status<500
-        &&err.status!==408&&err.status!==429){
+      if(isDeterministicRefusal(err)){
         clearPendingOrderCredentials(credentials);
         currentOrderAccessToken=null;currentCreateIdempotencyKey=null;
       }
@@ -1269,8 +1299,27 @@ function showInitialOrderRecoveryPending(waiting=false){
   document.getElementById('rej-refund-line').style.display='none';
   const btn=document.getElementById('rej-action-btn');
   btn.textContent=waiting?'Проверяем…':'Проверить снова';btn.onclick=retryInitialOrderRecovery;
+  // Выход с экрана. Пока проверка идёт — кнопки нет (уходить некуда, результат
+  // вот-вот придёт), но как только проверка закончилась неудачей, экран обязан
+  // перестать быть тупиком: раньше единственная кнопка вела снова в ту же
+  // проверку, и при устойчивой ошибке пользователь не мог попасть ни в меню,
+  // ни в корзину — ни сейчас, ни после reload. Уйти отсюда безопасно:
+  // pending-capability остаётся, а resolveInitialOrder() при любой следующей
+  // попытке оформления сначала вызывает recover и только потом создаёт заказ,
+  // поэтому дубль создать нельзя.
+  document.getElementById('rej-leave-wrap').style.display=waiting?'none':'block';
   document.getElementById('statusbg').style.display='none';
   if(!cur('rejected'))go('rejected');
+}
+function hideRecoveryLeaveButton(){
+  const wrap=document.getElementById('rej-leave-wrap');
+  if(wrap)wrap.style.display='none';
+}
+// Уйти с экрана восстановления к обычному сайту, не трогая pending-capability.
+function leaveInitialOrderRecovery(){
+  initialRecoveryBlocked=false;
+  hideRecoveryLeaveButton();
+  go('home');
 }
 async function recoverPendingInitialOrder({showFailure=true}={}){
   if(!USE_API||currentOrderCode)return false;
@@ -1290,6 +1339,19 @@ async function recoverPendingInitialOrder({showFailure=true}={}){
       initialRecoveryBlocked=false;
       return false; // recover вернул однозначный 404 и capability уже удалена
     }catch(err){
+      if(isOrderingUnavailable(err)){
+        // Гейт закрыт — проверить нечего и повторять нечего. Экран
+        // восстановления здесь стал бы вечным тупиком, поэтому уводим с него
+        // обратно на рабочий сайт (мы сами его и показали строкой выше) и
+        // объясняем причину. Capability сохраняется: она снова понадобится,
+        // когда приём заказов включат.
+        initialRecoveryBlocked=false;
+        if(showFailure){
+          leaveInitialOrderRecovery();
+          showToast(err.message||'Оформление заказов временно недоступно');
+        }
+        return false;
+      }
       if(showFailure)showInitialOrderRecoveryPending(false);
       return true; // судьба POST неизвестна: корзину/новое оформление не показываем
     }
@@ -1347,7 +1409,6 @@ function restoreDemoOrder(saved){
   showStatusSpinner(false);
   showRestaurantPhone(curRest?curRest.phone:null);
   document.getElementById('st-cancel-wrap').style.display=inPreStatus?'block':'none';
-  document.getElementById('st-demowrap').style.display=inPreStatus?'block':'none';
   if(inPreStatus){renderWaitForRestaurant();}
   else{document.getElementById('st-progress').style.display='flex';renderStatus();}
   go('status');
@@ -1865,7 +1926,21 @@ function orderDeliveryHTML(){
 // значение, а не сбрасывает на 'delivery') и переживает refresh/закрытие
 // вкладки — см. saveCartState/tryRestoreSession.
 let fulfillmentType='delivery';
+// Самовывоз предлагается ТОЛЬКО когда у ресторана есть реальный адрес
+// получения. Раньше пустой address подменялся строкой «Адрес уточняется» —
+// то есть пользователю предлагали оплатить заказ, не сказав, куда за ним идти.
+// Источник истины — данные ресторана, а не текст-заглушка на экране.
+function pickupAddressOf(rest){
+  return String(rest&&rest.address?rest.address:'').trim();
+}
+function isPickupAvailable(rest){
+  return pickupAddressOf(rest).length>0;
+}
 function setFulfillment(type){
+  // Единственная точка нормализации: сюда приходит и клик по чипу, и
+  // восстановление сохранённого выбора после refresh (openCart), поэтому
+  // недоступный самовывоз гасится здесь один раз для всех путей.
+  if(type==='pickup'&&!isPickupAvailable(curRest))type='delivery';
   fulfillmentType=type;
   const d=document.getElementById('fulfill-delivery'), p=document.getElementById('fulfill-pickup');
   d.classList.toggle('fulfill-on',type==='delivery');d.classList.toggle('fulfill-off',type!=='delivery');
@@ -1873,20 +1948,48 @@ function setFulfillment(type){
   document.getElementById('field-addr').style.display=type==='delivery'?'':'none';
   document.getElementById('field-pickup-addr').style.display=type==='pickup'?'':'none';
   document.getElementById('delivery-note').style.display=type==='delivery'?'':'none';
+  renderCheckoutSummary();
   saveCartState();
 }
-function openCart(){
+// Стоимость доставки в существующей модели — СПРАВОЧНАЯ: она не входит в
+// онлайн-оплату и передаётся ресторану напрямую (см. подпись поля в
+// server/routes/postgresql/admin.js: «Доставка, ₽ (справочно для клиента, в
+// онлайн-оплату не входит)» — единственное место, где эта величина
+// редактируется). Новой бизнес-модели здесь не вводится: раньше значение
+// просто нигде не показывалось, из-за чего ненулевая delivery_price молча
+// игнорировалась итогом. Теперь она видна до оплаты и явно помечена как
+// оплачиваемая отдельно.
+function deliveryPriceOf(rest){
+  const value=Number(rest&&rest.deliv);
+  return Number.isFinite(value)&&value>0?Math.round(value):0;
+}
+function checkoutDeliveryRowHTML(){
+  if(fulfillmentType!=='delivery')return'';
+  const price=deliveryPriceOf(curRest);
+  if(!price)return'';
+  return `<div class="sumrow deliv"><span>Доставка — оплачивается ресторану отдельно</span><span>${price} ₽</span></div>`;
+}
+// Итог чекаута пересобирается и при открытии корзины, и при смене способа
+// получения: строка доставки зависит от fulfillmentType, а раньше блок
+// рисовался только один раз в openCart() и после переключения устаревал.
+function renderCheckoutSummary(){
+  if(!curRest)return;
   const{sum}=totals();
-  document.getElementById('c-rest').textContent=curRest.name;
-  document.getElementById('c-city').textContent=selectedCity;
-  const addrField=document.getElementById('c-addr');
-  if(!addrField.value.trim())addrField.value=`г. ${selectedCity}, ул. Маяковского, 18, кв. 7`;
-  document.getElementById('c-pickup-addr').textContent=curRest.address||'Адрес уточняется';
-  setFulfillment(fulfillmentType);
   document.getElementById('c-items').innerHTML=
     orderItemsHTML()
-    +`<div class="sumrow total"><span>К оплате сейчас (СБП)</span><span>${sum} ₽</span></div>`;
+    +checkoutDeliveryRowHTML()
+    +`<div class="sumrow total"><span>К оплате сейчас за еду (СБП)</span><span>${sum} ₽</span></div>`;
   document.getElementById('c-total').textContent=sum+' ₽';
+}
+function openCart(){
+  document.getElementById('c-rest').textContent=curRest.name;
+  document.getElementById('c-city').textContent=selectedCity;
+  // Никакой автоподстановки адреса. Раньше здесь возвращался выдуманный адрес
+  // каждый раз, когда поле оказывалось пустым, — очистить его было нельзя.
+  const pickupAvailable=isPickupAvailable(curRest);
+  document.getElementById('fulfill-toggle').style.display=pickupAvailable?'':'none';
+  document.getElementById('c-pickup-addr').textContent=pickupAddressOf(curRest);
+  setFulfillment(pickupAvailable?fulfillmentType:'delivery'); // сам вызовет renderCheckoutSummary()
   renderLegalConsent();
   go('cart');updateBar();
 }
@@ -1912,6 +2015,26 @@ function validateCheckout(){
     return false;
   }
   nameWrap.classList.remove('err');
+  // Адрес доставки стал обязательным вместе с удалением автоподстановки:
+  // раньше поле физически не могло остаться пустым, потому что openCart()
+  // возвращал в него выдуманный адрес. Теперь пустое поле — реальный
+  // сценарий, и пускать такой заказ дальше нельзя.
+  const addrField=document.getElementById('c-addr');
+  const addrWrap=addrField.closest('.field');
+  if(fulfillmentType!=='pickup'&&!addrField.value.trim()){
+    addrWrap.classList.remove('err');void addrWrap.offsetWidth;addrWrap.classList.add('err');
+    addrField.focus();
+    showToast('Укажите адрес доставки');
+    return false;
+  }
+  addrWrap.classList.remove('err');
+  // Самовывоз без адреса ресторана недопустим даже теоретически: чип скрыт
+  // (openCart) и setFulfillment() нормализует тип, но проверка обязана быть
+  // и здесь — это последняя точка перед созданием заказа.
+  if(fulfillmentType==='pickup'&&!isPickupAvailable(curRest)){
+    showToast('Самовывоз недоступен — у ресторана не указан адрес');
+    return false;
+  }
   const phoneField=document.getElementById('c-phone');
   const phoneWrap=phoneField.closest('.field');
   if(!normalizeRuPhone(phoneField.value)){
@@ -2103,9 +2226,12 @@ async function openQR(){
     // поллинга нет.
     drawQR();await startNewQRTimer();go('qr');
   }catch(err){
-    // resolveInitialOrder различает fresh HTTP 4xx и неизвестный результат:
+    // resolveInitialOrder различает однозначный отказ и неизвестный результат:
     // первый очищает capability, второй сохраняет её только для recover.
-    if(USE_API&&readPendingOrderCredentials()?.submittedAt){
+    // Однозначный отказ (4xx, ORDERING_UNAVAILABLE) обязан оставить
+    // пользователя на форме оформления с обычным сообщением — экран
+    // восстановления существует только для реально неизвестного исхода.
+    if(!isDeterministicRefusal(err)&&USE_API&&readPendingOrderCredentials()?.submittedAt){
       // POST мог дойти до сервера. Не оставляем пользователя на редактируемой
       // корзине: повторный тап обязан сначала выяснить судьбу заказа A.
       showInitialOrderRecoveryPending(false);
@@ -2161,9 +2287,7 @@ function renderWaitForRestaurant(){
   ic.innerHTML=uiIcon('clock');ic.style.animation='none';
   requestAnimationFrame(()=>{ic.style.animation='iconpop .5s cubic-bezier(.3,1.4,.4,1), pulse-glow 1.4s ease-in-out .5s infinite';});
   document.getElementById('statusbg').style.background='';
-  document.getElementById('st-next').style.display='block';
   document.getElementById('st-final').style.display='none';
-  document.getElementById('st-demowrap').style.display='block';
 }
 function responseTimerTick(){
   const sub=document.getElementById('st-substate');
@@ -2224,6 +2348,11 @@ function openStatus(){
   clearTimeout(preAutoTimer);
   preAutoTimer=setTimeout(renderWaitForRestaurant,BANK_CONFIRM_DELAY_MS);
 }
+// Продвижение по статусам в demo-режиме (USE_API === false). Кнопки
+// «Следующий статус →» в разметке больше нет — она была demo-контролом и
+// уезжала в production HTML; сам переход остаётся как функция состояния,
+// которую вызывает тестовая обвязка. В API-режиме статус двигает ресторан, и
+// этот путь недостижим.
 function nextStatus(){
   if(inPreStatus){
     clearInterval(preTimer);clearTimeout(preAutoTimer);preDeadline=null; // ресторан принял — окно ожидания больше не актуально, не даём его случайно переиспользовать
@@ -2280,6 +2409,7 @@ function updateRejectedActionButton(refundStatus){
 let rejOrderCodeShown=null;
 function openRejected(reason,order){
   const refundStatus=order?order.refund_status:'none';
+  hideRecoveryLeaveButton(); // экран переиспользуется — выход принадлежит только восстановлению
   const alreadyShown=cur('rejected')&&rejOrderCodeShown===currentOrderCode;
   renderRefundLine(refundStatus,currentOrderAmount);
   updateRejectedActionButton(refundStatus);
@@ -2323,6 +2453,7 @@ function openPaymentFailed(){
   document.getElementById('rej-title').textContent='Оплата не прошла';
   document.getElementById('rej-explain').textContent='Банк отклонил платёж или соединение прервалось — деньги не списаны.';
   document.getElementById('rej-refund-line').style.display='none';
+  hideRecoveryLeaveButton();
   const btn=document.getElementById('rej-action-btn');
   btn.textContent='Попробовать снова';btn.onclick=retryPaymentFlow;
   document.getElementById('statusbg').style.display='none';
@@ -2524,8 +2655,6 @@ function renderAwaitingPayment(order){
   document.getElementById('st-substate').textContent='Оплата пока не завершена.';
   document.getElementById('st-substate').style.display='block';
   const ic=document.getElementById('st-icon');ic.innerHTML=uiIcon('payment');ic.style.animation='none';
-  document.getElementById('st-next').style.display='none';
-  document.getElementById('st-demowrap').style.display='none';
   document.getElementById('st-cancel-wrap').style.display='none';
   document.getElementById('st-final').style.display='none';
   document.getElementById('st-pending-pay-wrap').style.display='flex';
@@ -2555,6 +2684,7 @@ function openOrderNotFound(){
   document.getElementById('rej-title').textContent='Не удалось найти заказ';
   document.getElementById('rej-explain').textContent='Возможно, он отменён или устарел. Если это ошибка — напишите в поддержку.';
   document.getElementById('rej-refund-line').style.display='none';
+  hideRecoveryLeaveButton();
   const btn=document.getElementById('rej-action-btn');
   btn.textContent='На главную';btn.onclick=resetAll;
   document.getElementById('statusbg').style.display='none';
@@ -2671,8 +2801,6 @@ async function pollOrderOnce(){
     }
     document.getElementById('st-substate').style.display='block';
     const ic=document.getElementById('st-icon');ic.innerHTML=uiIcon('clock');
-    document.getElementById('st-next').style.display='none';
-    document.getElementById('st-demowrap').style.display='none';
     document.getElementById('st-cancel-wrap').style.display='block';
   }else if(stepSet().statusToStep[order.status]!==undefined){
     inPreStatus=false;
@@ -2688,8 +2816,6 @@ async function pollOrderOnce(){
     // через живой poll в открытой вкладке.
     showStatusSpinner(false);
     document.getElementById('st-progress').style.display='flex';
-    document.getElementById('st-next').style.display='none'; // статус двигает ресторан по-настоящему, не демо-кнопка
-    document.getElementById('st-demowrap').style.display='none';
     document.getElementById('st-cancel-wrap').style.display='none';
     // Stage 33 — «Заказ получен» видна ТОЛЬКО пока курьер везёт заказ.
     // Источник истины — серверный order.status на каждом poll-тике, не
@@ -2918,11 +3044,9 @@ function applySharedOrderToDom(order){
     document.getElementById('st-substate').style.display='none';
   }
   // Read-only просмотр — ни одного владельческого действия. Выполняется
-  // ПОСЛЕДНИМ: renderStatus() выше сама переключает st-next/st-demowrap/
-  // st-final по statusStep (последний шаг vs нет) — эта правка должна
-  // побеждать после неё, иначе владельческие demo-кнопки снова появятся.
-  document.getElementById('st-next').style.display='none';
-  document.getElementById('st-demowrap').style.display='none';
+  // ПОСЛЕДНИМ: renderStatus() выше сама переключает st-final по statusStep
+  // (последний шаг vs нет) — эта правка должна побеждать после неё, иначе
+  // владельческие кнопки снова появятся.
   document.getElementById('st-cancel-wrap').style.display='none';
   document.getElementById('st-pending-pay-wrap').style.display='none';
   document.getElementById('st-final').style.display='none';

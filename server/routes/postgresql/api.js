@@ -120,10 +120,21 @@ function bearerToken(req) {
 // payment attempt may be materialized. This guard runs before any orderService
 // write and is deliberately distinct from mock: mock is still forbidden in
 // production by services/config/env.js.
+// `code` здесь — не украшение ответа, а контракт. 503 сам по себе неоднозначен:
+// его может вернуть и промежуточный слой (nginx, балансировщик) уже ПОСЛЕ того,
+// как запрос дошёл до приложения, и тогда судьба заказа клиенту неизвестна.
+// Этот же гейт стоит ДО любой записи orderService, поэтому здесь заказа
+// заведомо нет — клиент обязан отличать этот случай и не запускать recovery
+// (см. isDeterministicRefusal() в client/js/app.js).
+const ORDERING_UNAVAILABLE_CODE = 'ORDERING_UNAVAILABLE';
+
 function requirePaymentProviderEnabled(req, res, next) {
   if (paymentService.providerName !== 'disabled') return next();
   res.set('Cache-Control', 'no-store');
-  return res.status(503).json({ error: 'Оформление заказов временно недоступно' });
+  return res.status(503).json({
+    error: 'Оформление заказов временно недоступно',
+    code: ORDERING_UNAVAILABLE_CODE,
+  });
 }
 
 // Синхронна (как и в оригинале) — не делает SQL, только парсинг заголовков.

@@ -116,6 +116,8 @@ test('нормализация API: is_available 0/1 превращается в
 });
 
 test('demo-режим показывает свой пример недоступного блюда тем же полем', () => {
-  const dataJs = fs.readFileSync(path.join(CLIENT, 'js', 'data.js'), 'utf8');
+  // Демо-датасет — тестовая фикстура, а не production-ассет: он больше не
+  // лежит в client/js/ и не публикуется на yaam.su.
+  const dataJs = fs.readFileSync(path.join(CLIENT, 'test', 'fixtures', 'data.js'), 'utf8');
   assert.match(dataJs, /available:false/, 'пример задаётся данными, а не позицией');
 });
