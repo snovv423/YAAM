@@ -84,10 +84,12 @@ test('validateSourceImage: принимает нормальное изобра�
   assert.equal(result.height, 480);
 });
 
-test('processImage: создаёт ровно 4 WebP-варианта (thumb/card/full/master) с корректными размерами', async () => {
+test('processImage: создаёт ровно 5 WebP-вариантов (thumb/card/card2x/full/master) с корректными размерами', async () => {
   const src = await makeJpeg(2000, 1000);
   const result = await processImage(src);
-  assert.deepEqual(Object.keys(result.variants).sort(), ['card', 'full', 'master', 'thumb']);
+  // card2x добавлен для HiDPI: на iPhone DPR3 и Retina-десктопе карточке нужно
+  // около 1080 px, а card отдавал 800 — браузер растягивал растр в 1.35 раза.
+  assert.deepEqual(Object.keys(result.variants).sort(), ['card', 'card2x', 'full', 'master', 'thumb']);
   for (const [name, opts] of Object.entries(VARIANTS)) {
     const v = result.variants[name];
     assert.ok(v.buffer.toString('ascii', 8, 12) === 'WEBP', `${name} должен быть настоящим WebP`);
@@ -138,8 +140,8 @@ test('processImage: EXIF orientation from iPhone/camera is applied before editor
 
 // --- Stage 5B.1: master-вариант (сохранение для будущей повторной генерации) ---
 
-test('PUBLIC_VARIANT_NAMES: содержит ровно thumb/card/full, БЕЗ master (не публичный вариант)', () => {
-  assert.deepEqual(PUBLIC_VARIANT_NAMES.sort(), ['card', 'full', 'thumb']);
+test('PUBLIC_VARIANT_NAMES: содержит ровно thumb/card/card2x/full, БЕЗ master (не публичный вариант)', () => {
+  assert.deepEqual(PUBLIC_VARIANT_NAMES.sort(), ['card', 'card2x', 'full', 'thumb']);
   assert.ok(!PUBLIC_VARIANT_NAMES.includes('master'));
 });
 
@@ -247,3 +249,25 @@ for (const scenario of FOOD_SCENARIOS) {
     }
   });
 }
+
+// HiDPI-вариант обязан быть той же обработки, что и card: разное качество
+// означало бы, что на устройствах с разным DPR у одной фотографии разный цвет
+// и микроконтраст.
+test('card2x: между card и full по размеру, ровно то же качество, что у card', async () => {
+  const src = await makeJpeg(3000, 1500);
+  const result = await processImage(src);
+  assert.ok(result.variants.card2x.width > result.variants.card.width,
+    'HiDPI-вариант обязан быть крупнее card, иначе он бессмысленен');
+  assert.ok(result.variants.card2x.width < result.variants.full.width,
+    'и легче full, иначе проще было бы отдавать full');
+  assert.equal(VARIANTS.card2x.quality, VARIANTS.card.quality);
+  assert.ok(Math.abs(result.variants.card2x.width / result.variants.card2x.height - 2) < 0.05,
+    'пропорции исходника сохранены — никакого растяжения');
+});
+
+test('card2x покрывает измеренную потребность Retina (около 1080 px)', () => {
+  assert.ok(VARIANTS.card2x.maxEdge >= 1086,
+    `нужно не меньше 1086 px (iPhone DPR3: 362 CSS x 3), сейчас ${VARIANTS.card2x.maxEdge}`);
+  assert.ok(VARIANTS.card2x.maxEdge < VARIANTS.full.maxEdge,
+    'но не full — иначе каждая карточка тянула бы 1920 px');
+});

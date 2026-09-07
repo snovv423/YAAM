@@ -104,8 +104,8 @@ test('A: валидное изображение тяжелее прежних 1
   assert.equal(meta.format, 'jpeg');
 
   const out = await pipeline.processImage(bigJpeg);
-  assert.deepEqual(Object.keys(out.variants).sort(), ['card', 'full', 'master', 'thumb']);
-  const edges = { thumb: 320, card: 800, full: 1920, master: 3200 };
+  assert.deepEqual(Object.keys(out.variants).sort(), ['card', 'card2x', 'full', 'master', 'thumb']);
+  const edges = { thumb: 320, card: 800, card2x: 1200, full: 1920, master: 3200 };
   for (const [name, maxEdge] of Object.entries(edges)) {
     const v = out.variants[name];
     assert.ok(Math.max(v.width, v.height) <= maxEdge, `${name}: длинная сторона ${v.width}x${v.height} > ${maxEdge}`);
@@ -207,7 +207,7 @@ test('E: обычные JPEG/PNG/WebP меньше 15 МиБ обрабатыв�
   for (const [label, buf] of [['jpeg', smallJpeg], ['png', png], ['webp', webp]]) {
     assert.ok(buf.length < 15 * MiB);
     const out = await pipeline.processImage(buf);
-    assert.equal(Object.keys(out.variants).length, 4, `${label}: должно быть 4 варианта`);
+    assert.equal(Object.keys(out.variants).length, 5, `${label}: должно быть 5 вариантов`);
     assert.equal(out.sourceFormat, label);
   }
 });

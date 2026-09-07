@@ -212,7 +212,7 @@ function applyElementCrop(img){
 }
 function normalizeRestaurant(r){
   return{
-    id:r.id, name:r.name, cui:r.cuisine||'', photoUrl:r.primary_photo?r.primary_photo.urls.card:'', phone:r.phone||'', address:r.address||'',
+    id:r.id, name:r.name, cui:r.cuisine||'', photoUrl:r.primary_photo?r.primary_photo.urls.card:'', photoUrl2x:r.primary_photo?(r.primary_photo.urls.card2x||''):'', phone:r.phone||'', address:r.address||'',
     g:'linear-gradient(135deg,#3d6b4e,#1e4630)', im:null, gallery:normalizePhotoGallery(r.gallery),
     rate:r.rating||0, votes:r.rating_count||0, ordersCount:r.orders_count??null,
     hours:r.hours||'', deliv:r.delivery_price||0, min:r.min_order||0,
@@ -221,7 +221,7 @@ function normalizeRestaurant(r){
       cat:cat.name,
       items:cat.items.map(it=>({
         id:it.id, n:it.name, d:it.description||'', p:it.price,
-        g:'linear-gradient(135deg,#3d6b4e,#1e4630)', im:null, photoUrl:it.primary_photo?it.primary_photo.urls.card:'', photoCrop:it.primary_photo&&it.primary_photo.crops?it.primary_photo.crops.menu_card:null, photoRotation:it.primary_photo?Number(it.primary_photo.rotation)||0:0,
+        g:'linear-gradient(135deg,#3d6b4e,#1e4630)', im:null, photoUrl:it.primary_photo?it.primary_photo.urls.card:'', photoUrl2x:it.primary_photo?(it.primary_photo.urls.card2x||''):'', photoCrop:it.primary_photo&&it.primary_photo.crops?it.primary_photo.crops.menu_card:null, photoRotation:it.primary_photo?Number(it.primary_photo.rotation)||0:0,
         gallery:normalizePhotoGallery(it.gallery),
         pop:!!it.is_popular, available:it.is_available!==0,
         w:it.weight_g, kcal:it.kcal, prot:it.protein_g, fat:it.fat_g, carb:it.carbs_g, s:it.composition,
@@ -1078,12 +1078,29 @@ function initMenuScrollFX(){
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function key(ci,ii){return ci+'_'+ii;}
 function findItem(k){const[ci,ii]=k.split('_').map(Number);const d=curRest.menu[ci].items[ii];return{n:d.n.replace(/'/g,''),p:d.p,id:d.id||null};}
+// Выбор разрешения отдан браузеру, а не JS-условию по ширине окна: он один
+// знает и devicePixelRatio, и реальную ширину вёрстки, и уже загруженные
+// варианты, и может учесть настройки экономии трафика.
+//
+// Измеренные ширины карточки (CSS px): 362 при 390, 386 при 414, 352 при 768,
+// 541 при 1440, 468 при 1920. Отсюда и описание sizes ниже. Кандидатов ровно
+// два — 800 и 1200: при DPR 1 браузер берёт 800 и ничего лишнего не качает,
+// при DPR 2-3 берёт 1200 и перестаёт растягивать растр.
+const MENU_PHOTO_SIZES='(max-width:719px) calc(100vw - 28px),(min-width:1600px) 470px,(min-width:1100px) 545px,360px';
+function menuPhotoSrcset(d){
+  // Пусто, если у фотографии ещё нет HiDPI-варианта: старые и новые медиа
+  // сосуществуют, и ссылаться на несуществующий файл нельзя — внутри srcset
+  // это дало бы 404 и сломанную карточку вместо фото.
+  if(!d||!d.photoUrl||!d.photoUrl2x)return '';
+  return ` data-srcset="${esc(d.photoUrl)} 800w, ${esc(d.photoUrl2x)} 1200w" sizes="${MENU_PHOTO_SIZES}"`;
+}
 function dishCard(d,ci,ii){
   const k=key(ci,ii);const q=cart[k]?cart[k].q:0;const so=d.available===false;
   const hasSrc=!!(d.photoUrl||d.im);
   const photoSrc=hasSrc?(d.photoUrl||U(d.im,700)):'';
   const safePhotoSrc=esc(photoSrc);
-  const photo=hasSrc?`<img data-src="${safePhotoSrc}"${cropDataAttrs(d.photoCrop,d.photoRotation)} loading="lazy" decoding="async" onerror="this.dataset.failed='1';this.closest('.dphoto').classList.add('nophoto');this.removeAttribute('src')">`:'';
+  const srcsetAttr=menuPhotoSrcset(d);
+  const photo=hasSrc?`<img data-src="${safePhotoSrc}"${srcsetAttr}${cropDataAttrs(d.photoCrop,d.photoRotation)} loading="lazy" decoding="async" onerror="this.dataset.failed='1';this.closest('.dphoto').classList.add('nophoto');this.removeAttribute('src')">`:'';
   return `<div class="dish ${so?'dis':''}" ${so?'':`onclick="openDish('${k}')"`}>
     <div class="dphoto ${hasSrc?'':'nophoto'}" style="background:${d.g}">${photo}
     <div class="dplate"><div class="dname">${esc(d.n)}${d.pop?' <span class="hit">Хит</span>':''}</div><div class="ddesc">${esc(d.d)}</div></div>
@@ -1094,6 +1111,20 @@ function renderMenuBody(){
   curRest.menu.forEach((c,ci)=>{html+=`<div class="cat-h" id="sec${ci}">${esc(c.cat)}</div>`+c.items.map((d,ii)=>dishCard(d,ci,ii)).join('');});
   document.getElementById('m-body').innerHTML=html;
   initDishImageVirtualization();
+}
+// srcset назначается ВМЕСТЕ с src и обязательно раньше него: если сначала
+// поставить src, браузер уже начнёт грузить 800-й вариант, и появившийся следом
+// srcset приведёт ко второй загрузке той же фотографии.
+function applyPhotoSources(img){
+  const set=img.dataset.srcset;
+  if(set)img.setAttribute('srcset',set);
+  img.src=img.dataset.src;
+}
+// Выгрузка снимает оба источника — иначе srcset продолжал бы удерживать
+// картинку и защита памяти на длинном меню перестала бы работать.
+function clearPhotoSources(img){
+  if(img.getAttribute('srcset'))img.removeAttribute('srcset');
+  if(img.getAttribute('src'))img.removeAttribute('src');
 }
 let dishImageObserver=null,dishImageEvictObserver=null;
 // Измерено на production до правки: после прокрутки длинного меню 72 из 82
@@ -1126,7 +1157,7 @@ function initDishImageVirtualization(){
       const box=entry.boundingClientRect;
       const inView=box.bottom>0&&box.top<window.innerHeight;
       img.setAttribute('fetchpriority',inView?'high':'low');
-      img.src=img.dataset.src;
+      applyPhotoSources(img);
       applyElementCrop(img);
     });
   },{rootMargin:`${IMG_LOAD_AHEAD} 0px`});
@@ -1143,7 +1174,7 @@ function initDishImageVirtualization(){
       if(box.width===0&&box.height===0)return;
       const img=entry.target.querySelector('img[data-src]');
       if(!img||img.dataset.failed==='1')return;
-      if(img.getAttribute('src'))img.removeAttribute('src');
+      clearPhotoSources(img);
     });
   },{rootMargin:`${IMG_EVICT_BEYOND} 0px`});
 
@@ -1163,7 +1194,7 @@ function primeFirstScreenImages(photos){
     if(!img||img.dataset.failed==='1'||img.getAttribute('src'))return;
     img.setAttribute('fetchpriority','high');
     img.setAttribute('loading','eager');
-    img.src=img.dataset.src;
+    applyPhotoSources(img);
     applyElementCrop(img);
   });
 }

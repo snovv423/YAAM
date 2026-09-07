@@ -26,7 +26,8 @@ function photoRow(overrides) {
 test('toPublicPhotoDTO: содержит только публичные alt/urls/crops — ничего внутреннего', () => {
   const dto = toPublicPhotoDTO(stubProvider, photoRow({ alt_text: 'Зал ресторана' }));
   assert.deepEqual(Object.keys(dto).sort(), ['alt', 'crops', 'rotation', 'urls']);
-  assert.deepEqual(Object.keys(dto.urls).sort(), ['card', 'full', 'thumb']);
+  // card2x — публичный HiDPI-вариант, добавленный к прежним трём.
+  assert.deepEqual(Object.keys(dto.urls).sort(), ['card', 'card2x', 'full', 'thumb']);
   assert.equal(dto.alt, 'Зал ресторана');
   assert.equal(dto.rotation, 0);
 });
