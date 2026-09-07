@@ -590,10 +590,26 @@ async function renderList(instant,city=selectedCity,renderSeq=null,preloaded=nul
   html+=openR.map(cardHTML).join('');
   if(closedR.length) html+=`<div class="grouplbl">Закрыты сейчас</div>`+closedR.map(cardHTML).join('');
   el.innerHTML=html;
+  // Меню открытых ресторанов подтягивается заранее, пока человек смотрит на
+  // главную: запрос тот же самый, просто сделанный до клика, а не после него.
+  // Только открытые (в закрытый не пойдут) и не больше двух за раз — иначе
+  // предзагрузка отняла бы канал у самой главной.
+  schedulePrefetch(openR.map(r=>r.id));
   if(instant){return true;}      // смена города — сразу видимы, без анимации
   setTimeout(applyStagger,10);
   return true;
 }
+// На десктопе намерение видно раньше клика: наведение или фокус на карточке —
+// повод догрузить меню, если оно ещё не в памяти. На тач-устройствах события
+// hover не возникают, и там работает только idle-предзагрузка выше.
+document.addEventListener('pointerover',(e)=>{
+  if(!e.isPrimary||e.pointerType!=='mouse')return;
+  const card=e.target&&e.target.closest&&e.target.closest('#list .card');
+  if(!card)return;
+  const m=(card.getAttribute('onclick')||'').match(/openRest\((\d+)/);
+  if(m)prefetchRestaurant(Number(m[1]));
+},{passive:true});
+
 function shut(n){showToast(n+' сейчас закрыт — загляните позже');}
 function showToast(msg){
   let t=document.getElementById('toast');
@@ -868,14 +884,101 @@ function renderStatus(){
 }
 
 // Размытие при входе в ресторан
+// ---------------------------------------------------------------------------
+// Предзагрузка меню ресторана
+// ---------------------------------------------------------------------------
+//
+// Измерено на production до правки: клик по ресторану -> первые карточки 255 мс
+// на быстрой сети и 897 мс на Fast 3G, и всё это время уходило на ОДИН запрос
+// /api/restaurants/<id> (102 КБ). Данные при этом атомарны — названия, цены и
+// доступность приходят вместе, догонять нечему. То есть ждать было не за чем:
+// тот же запрос можно было сделать заранее, пока человек смотрит на главную.
+//
+// Ответ кладётся в память на короткий срок и обязательно перепроверяется в фоне
+// при открытии: цена, is_available и открыт ли ресторан — коммерческие данные,
+// их нельзя показывать из долгоживущего кэша. Схема «показать сразу, тут же
+// сверить» даёт мгновенное открытие и при этом не врёт: если фоновая проверка
+// вернула другие данные, экран перерисовывается по ним.
+const RESTAURANT_CACHE_TTL_MS=90000;
+const restaurantCache=new Map(); // id -> {at, data}
+let prefetchInFlight=0;
+const PREFETCH_MAX_PARALLEL=1; // меню тяжёлое; несколько сразу отняли бы канал у главной
+
+function cachedRestaurant(id){
+  const hit=restaurantCache.get(String(id));
+  if(!hit)return null;
+  if(Date.now()-hit.at>RESTAURANT_CACHE_TTL_MS){restaurantCache.delete(String(id));return null;}
+  return hit.data;
+}
+function putRestaurantCache(id,data){
+  restaurantCache.set(String(id),{at:Date.now(),data});
+}
+// Тихая предзагрузка: ошибки не показываются пользователю — он о ней не просил.
+function prefetchRestaurant(id){
+  if(!USE_API||!id)return;
+  if(cachedRestaurant(id)||prefetchInFlight>=PREFETCH_MAX_PARALLEL)return;
+  prefetchInFlight++;
+  api.getRestaurant(id)
+    .then(data=>{putRestaurantCache(id,data);})
+    .catch(()=>{})
+    .finally(()=>{prefetchInFlight--;});
+}
+// Запускается, когда браузер свободен, чтобы не отнимать время у первой
+// отрисовки главной. requestIdleCallback есть не везде — тогда обычный таймер
+// с запасом, тоже после того, как главная показана.
+function schedulePrefetch(ids){
+  const run=()=>{ids.slice(0,2).forEach(prefetchRestaurant);};
+  if(typeof requestIdleCallback==='function')requestIdleCallback(run,{timeout:2500});
+  else setTimeout(run,1200);
+}
+
+// Фоновая сверка после открытия из кэша. Перерисовываем ТОЛЬКО если что-то
+// действительно изменилось: цена, доступность, состав меню или режим работы.
+// Сравнение по сериализованному снимку значимых полей, а не по времени — иначе
+// каждое открытие дёргало бы перерисовку 109 карточек без причины.
+function commerceSnapshot(raw){
+  try{
+    return JSON.stringify({
+      open:raw.is_open,min:raw.min_order,deliv:raw.delivery_price,
+      items:(raw.menu||[]).map(c=>c.items.map(i=>[i.id,i.price,i.is_available])),
+    });
+  }catch(e){return null;}
+}
+function revalidateRestaurant(id){
+  if(!USE_API)return;
+  api.getRestaurant(id).then(fresh=>{
+    const wasCached=cachedRestaurant(id);
+    putRestaurantCache(id,fresh);
+    // Пользователь мог уже уйти на другой экран или в другой ресторан.
+    if(!curRest||String(curRest.id)!==String(id)||!cur('menu'))return;
+    if(wasCached&&commerceSnapshot(wasCached)===commerceSnapshot(fresh))return;
+    curRest=normalizeRestaurant(fresh);
+    // Перерисовывается только то, что реально зависит от изменившихся данных:
+    // список категорий и тело меню. Полного переоткрытия экрана нет — позиция
+    // прокрутки и открытая корзина сохраняются.
+    const tabs=curRest.menu.map(c=>c.cat);
+    document.getElementById('m-tabs').innerHTML=tabs.map((t,i)=>`<button type="button" class="mtab ${i===0?'on':''}" onclick="scrollToMenuSection(${i})">${esc(t)}</button>`).join('');
+    renderMenuBody();refreshAllVisible();
+  }).catch(()=>{});
+}
+
 async function doOpenRest(id){
   const same=curRest&&curRest.id===id;
   if(USE_API){
-    try{
-      curRest=normalizeRestaurant(await api.getRestaurant(id));
-    }catch(err){
-      showToast('Не удалось открыть ресторан — проверьте соединение');
-      return;
+    const cached=cachedRestaurant(id);
+    if(cached){
+      // Уже есть — открываем немедленно и одновременно идём сверять.
+      curRest=normalizeRestaurant(cached);
+      revalidateRestaurant(id);
+    }else{
+      try{
+        const fresh=await api.getRestaurant(id);
+        putRestaurantCache(id,fresh);
+        curRest=normalizeRestaurant(fresh);
+      }catch(err){
+        showToast('Не удалось открыть ресторан — проверьте соединение');
+        return;
+      }
     }
   }else{
     curRest=restaurants.find(r=>r.id===id);
@@ -992,22 +1095,77 @@ function renderMenuBody(){
   document.getElementById('m-body').innerHTML=html;
   initDishImageVirtualization();
 }
-let dishImageObserver=null;
+let dishImageObserver=null,dishImageEvictObserver=null;
+// Измерено на production до правки: после прокрутки длинного меню 72 из 82
+// изображений оказывались выгруженными (src снят), и при возврате наверх
+// карточки заново «догоняли» на глазах — при быстрой прокрутке 9 из 10 видимых
+// карточек были не готовы. Причина: один и тот же порог и на загрузку, и на
+// выгрузку — стоило картинке выйти за 1200px, её src немедленно снимался.
+//
+// Теперь порогов два. Загрузка идёт с запасом примерно в два экрана вперёд,
+// чтобы карточка была готова ДО того, как до неё долистали. Выгрузка — только
+// когда картинка ушла очень далеко (около шести экранов): обычная прокрутка
+// вверх-вниз в такое окно не попадает, поэтому ничего не перезагружается, а
+// защита памяти на длинном меню сохраняется.
+const IMG_LOAD_AHEAD='150%';
+const IMG_EVICT_BEYOND='600%';
 function initDishImageVirtualization(){
   if(dishImageObserver)dishImageObserver.disconnect();
+  if(dishImageEvictObserver)dishImageEvictObserver.disconnect();
   const photos=[...document.querySelectorAll('#m-body .dphoto')];
+
   dishImageObserver=new IntersectionObserver((entries)=>{
     entries.forEach(entry=>{
+      if(!entry.isIntersecting)return;
       const img=entry.target.querySelector('img[data-src]');
       if(!img||img.dataset.failed==='1')return;
-      if(entry.isIntersecting){
-        if(!img.getAttribute('src')){img.src=img.dataset.src;applyElementCrop(img);}
-      }else{
-        img.removeAttribute('src');
-      }
+      if(img.getAttribute('src'))return;
+      // Приоритет назначается ДО src — после старта загрузки менять его поздно.
+      // На узком канале это и решает, что человек увидит первым: карточки в
+      // самом окне обслуживаются раньше тех, что подгружаются про запас.
+      const box=entry.boundingClientRect;
+      const inView=box.bottom>0&&box.top<window.innerHeight;
+      img.setAttribute('fetchpriority',inView?'high':'low');
+      img.src=img.dataset.src;
+      applyElementCrop(img);
     });
-  },{rootMargin:'1200px 0px'});
-  photos.forEach(photo=>dishImageObserver.observe(photo));
+  },{rootMargin:`${IMG_LOAD_AHEAD} 0px`});
+
+  dishImageEvictObserver=new IntersectionObserver((entries)=>{
+    entries.forEach(entry=>{
+      if(entry.isIntersecting)return;
+      // Экран меню на момент первой отрисовки ещё скрыт (go('menu') вызывается
+      // позже), а у скрытого элемента нулевая геометрия — и наблюдатель честно
+      // сообщает «не пересекается» про ВСЕ карточки сразу. Без этой проверки
+      // первый же колбэк снимал src, включая только что выставленный на первом
+      // экране: измерено — 2 картинки получали src и тут же теряли его.
+      const box=entry.boundingClientRect;
+      if(box.width===0&&box.height===0)return;
+      const img=entry.target.querySelector('img[data-src]');
+      if(!img||img.dataset.failed==='1')return;
+      if(img.getAttribute('src'))img.removeAttribute('src');
+    });
+  },{rootMargin:`${IMG_EVICT_BEYOND} 0px`});
+
+  photos.forEach(photo=>{dishImageObserver.observe(photo);dishImageEvictObserver.observe(photo);});
+  // Приоритетная загрузка первого экрана — после того, как экран меню реально
+  // показан: до этого у карточек нет размеров и приоритет назначать нечему.
+  requestAnimationFrame(()=>primeFirstScreenImages(photos));
+}
+// Первые карточки не должны ждать своей очереди в общем потоке: их изображения
+// запрашиваются сразу и с высоким приоритетом, чтобы выиграть гонку у того, что
+// лежит ниже экрана. Высокий приоритет получают ровно первые несколько — иначе
+// «приоритет» перестаёт что-либо значить.
+const FIRST_SCREEN_IMAGES=6;
+function primeFirstScreenImages(photos){
+  photos.slice(0,FIRST_SCREEN_IMAGES).forEach(photo=>{
+    const img=photo.querySelector('img[data-src]');
+    if(!img||img.dataset.failed==='1'||img.getAttribute('src'))return;
+    img.setAttribute('fetchpriority','high');
+    img.setAttribute('loading','eager');
+    img.src=img.dataset.src;
+    applyElementCrop(img);
+  });
 }
 function qtyHtml(k,q){return `<div class="qty"><button onclick="dec('${k}')">−</button><span>${q}</span><button onclick="inc('${k}',event)">+</button></div>`;}
 function addItem(k,e){const it=findItem(k);cart[k]={n:it.n,p:it.p,q:1,menuItemId:it.id};refreshAll(k);if(e)flyAnim(e);}
