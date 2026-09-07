@@ -101,9 +101,13 @@ async function goToCheckoutWithOneDish(page: Page) {
   // на широком экране заказ постоянно виден справа (постоянная корзина), и
   // нижняя плашка там не показывается, чтобы не дублировать её же итог и
   // кнопку. На узком — прежняя цепочка «плашка -> шторка -> оформить».
-  const deskCart = page.locator('#deskcart');
-  if (await deskCart.isVisible()) {
-    const deskCta = deskCart.locator('.dc-cta');
+  // Признак — класс, который приложение ставит само, а не мгновенная видимость
+  // панели: появление корзины анимируется шириной колонки грида, и в первый
+  // момент после добавления блюда ширина ещё нулевая. Проверка по классу
+  // спрашивает у приложения решение, а не подглядывает в середину перехода.
+  const deskCartActive = await page.locator('#menu.has-cart').count() > 0;
+  if (deskCartActive) {
+    const deskCta = page.locator('#deskcart .dc-cta');
     await expect(deskCta).toBeVisible();
     await deskCta.click();
   } else {

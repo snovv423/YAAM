@@ -127,21 +127,36 @@
   <div class="vote-chip" id="vote-chip" onclick="openVote()">кого ждём</div>
   <a class="help-link" href="https://t.me/YAAMHELP" target="_blank" rel="noopener">HELP</a>
   <footer class="site-footer">
-    <!-- Официальные контакты продавца прямо на главной, а не только внутри
-         юридических страниц: их обязан видеть и обычный посетитель, и
-         платёжный модератор, не проваливаясь в подвал документов. -->
-    <div class="site-contacts">
-      <a href="mailto:supportyaam@gmail.com">supportyaam@gmail.com</a>
-      <a href="tel:+79635820571">+7 963 582-05-71</a>
-      <a href="https://t.me/YAAMHELP" target="_blank" rel="noopener">@YAAMHELP</a>
+    <!-- Футер был стеной текста: почта, телефон, Telegram и семь юридических
+         ссылок россыпью. Теперь три компактных стеклянных действия, каждое
+         открывает свою панель. Содержимое панелей лежит ЗДЕСЬ, в разметке, а не
+         собирается в JS: так адреса документов и контакты остаются в статическом
+         HTML — их видит и поисковик, и платёжный модератор, открывший исходник.
+         Ни один URL и ни один документ не изменён. -->
+    <div class="foot-actions">
+      <button type="button" class="foot-chip" id="fc-contacts" onclick="openFootPanel('contacts')">Контакты</button>
+      <button type="button" class="foot-chip" id="fc-docs" onclick="openFootPanel('docs')">Документы</button>
+      <button type="button" class="foot-chip" id="fc-pay" onclick="openFootPanel('pay')">Оплата и доставка</button>
     </div>
-    <a href="legal/offer.html" target="_blank" rel="noopener">Публичная оферта</a>
-    <a href="legal/privacy.html" target="_blank" rel="noopener">Политика обработки персональных данных</a>
-    <a href="legal/personal-data-consent.html" target="_blank" rel="noopener">Согласие на обработку персональных данных</a>
-    <a href="legal/payment-refund.html" target="_blank" rel="noopener">Оплата и возврат</a>
-    <a href="legal/delivery.html" target="_blank" rel="noopener">Доставка</a>
-    <a href="legal/cookies.html" target="_blank" rel="noopener">Cookies</a>
-    <a href="legal/contacts.html" target="_blank" rel="noopener">Реквизиты и контакты</a>
+    <!-- Telegram здесь намеренно отсутствует: быстрый вход в поддержку — это
+         ссылка HELP выше, дублировать её ещё и в «Контактах» незачем. -->
+    <div class="fp-src" id="fp-src-contacts" hidden>
+      <a class="fp-item" href="mailto:supportyaam@gmail.com">
+        <span class="fp-k">Почта</span><span class="fp-v">supportyaam@gmail.com</span></a>
+      <a class="fp-item" href="tel:+79635820571">
+        <span class="fp-k">Телефон</span><span class="fp-v">+7 963 582-05-71</span></a>
+    </div>
+    <div class="fp-src" id="fp-src-docs" hidden>
+      <a class="fp-item" href="legal/offer.html" target="_blank" rel="noopener"><span class="fp-v">Публичная оферта</span></a>
+      <a class="fp-item" href="legal/privacy.html" target="_blank" rel="noopener"><span class="fp-v">Политика обработки персональных данных</span></a>
+      <a class="fp-item" href="legal/personal-data-consent.html" target="_blank" rel="noopener"><span class="fp-v">Согласие на обработку персональных данных</span></a>
+      <a class="fp-item" href="legal/cookies.html" target="_blank" rel="noopener"><span class="fp-v">Cookies</span></a>
+      <a class="fp-item" href="legal/contacts.html" target="_blank" rel="noopener"><span class="fp-v">Реквизиты и контакты</span></a>
+    </div>
+    <div class="fp-src" id="fp-src-pay" hidden>
+      <a class="fp-item" href="legal/payment-refund.html" target="_blank" rel="noopener"><span class="fp-v">Оплата и возврат</span></a>
+      <a class="fp-item" href="legal/delivery.html" target="_blank" rel="noopener"><span class="fp-v">Доставка</span></a>
+    </div>
   </footer>
 </div>
 
@@ -355,6 +370,18 @@
     <div class="vs-sub">Голосуйте за ресторан, которого не хватает — у кого больше голосов, того подключим следующим.</div>
   </div>
   <div class="vote-list" id="vote-list"></div>
+</div>
+
+<!-- Одна панель на все три действия: одновременно открытой может быть только
+     одна, поэтому и элемент один. На десктопе это плавающий стеклянный
+     popover, на мобильном — компактная нижняя панель (см. style.css). -->
+<div class="fp-overlay" id="fp-overlay" onclick="closeFootPanel()"></div>
+<div class="footpanel" id="footpanel" role="dialog" aria-modal="true" aria-labelledby="fp-title">
+  <div class="fp-head">
+    <div class="fp-title" id="fp-title"></div>
+    <button type="button" class="fp-x" id="fp-x" onclick="closeFootPanel()" aria-label="Закрыть">×</button>
+  </div>
+  <div class="fp-body" id="fp-body"></div>
 </div>
 
 <div class="cartbar" id="cartbar" style="display:none">

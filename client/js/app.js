@@ -3141,6 +3141,56 @@ function yaamConfirm(text,onYes,labels){
 function clearCart(){yaamConfirm('Очистить корзину?',()=>{cart={};closeSheet();refreshAllVisible();backToMenu();});}
 function refreshAllVisible(){document.querySelectorAll('[data-ctrl-key]').forEach(el=>{const k=el.dataset.ctrlKey;const c=cart[k];el.innerHTML=(c&&c.q>0)?qtyHtml(k,c.q):`<button class="add" onclick="addItem('${k}',event)">+</button>`;});updateBar();saveCartState();}
 // ---------------------------------------------------------------------------
+// Панели футера: «Контакты», «Документы», «Оплата и доставка»
+// ---------------------------------------------------------------------------
+//
+// Панель одна на три действия — открытой одновременно может быть только одна,
+// поэтому и элемент один, а содержимое берётся из скрытых блоков разметки
+// (#fp-src-*). Ни один адрес и ни один документ здесь не формируется кодом:
+// ссылки лежат в index.html и остаются в статическом HTML.
+const FOOT_PANELS={
+  contacts:{title:'Контакты',src:'fp-src-contacts',chip:'fc-contacts'},
+  docs:{title:'Документы',src:'fp-src-docs',chip:'fc-docs'},
+  pay:{title:'Оплата и доставка',src:'fp-src-pay',chip:'fc-pay'},
+};
+let footPanelOpen=null,footPanelReturnFocus=null;
+function openFootPanel(kind){
+  const cfg=FOOT_PANELS[kind];
+  if(!cfg)return;
+  if(footPanelOpen===kind){closeFootPanel();return;} // повторный тап по тому же чипу закрывает
+  const src=document.getElementById(cfg.src);
+  const body=document.getElementById('fp-body');
+  if(!src||!body)return;
+  body.innerHTML=src.innerHTML;
+  document.getElementById('fp-title').textContent=cfg.title;
+  document.getElementById('fp-overlay').classList.add('on');
+  document.getElementById('footpanel').classList.add('on');
+  Object.values(FOOT_PANELS).forEach(c=>{
+    const chip=document.getElementById(c.chip);
+    if(chip)chip.setAttribute('aria-expanded',String(c===cfg));
+  });
+  footPanelReturnFocus=document.activeElement;
+  footPanelOpen=kind;
+  // Прокрутку страницы не трогаем намеренно: любая её блокировка сдвигает
+  // позицию, а панель — не полноэкранный экран, а всплывающий слой.
+  const x=document.getElementById('fp-x');
+  if(x)requestAnimationFrame(()=>x.focus());
+}
+function closeFootPanel(){
+  if(!footPanelOpen)return;
+  document.getElementById('fp-overlay').classList.remove('on');
+  document.getElementById('footpanel').classList.remove('on');
+  Object.values(FOOT_PANELS).forEach(c=>{
+    const chip=document.getElementById(c.chip);
+    if(chip)chip.setAttribute('aria-expanded','false');
+  });
+  footPanelOpen=null;
+  if(footPanelReturnFocus&&typeof footPanelReturnFocus.focus==='function')footPanelReturnFocus.focus();
+  footPanelReturnFocus=null;
+}
+document.addEventListener('keydown',(e)=>{if(e.key==='Escape'&&footPanelOpen)closeFootPanel();});
+
+// ---------------------------------------------------------------------------
 // Постоянная корзина на широком экране
 // ---------------------------------------------------------------------------
 //
@@ -3158,7 +3208,7 @@ function deskCartLayout(){
 }
 // Ключи прошлого рендера: анимация появления вешается только на реально новые
 // строки, иначе она проигрывалась бы на всём списке при каждом нажатии +/−.
-let deskCartKeys=[],deskCartSum=null;
+let deskCartKeys=[],deskCartSum=null,deskCartClearTimer=null;
 function deskCartItemHTML(k,c,isNew){
   const key=esc(k);
   return `<div class="dc-item${isNew?' enter':''}" data-dc-key="${key}">
@@ -3171,32 +3221,38 @@ function deskCartItemHTML(k,c,isNew){
 }
 function renderDeskCart(){
   const el=document.getElementById('deskcart');
+  const menu=document.getElementById('menu');
   if(!el)return;
-  if(!deskCartLayout()){el.innerHTML='';deskCartKeys=[];deskCartSum=null;return;}
   const{sum,cnt}=totals();
+  // Панель существует только когда в заказе что-то есть. Класс на #menu
+  // управляет шириной колонки грида (см. .has-cart в style.css): каталог
+  // расширяется и сжимается переходом, а не скачком. Это чистое отображение —
+  // сам cart здесь не трогается.
+  const show=deskCartLayout()&&cnt>0;
+  if(menu)menu.classList.toggle('has-cart',show);
+  if(!show){
+    // Разметку сносим не сразу: пока идёт обратный переход, панель должна
+    // оставаться нарисованной, иначе исчезновение выглядит обрывом.
+    if(el.innerHTML&&!deskCartClearTimer){
+      deskCartClearTimer=setTimeout(()=>{deskCartClearTimer=null;
+        if(!(deskCartLayout()&&totals().cnt>0))el.innerHTML='';},360);
+    }
+    deskCartKeys=[];deskCartSum=null;
+    return;
+  }
+  if(deskCartClearTimer){clearTimeout(deskCartClearTimer);deskCartClearTimer=null;}
   const keys=Object.keys(cart);
   const prev=deskCartKeys;
   const below=curRest&&sum>0&&sum<curRest.min;
-  // Панель не исчезает при пустой корзине — иначе раскладка прыгала бы на
-  // каждое добавление и удаление последней позиции.
-  const body=cnt===0
-    ? `<div class="dc-empty">
-         <div class="dc-empty-mark" aria-hidden="true">
-           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 7h12l-1 12H7L6 7Z"/><path d="M9 7V5a3 3 0 0 1 6 0v2"/></svg>
-         </div>
-         <div class="dc-empty-t">Корзина пуста</div>
-         <div class="dc-empty-s">Добавьте блюда из меню — заказ соберётся здесь.</div>
-       </div>`
-    : `<div class="dc-list">${keys.map(k=>deskCartItemHTML(k,cart[k],!prev.includes(k))).join('')}</div>`
-      +(below?`<div class="dc-min">Минимальный заказ ${curRest.min} ₽ — добавьте ещё на ${curRest.min-sum} ₽</div>`:'');
   const bump=deskCartSum!==null&&deskCartSum!==sum?' bump':'';
   el.innerHTML=`
-    <div class="dc-head"><span class="dc-title">Ваш заказ</span>${cnt?`<span class="dc-count">${cnt} ${plural(cnt,'блюдо','блюда','блюд')}</span>`:''}</div>
-    ${body}
+    <div class="dc-head"><span class="dc-title">Ваш заказ</span><span class="dc-count">${cnt} ${plural(cnt,'блюдо','блюда','блюд')}</span></div>
+    <div class="dc-list">${keys.map(k=>deskCartItemHTML(k,cart[k],!prev.includes(k))).join('')}</div>
+    ${below?`<div class="dc-min">Минимальный заказ ${curRest.min} ₽ — добавьте ещё на ${curRest.min-sum} ₽</div>`:''}
     <div class="dc-foot">
       <div class="dc-total${bump}"><span>Итого</span><b>${sum} ₽</b></div>
-      <button type="button" class="dc-cta" onclick="openCart()"${cnt===0||below?' disabled':''}>Оформить заказ</button>
-      ${cnt?'<button type="button" class="dc-clear" onclick="clearCart()">Очистить корзину</button>':''}
+      <button type="button" class="dc-cta" onclick="openCart()"${below?' disabled':''}>Оформить заказ</button>
+      <button type="button" class="dc-clear" onclick="clearCart()">Очистить корзину</button>
     </div>`;
   deskCartKeys=keys;deskCartSum=sum;
 }

@@ -1065,3 +1065,167 @@
   .mtab{padding:10px 17px}
   .field{padding:14px 17px}
   .panel{padding:16px 18px}
+
+  /* ==========================================================================
+     POST-GLASS POLISH
+     ========================================================================== */
+
+  /* --- Зелёная полоса сверху ------------------------------------------------
+     Причина, а не симптом. На экране блюда сверху шла яркая зелёная линия во
+     всю ширину, и её же было видно при лёгком overscroll.
+     Измерено: getBoundingClientRect().top у BODY равнялся 14 — ровно margin-top
+     героя. Это схлопывание отступов: у #dish нет ни padding, ни border, поэтому
+     margin-top:14px у .dhero уходит наверх по цепочке и становится отступом
+     САМОГО body. В образовавшейся полосе видно канву, а канва и body раскрашены
+     по-разному: body — плоский #0A2417, канва — набор радиальных градиентов, из
+     которых верхний левый (#1B5639) как раз и даёт светло-зелёный.
+     Лечится двумя независимыми правками, потому что и причин две:
+       1) отступ переносится на контейнер как padding — схлопывать нечего;
+       2) канва приравнивается к фону страницы, чтобы никакой зазор и никакой
+          overscroll в принципе не мог показать другой цвет.
+     Фонов было два, и они не совпадали: канва (html, а днём — более специфичное
+     html.daytime с адаптивным градиентом) и поверх неё непрозрачный body
+     #0A2417. Body перекрывал канву на всей странице, поэтому наружу оба
+     градиента выходили ровно в двух местах — в этом шве и при overscroll.
+     Канва приравнивается к тому, что страница показывает на самом деле, то есть
+     к тёмному #0A2417. Обратный вариант — сделать body прозрачным и открыть
+     градиенты — проверен на скриншотах и отвергнут: фон становится заметно
+     светлее и спорит с тёмным стеклом, а это уже смена облика, а не доводка.
+     Сами правила фона не удалены, переопределён только цвет канвы; специфичность
+     селектора равна html.daytime, поэтому совпадение держится и днём, и ночью. */
+  html,html.daytime{background:#0A2417}
+
+  @media (min-width:720px){
+    /* Воздух сверху даёт контейнер, а не отступ героя. */
+    .hero,.dhero{margin-top:0}
+    #menu{padding-top:14px}
+  }
+
+  /* --- Карточка ресторана на desktop ---------------------------------------
+     Она выглядела почти квадратом (560×340, 1.65; на 1920 — 480×340, 1.41) при
+     мобильной пропорции около 1.9. Причина: .list остался flex-контейнером с
+     flex-direction:column, и `flex:1 1 340px` задавал не ширину, а ВЫСОТУ —
+     карточку растягивало по вертикали независимо от содержимого. Направление
+     исправлено, размеры подобраны под landscape-пропорцию мобильной карточки. */
+  @media (min-width:720px){
+    .list{flex-direction:row}
+    .list>.card{flex:1 1 320px;max-width:460px}
+    .photo{height:212px}
+  }
+  @media (min-width:1600px){
+    .list>.card{max-width:440px}
+    .photo{height:222px}
+  }
+
+  /* --- Карточка блюда на desktop -------------------------------------------
+     Была 860×1008 при квадратном герое 780×780 — выше любого из проверяемых
+     окон, то есть упиралась в него, а не парила в нём. Ширина уменьшена, герой
+     получил ландшафтную пропорцию с потолком по высоте окна, сверху и снизу
+     добавлен воздух. Всё через clamp/vh: под конкретный монитор ничего не
+     зашито. Стекло, тени и кромка компонента не трогаются — меняется только
+     геометрия. */
+  @media (min-width:720px){
+    #dish{max-width:min(680px,92vw);
+      padding-top:clamp(18px,4.5vh,46px);
+      padding-bottom:clamp(28px,6vh,64px)}
+    .dhero{aspect-ratio:5/4;max-height:min(46vh,430px)}
+    .dwrap{padding:16px 4px 0}
+    .dish-add{max-width:min(680px,92vw)}
+  }
+
+  /* --- Пустая корзина на desktop не занимает место --------------------------
+     Постоянная панель показывается только тогда, когда в заказе что-то есть.
+     Пустой стеклянный столбец с нулём и выключенной кнопкой не сообщал ничего,
+     но забирал у каталога 368px.
+     Появление и исчезновение — переход самой колонки грида (grid-template-columns
+     и column-gap анимируются), поэтому каталог не прыгает, а перестраивается.
+     Класс вешает renderDeskCart() по тому же признаку, что и всё остальное —
+     количеству позиций в cart. Состояние корзины не меняется. */
+  @media (min-width:1100px){
+    #menu.active{grid-template-columns:minmax(0,1fr) 0px;column-gap:0;
+      transition:grid-template-columns .34s cubic-bezier(.2,.8,.2,1),
+                 column-gap .34s cubic-bezier(.2,.8,.2,1)}
+    #menu.active.has-cart{grid-template-columns:minmax(0,1fr) var(--cart-w);column-gap:28px}
+    /* Не display:none — иначе исчезновение было бы скачком. Панель гаснет
+       быстрее, чем схлопывается колонка, поэтому сжатия содержимого не видно. */
+    #menu>.deskcart{opacity:0;translate:14px 0;visibility:hidden;pointer-events:none;
+      transition:opacity .2s ease,translate .3s cubic-bezier(.2,.8,.2,1),visibility 0s linear .34s}
+    #menu.active.has-cart>.deskcart{opacity:1;translate:0 0;visibility:visible;pointer-events:auto;
+      transition:opacity .26s ease .06s,translate .34s cubic-bezier(.2,.8,.2,1),visibility 0s}
+  }
+
+  /* --- Футер: компактные стеклянные действия -------------------------------- */
+  .site-contacts{display:none} /* контакты переехали в панель «Контакты» */
+  .foot-actions{flex:0 0 100%;display:flex;flex-wrap:wrap;justify-content:center;gap:10px;margin-top:2px}
+  .fp-src{display:none}
+  .foot-chip{font-family:inherit;font-size:12.5px;font-weight:700;letter-spacing:.2px;
+    color:var(--txt);padding:10px 17px;border-radius:999px;cursor:pointer;position:relative;
+    background:var(--g-l1);border:0;box-shadow:var(--g-contact),var(--g-inner-sh);
+    transition:background .18s ease,translate .18s ease,box-shadow .18s ease}
+  .foot-chip::after{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;
+    padding:1px;background:var(--g-edge-sm);
+    -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);
+    -webkit-mask-composite:xor;
+    mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);mask-composite:exclude}
+  .foot-chip:active{translate:0 1px}
+  .foot-chip[aria-expanded="true"]{background:var(--g-l2)}
+  .foot-chip:focus-visible{outline:2px solid rgba(255,154,46,.85);outline-offset:2px}
+  @media (hover:hover) and (pointer:fine){.foot-chip:hover{background:var(--g-l2);translate:0 -1px}}
+
+  /* Панель. Тот же материал уровня «плавающий объект», что у desktop-корзины и
+     штор: своё стекло здесь не изобретается. */
+  .fp-overlay{position:fixed;inset:0;z-index:118;background:rgba(0,0,0,.45);
+    backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);
+    opacity:0;visibility:hidden;transition:opacity .22s ease,visibility 0s linear .22s}
+  .fp-overlay.on{opacity:1;visibility:visible;transition:opacity .22s ease,visibility 0s}
+  .footpanel{position:fixed;z-index:119;border-radius:24px;overflow:hidden;
+    background:var(--g-l3);
+    backdrop-filter:blur(var(--g-blur-lg)) saturate(170%);
+    -webkit-backdrop-filter:blur(var(--g-blur-lg)) saturate(170%);
+    box-shadow:var(--g-contact),var(--g-float),inset 0 1px 0 rgba(255,255,255,.30);
+    /* Мобильный вид: компактная панель снизу. Закрытая — полностью вне отрисовки,
+       тем же приёмом, что и корзина/голосование, иначе её тень доставала бы до
+       экрана из-за нижнего края. */
+    left:50%;bottom:0;width:100%;max-width:480px;
+    translate:-50% 0;transform:translateY(calc(100% + 120px));
+    border-radius:24px 24px 0 0;
+    padding-bottom:calc(14px + env(safe-area-inset-bottom));
+    visibility:hidden;
+    transition:transform .34s cubic-bezier(.25,1,.2,1),visibility 0s linear .34s}
+  .footpanel.on{transform:translateY(0);visibility:visible;
+    transition:transform .34s cubic-bezier(.25,1,.2,1),visibility 0s}
+  .footpanel::after{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;
+    padding:1px;background:var(--g-edge);
+    -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);
+    -webkit-mask-composite:xor;
+    mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);mask-composite:exclude}
+  .fp-head{position:relative;z-index:2;display:flex;align-items:center;justify-content:space-between;
+    gap:12px;padding:18px 18px 10px}
+  .fp-title{font-weight:800;font-size:17px}
+  .fp-x{width:32px;height:32px;flex:0 0 auto;border:none;border-radius:11px;cursor:pointer;
+    background:rgba(255,255,255,.08);color:var(--txt2);font-family:inherit;font-size:19px;line-height:1;
+    transition:background .16s ease,color .16s ease}
+  .fp-x:hover{background:rgba(255,255,255,.14);color:var(--txt)}
+  .fp-x:focus-visible{outline:2px solid rgba(255,154,46,.85);outline-offset:2px}
+  .fp-body{position:relative;z-index:2;padding:0 14px 14px;display:flex;flex-direction:column;gap:8px;
+    max-height:min(62vh,460px);overflow-y:auto;overscroll-behavior:contain}
+  .fp-item{display:flex;flex-direction:column;gap:2px;padding:12px 14px;border-radius:15px;
+    text-decoration:none;color:var(--txt);background:var(--g-l1);
+    box-shadow:var(--g-contact),var(--g-inner-sh);
+    transition:background .16s ease,translate .16s ease}
+  .fp-item:active{translate:0 1px}
+  .fp-item:focus-visible{outline:2px solid rgba(255,154,46,.85);outline-offset:2px}
+  @media (hover:hover) and (pointer:fine){.fp-item:hover{background:var(--g-l2)}}
+  .fp-k{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.5px;color:var(--txt2)}
+  .fp-v{font-size:14px;font-weight:700;line-height:1.35}
+
+  /* Desktop: плавающий popover по центру, а не панель во всю нижнюю кромку. */
+  @media (min-width:720px){
+    .footpanel{top:50%;bottom:auto;max-width:400px;border-radius:24px;
+      padding-bottom:14px;
+      transform:none;translate:-50% -50%;
+      opacity:0;scale:.97;
+      transition:opacity .2s ease,scale .24s cubic-bezier(.2,.8,.2,1),visibility 0s linear .24s}
+    .footpanel.on{opacity:1;scale:1;
+      transition:opacity .2s ease,scale .24s cubic-bezier(.2,.8,.2,1),visibility 0s}
+  }
