@@ -299,10 +299,59 @@
   .dwrap{padding:8px 18px 0;position:relative;z-index:2}
   .dttl{font-weight:800;font-size:24px}
   .dsub{color:var(--txt2);font-weight:600;font-size:13px;margin-top:4px}
-  .kbju{display:flex;gap:9px;margin:18px 0 6px}
-  .kc{flex:1;text-align:center;border-radius:16px;padding:13px 6px;background:var(--glass);border:1px solid var(--gbord);box-shadow:var(--spec);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px)}
-  .kc b{display:block;font-size:18px;font-weight:800}
-  .kc span{font-size:10.5px;font-weight:700;color:var(--txt2);text-transform:uppercase;letter-spacing:.4px;margin-top:3px;display:block}
+  /* КБЖУ. Блоки были flex:1 БЕЗ базиса, то есть ширина распределялась по
+     содержимому: «1703 / ККАЛ» и «56 г / УГЛЕВОДЫ» получались разной ширины, и
+     ряд читался неровным, хотя gap везде одинаковый. Сетка из четырёх равных
+     колонок убирает это по построению — и ширины, и зазоры равны, а группа
+     занимает всю ширину контейнера, то есть отцентрована сама собой. */
+  .kbju{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:16px 0 6px}
+  /* Размер уменьшен примерно на четверть: и сама карточка, и внутренние
+     отступы, и типографика — пропорционально, иначе блок просто стал бы
+     теснее, а не мельче. */
+  .kc{position:relative;text-align:center;border-radius:13px;padding:9px 5px;
+    background:var(--g-l1);border:0;
+    box-shadow:var(--g-contact),inset 0 -1px 0 rgba(0,0,0,.18);
+    backdrop-filter:blur(var(--g-blur));-webkit-backdrop-filter:blur(var(--g-blur))}
+  .kc b{display:block;font-size:14.5px;font-weight:800;line-height:1.15;
+    text-shadow:0 0 10px rgba(255,154,46,.16)}
+  .kc span{font-size:9.5px;font-weight:700;color:var(--txt2);text-transform:uppercase;
+    letter-spacing:.3px;margin-top:2px;display:block;line-height:1.2}
+  /* Кромка — то же градиентное кольцо, что и у остального стекла: свет
+     неравномерен по периметру, поэтому скруглённые углы читаются объёмными. */
+  .kc::before{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;z-index:1;
+    padding:1px;background:var(--g-edge-sm);
+    -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);
+    -webkit-mask-composite:xor;
+    mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);mask-composite:exclude}
+  /* Тёплый свет ВНУТРИ стекла: мягкое янтарное пятно снизу и слабое свечение
+     по внутреннему периметру. Отдельным слоем, а не фоном карточки, потому что
+     мерцать должен только свет — если моргает вся карточка вместе с цифрами,
+     это читается как баг, а не как неон. */
+  .kc::after{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;z-index:0;
+    background:radial-gradient(88% 120% at 50% 128%,rgba(255,154,46,.16),transparent 62%);
+    box-shadow:inset 0 0 16px rgba(255,154,46,.10),inset 0 1px 0 rgba(255,255,255,.20);
+    animation:kcFlicker 26s linear infinite}
+  .kc>*{position:relative;z-index:2}
+  /* «Сломанный неон»: почти весь цикл свет ровный, и лишь около 24-й секунды
+     две короткие просадки подряд. Отрицательная задержка разводит блоки по
+     фазе, чтобы они не подмигивали хором — со стороны это выглядит как
+     случайный сбой одного элемента, а не как анимация всего ряда. */
+  .kc:nth-child(2)::after{animation-delay:-7.5s}
+  .kc:nth-child(3)::after{animation-delay:-15s}
+  .kc:nth-child(4)::after{animation-delay:-21s}
+  @keyframes kcFlicker{
+    0%,91.5%,100%{opacity:1}
+    92.1%{opacity:.45}
+    92.5%{opacity:1}
+    93.2%{opacity:.62}
+    93.5%{opacity:1}
+  }
+  /* Глобальное правило prefers-reduced-motion ниже гасит анимации целиком;
+     дублируется здесь явно, чтобы свет остался ровным, даже если общее правило
+     когда-нибудь сузят. */
+  @media (prefers-reduced-motion:reduce){
+    .kc::after{animation:none;opacity:1}
+  }
   .blockh{font-weight:800;font-size:15px;margin:20px 0 8px}
   .sostav{color:var(--txt2);font-weight:600;font-size:13.5px;line-height:1.5}
   /* viewport-fit=cover (index.html) включает safe-area — без учёта
