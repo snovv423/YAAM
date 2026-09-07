@@ -1156,21 +1156,34 @@
 
   /* --- Футер: компактные стеклянные действия -------------------------------- */
   .site-contacts{display:none} /* контакты переехали в панель «Контакты» */
-  .foot-actions{flex:0 0 100%;display:flex;flex-wrap:wrap;justify-content:center;gap:10px;margin-top:2px}
+  .foot-actions{flex:0 0 100%;display:flex;flex-wrap:wrap;justify-content:center;
+    align-items:baseline;gap:2px 20px;margin-top:6px}
   .fp-src{display:none}
-  .foot-chip{font-family:inherit;font-size:12.5px;font-weight:700;letter-spacing:.2px;
-    color:var(--txt);padding:10px 17px;border-radius:999px;cursor:pointer;position:relative;
-    background:var(--g-l1);border:0;box-shadow:var(--g-contact),var(--g-inner-sh);
-    transition:background .18s ease,translate .18s ease,box-shadow .18s ease}
-  .foot-chip::after{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;
-    padding:1px;background:var(--g-edge-sm);
-    -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);
-    -webkit-mask-composite:xor;
-    mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);mask-composite:exclude}
-  .foot-chip:active{translate:0 1px}
-  .foot-chip[aria-expanded="true"]{background:var(--g-l2)}
-  .foot-chip:focus-visible{outline:2px solid rgba(255,154,46,.85);outline-offset:2px}
-  @media (hover:hover) and (pointer:fine){.foot-chip:hover{background:var(--g-l2);translate:0 -1px}}
+  /* Триггеры панелей — обычный текст на фоне страницы, без собственной
+     поверхности: ни подложки, ни рамки, ни тени, ни кольца кромки. Стекло здесь
+     конкурировало и с HELP, и с «кого ждём», хотя это самый тихий уровень
+     футера. Иерархия задаётся размером, весом и цветом: HELP остаётся янтарным
+     14px/800, эти — приглушённые 12px/500.
+     Кнопкой элемент при этом быть не перестал: padding даёт тач-область около
+     34px по высоте, и он не виден только потому, что фона нет. */
+  .foot-chip{font-family:inherit;font-size:12px;font-weight:500;letter-spacing:.2px;
+    line-height:1.4;color:var(--txt2);padding:9px 2px;cursor:pointer;
+    background:none;border:0;border-radius:0;box-shadow:none;-webkit-appearance:none;appearance:none;
+    transition:color .18s ease,text-shadow .18s ease,opacity .12s ease}
+  .foot-chip:active{opacity:.6}
+  /* Открытая панель отмечается тем же способом, что и наведение, — яркостью
+     текста, а не возвращением плашки. */
+  .foot-chip[aria-expanded="true"]{color:var(--txt)}
+  /* Клавиатурный фокус: тонкое подчёркивание вместо рамки — рамка здесь снова
+     нарисовала бы прямоугольную подложку вокруг текста. */
+  .foot-chip:focus-visible{outline:none;color:var(--txt);
+    text-decoration:underline;text-decoration-color:var(--amber);
+    text-decoration-thickness:1.5px;text-underline-offset:5px}
+  @media (hover:hover) and (pointer:fine){
+    .foot-chip:hover{color:var(--txt);text-shadow:0 0 12px rgba(241,247,242,.28)}
+  }
+  /* На узком экране три пункта переносятся с тем же ритмом, а не слипаются. */
+  @media (max-width:400px){.foot-actions{gap:0 16px}}
 
   /* Панель. Тот же материал уровня «плавающий объект», что у desktop-корзины и
      штор: своё стекло здесь не изобретается. */
