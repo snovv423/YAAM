@@ -165,7 +165,9 @@
   .sec{padding:20px 20px 2px;display:flex;align-items:center;gap:9px}
   .sec h2{font-weight:800;font-size:15px;letter-spacing:.3px}
   /* карточки */
-  .list{padding:12px 16px 8px;display:flex;flex-direction:column;gap:20px;position:relative;z-index:2}
+  /* padding-top вобрал отступ удалённого заголовка «Открыто сейчас», чтобы на
+     его месте не осталось ни пустого зазора, ни слипшихся блоков. */
+  .list{padding:26px 16px 8px;display:flex;flex-direction:column;gap:20px;position:relative;z-index:2}
   .card{position:relative;border-radius:28px;overflow:hidden;cursor:pointer;box-shadow:var(--shadow);transition:transform .16s ease;isolation:isolate}
   .card:active{transform:scale(.982)}
   .card.closed{filter:grayscale(.55) brightness(.82)}
@@ -1090,7 +1092,7 @@
      центрирует неполный ряд и позволяет карточке дорасти до комфортной
      ширины, сохраняя те же 2-3 колонки, когда ресторанов достаточно. */
   @media (min-width:720px){
-    .list{display:flex;flex-wrap:wrap;justify-content:center;align-items:stretch;gap:22px}
+    .list{display:flex;flex-wrap:wrap;justify-content:center;align-items:stretch;gap:22px;padding:32px 0 10px}
     .list>.card{flex:1 1 340px;max-width:560px}
     .intro{max-width:780px;margin-left:auto;margin-right:auto}
   }
@@ -1158,12 +1160,13 @@
      исправлено, размеры подобраны под landscape-пропорцию мобильной карточки. */
   @media (min-width:720px){
     .list{flex-direction:row}
-    .list>.card{flex:1 1 320px;max-width:460px}
-    .photo{height:212px}
-  }
-  @media (min-width:1600px){
-    .list>.card{max-width:440px}
-    .photo{height:222px}
+    /* Карточка выросла примерно в 1.35-1.45 раза и стала сопоставима по
+       масштабу с баннером «Твой город уже в меню» (780px), оставаясь главным
+       объектом секции. Пропорция задана aspect-ratio, а не фиксированной
+       высотой фото: при переменной ширине фиксированная высота увела бы форму
+       обратно к квадрату — сейчас она держится ровно та же, 460/212. */
+    .list>.card{flex:1 1 320px;max-width:clamp(540px,48vw,660px)}
+    .photo{height:auto;aspect-ratio:460/212}
   }
 
   /* --- Карточка блюда на desktop -------------------------------------------
@@ -1173,13 +1176,38 @@
      добавлен воздух. Всё через clamp/vh: под конкретный монитор ничего не
      зашито. Стекло, тени и кромка компонента не трогаются — меняется только
      геометрия. */
+  /* --- Экран блюда на desktop: одна общая ширина контента -------------------
+     Замер показал три разные ширины и разъезд правых краёв на 106px (1440):
+     фото 518, ряд КБЖУ 592, нижняя строка 648. Причины разные — у фото это
+     aspect-ratio вместе с max-height: при ограниченной высоте браузер сжимает
+     и ШИРИНУ, сохраняя пропорцию, поэтому фото и оказывалось самым узким
+     элементом. У остальных — собственные горизонтальные отступы контейнеров.
+     Вместо подгонки каждого блока вводится одна направляющая --rail, от
+     которой наследуются все прямые дети экрана: фото, галерея, текстовая
+     часть и строка действий получают ровно её ширину, поэтому левые и правые
+     края совпадают по построению, а не по совпадению чисел. */
   @media (min-width:720px){
-    #dish{max-width:min(680px,92vw);
+    #dish{--rail:min(700px,92vw);max-width:none;
+      padding-left:0;padding-right:0;
       padding-top:clamp(18px,4.5vh,46px);
       padding-bottom:clamp(28px,6vh,64px)}
-    .dhero{aspect-ratio:5/4;max-height:min(46vh,430px)}
-    .dwrap{padding:16px 4px 0}
-    .dish-add{max-width:min(680px,92vw)}
+    #dish>*{width:var(--rail);margin-left:auto;margin-right:auto}
+    /* Высота задаётся напрямую, а ширина берётся от направляющей: так фото
+       занимает всю полосу и растёт вместе с ней, вместо того чтобы ужиматься
+       под собственную пропорцию. Кадрирование по-прежнему object-fit:cover —
+       изображение не растягивается. */
+    .dhero{aspect-ratio:auto;max-height:none;height:clamp(340px,42vh,430px)}
+    /* Свои боковые отступы у детей обнуляются — иначе они снова сузили бы
+       содержимое относительно направляющей. */
+    .dwrap{padding:16px 0 0}
+    .gallery{padding-left:0;padding-right:0}
+    .dish-add{width:var(--rail);max-width:none;padding-left:0;padding-right:0}
+    /* CTA компактнее по высоте, а не по ширине: правый край обязан совпадать с
+       правым краем фото и блока «УГЛЕВОДЫ», поэтому кнопка занимает остаток
+       полосы — «полосой» она выглядела из-за высоты, её и снижаем. */
+    .dish-add .row{gap:14px}
+    .dish-add .addbtn{padding:14px 18px;font-size:14.5px;border-radius:16px}
+    .dish-add .dq{border-radius:16px}
   }
 
   /* --- Пустая корзина на desktop не занимает место --------------------------
