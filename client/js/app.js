@@ -1491,9 +1491,21 @@ function restoreMenuPosition(value=menuReturnScrollY){
   // Ставим позицию в том же кадре, в котором меню снова стало активным:
   // промежуточный scrollTo(0,0) был виден в Safari как резкий рывок.
   window.scrollTo(0,target);
-  // Один контрольный кадр компенсирует позднюю раскладку Safari без
-  // видимого путешествия от начала меню к выбранному блюду.
-  requestAnimationFrame(()=>{if(cur('menu'))window.scrollTo(0,target)});
+  // Контрольные кадры компенсируют позднюю раскладку без видимого путешествия
+  // от начала меню к выбранному блюду. Кадр здесь не один: если к этому
+  // моменту страница ещё короче конечной (шрифты, фото, пересчёт стекла), то
+  // scrollTo упирается в текущую высоту и обрезается до 0 — а у короткого меню
+  // весь запас прокрутки составляет несколько десятков пикселей, и промах
+  // означает полную потерю позиции. Повторы прекращаются, как только позиция
+  // фактически достигнута, поэтому в обычном случае это ровно один кадр.
+  let attempts=3;
+  const settle=()=>{
+    if(!cur('menu'))return;
+    if(Math.abs(window.scrollY-target)<1)return;
+    window.scrollTo(0,target);
+    if(--attempts>0)requestAnimationFrame(settle);
+  };
+  requestAnimationFrame(settle);
 }
 function backFromDish(){
   if(typeof history.back==='function'){
@@ -1876,8 +1888,16 @@ function totals(){let sum=0,cnt=0;for(const k in cart){sum+=cart[k].p*cart[k].q;
 function plural(n,a,b,c){n=Math.abs(n)%100;const n1=n%10;if(n>10&&n<20)return c;if(n1>1&&n1<5)return b;if(n1===1)return a;return c;}
 // Нижняя панель корзины не должна звать оформить ЕЩЁ заказ, пока есть
 // незавершённый активный — иначе это выглядит как приглашение создать дубль.
+// updateBar — единая точка обновления вида корзины: её уже вызывают все
+// мутации (refreshAll/refreshAllVisible), переходы между экранами (go) и
+// восстановление сессии, поэтому постоянная desktop-панель подключена сюда же,
+// а не отдельным набором вызовов, который легко разойдётся с состоянием.
 function updateBar(){const{sum,cnt}=totals();const bar=document.getElementById('cartbar');
-  if(cnt>0&&(cur('menu')||cur('home'))&&!currentOrderCode){bar.style.display='block';document.getElementById('cb-count').textContent=cnt+' '+plural(cnt,'блюдо','блюда','блюд');document.getElementById('cb-sum').textContent=sum+' ₽';}else bar.style.display='none';}
+  renderDeskCart();
+  // На экране ресторана с постоянной корзиной нижняя плашка дублировала бы
+  // её же итог и кнопку — там она не нужна.
+  const deskCartShown=deskCartLayout()&&cur('menu');
+  if(cnt>0&&(cur('menu')||cur('home'))&&!currentOrderCode&&!deskCartShown){bar.style.display='block';document.getElementById('cb-count').textContent=cnt+' '+plural(cnt,'блюдо','блюда','блюд');document.getElementById('cb-sum').textContent=sum+' ₽';}else bar.style.display='none';}
 // Нижняя панель — единственное место, откуда восстановленная (но ещё не
 // открытая) корзина превращается в открытый экран ресторана. На экране меню
 // просто открывает мини-корзину как раньше; на главной сперва открывает
@@ -3120,9 +3140,96 @@ function yaamConfirm(text,onYes,labels){
 
 function clearCart(){yaamConfirm('Очистить корзину?',()=>{cart={};closeSheet();refreshAllVisible();backToMenu();});}
 function refreshAllVisible(){document.querySelectorAll('[data-ctrl-key]').forEach(el=>{const k=el.dataset.ctrlKey;const c=cart[k];el.innerHTML=(c&&c.q>0)?qtyHtml(k,c.q):`<button class="add" onclick="addItem('${k}',event)">+</button>`;});updateBar();saveCartState();}
+// ---------------------------------------------------------------------------
+// Постоянная корзина на широком экране
+// ---------------------------------------------------------------------------
+//
+// Второго состояния корзины НЕТ. Панель справа и мобильная штора рисуются из
+// одного и того же объекта `cart` и ходят через те же inc()/dec(), поэтому
+// resize desktop -> mobile -> desktop ничего не теряет: меняется только то,
+// какой из двух видов показан.
+//
+// Порог 1100px — тот же, что и в CSS (см. media-запрос со сборкой #menu в
+// грид). Держать его в двух местах приходится: CSS решает раскладку, JS —
+// какой способ показа корзины уместен, и оба обязаны переключаться разом.
+const DESK_CART_MQ='(min-width:1100px)';
+function deskCartLayout(){
+  try{return window.matchMedia(DESK_CART_MQ).matches;}catch(e){return false;}
+}
+// Ключи прошлого рендера: анимация появления вешается только на реально новые
+// строки, иначе она проигрывалась бы на всём списке при каждом нажатии +/−.
+let deskCartKeys=[],deskCartSum=null;
+function deskCartItemHTML(k,c,isNew){
+  const key=esc(k);
+  return `<div class="dc-item${isNew?' enter':''}" data-dc-key="${key}">
+    <div class="dc-i-name">${esc(c.n)}</div>
+    <div class="dc-i-price">${c.p*c.q} ₽</div>
+    <div class="dc-i-ctl">
+      <div class="qty"><button type="button" aria-label="Меньше" onclick="dec('${key}')">−</button><span>${c.q}</span><button type="button" aria-label="Больше" onclick="inc('${key}',event)">+</button></div>
+      <button type="button" class="dc-rm" aria-label="Убрать ${esc(c.n)}" onclick="deskCartRemove('${key}')">×</button>
+    </div></div>`;
+}
+function renderDeskCart(){
+  const el=document.getElementById('deskcart');
+  if(!el)return;
+  if(!deskCartLayout()){el.innerHTML='';deskCartKeys=[];deskCartSum=null;return;}
+  const{sum,cnt}=totals();
+  const keys=Object.keys(cart);
+  const prev=deskCartKeys;
+  const below=curRest&&sum>0&&sum<curRest.min;
+  // Панель не исчезает при пустой корзине — иначе раскладка прыгала бы на
+  // каждое добавление и удаление последней позиции.
+  const body=cnt===0
+    ? `<div class="dc-empty">
+         <div class="dc-empty-mark" aria-hidden="true">
+           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 7h12l-1 12H7L6 7Z"/><path d="M9 7V5a3 3 0 0 1 6 0v2"/></svg>
+         </div>
+         <div class="dc-empty-t">Корзина пуста</div>
+         <div class="dc-empty-s">Добавьте блюда из меню — заказ соберётся здесь.</div>
+       </div>`
+    : `<div class="dc-list">${keys.map(k=>deskCartItemHTML(k,cart[k],!prev.includes(k))).join('')}</div>`
+      +(below?`<div class="dc-min">Минимальный заказ ${curRest.min} ₽ — добавьте ещё на ${curRest.min-sum} ₽</div>`:'');
+  const bump=deskCartSum!==null&&deskCartSum!==sum?' bump':'';
+  el.innerHTML=`
+    <div class="dc-head"><span class="dc-title">Ваш заказ</span>${cnt?`<span class="dc-count">${cnt} ${plural(cnt,'блюдо','блюда','блюд')}</span>`:''}</div>
+    ${body}
+    <div class="dc-foot">
+      <div class="dc-total${bump}"><span>Итого</span><b>${sum} ₽</b></div>
+      <button type="button" class="dc-cta" onclick="openCart()"${cnt===0||below?' disabled':''}>Оформить заказ</button>
+      ${cnt?'<button type="button" class="dc-clear" onclick="clearCart()">Очистить корзину</button>':''}
+    </div>`;
+  deskCartKeys=keys;deskCartSum=sum;
+}
+// Удаление с анимацией: сначала строка уезжает, и только потом меняется
+// состояние — иначе перерисовка стёрла бы анимируемый элемент немедленно.
+function deskCartRemove(k){
+  const row=document.querySelector(`.dc-item[data-dc-key="${CSS.escape(k)}"]`);
+  const drop=()=>{delete cart[k];refreshAllVisible();};
+  if(!row||prefersReducedMotion()){drop();return;}
+  row.classList.add('leaving');
+  setTimeout(drop,190);
+}
+function prefersReducedMotion(){
+  try{return window.matchMedia('(prefers-reduced-motion:reduce)').matches;}catch(e){return false;}
+}
+// Смена ширины окна не должна оставлять открытую штору поверх постоянной
+// корзины и наоборот — вид пересобирается, состояние остаётся тем же.
+let deskCartWide=null;
+window.addEventListener('resize',()=>{
+  const wide=deskCartLayout();
+  if(wide!==deskCartWide){
+    deskCartWide=wide;
+    if(wide)closeSheet();
+    deskCartKeys=[];deskCartSum=null; // раскладка сменилась — не анимируем «появление» всего списка
+  }
+  updateBar();
+});
+
 // Штора корзины
 let sheetStartY=0,sheetCurY=0;
 function openSheet(){
+  // На широком экране заказ уже постоянно виден справа — штора там лишняя.
+  if(deskCartLayout()&&cur('menu'))return;
   const{sum,cnt}=totals();if(cnt===0)return;
   const si=document.getElementById('sheet-items');
   si.innerHTML=Object.values(cart).map(c=>`<div class="sheet-item"><span class="sn">${c.q} × ${c.n}</span><span class="sp">${c.p*c.q} ₽</span><div class="qty" style="transform:scale(.85)"><button onclick="event.stopPropagation();sheetDec('${Object.keys(cart).find(k=>cart[k].n===c.n)}')">−</button><span>${c.q}</span><button onclick="event.stopPropagation();sheetInc('${Object.keys(cart).find(k=>cart[k].n===c.n)}')">+</button></div></div>`).join('');

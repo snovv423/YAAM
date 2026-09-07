@@ -161,6 +161,12 @@
     <div class="mtabs" id="m-tabs"></div>
   </div>
   <div id="m-body"></div>
+  <!-- Постоянная корзина desktop. Живёт внутри экрана ресторана и на широком
+       экране встаёт во вторую колонку грида (см. media 1100px в style.css) —
+       обёртки вокруг остального меню не потребовалось. Содержимое рисует
+       renderDeskCart() из ТОГО ЖЕ объекта cart, что и мобильная штора: второго
+       состояния корзины не существует. -->
+  <aside class="deskcart" id="deskcart" aria-label="Ваш заказ"></aside>
 </div>
 
 <!-- DISH -->
@@ -203,6 +209,13 @@
     <div class="field" id="field-pickup-addr" style="display:none"><label>Заберите здесь</label><div class="pickup-addr-value" id="c-pickup-addr"></div></div>
     <div class="field"><label>Телефон</label><input id="c-phone" type="tel" placeholder="+7 ___ ___-__-__" autocomplete="tel"></div>
     <div class="field"><label>Комментарий к заказу</label><input id="c-comment"></div>
+    <!-- Правая колонка чекаута на широком экране: состав, итог и оплата.
+         На мобильном обёртка прозрачна для раскладки (display:contents), то
+         есть порядок и вид блоков там ровно тот же, что и раньше. Обёртка
+         нужна потому, что в двухколоночном гриде строки общие для обеих
+         колонок: без неё высокая панель состава растягивала строку и разрывала
+         форму слева. Ни один id и ни один обработчик не изменились. -->
+    <div class="co-side">
     <div class="panel" id="c-items"></div>
     <div class="trust"><span class="ic" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true" focusable="false"><path d="M12 3 5 6v5.2c0 4.4 2.8 7.9 7 9.8 4.2-1.9 7-5.4 7-9.8V6l-7-3Z"/><path d="m9 12 2 2 4-4"/></svg></span><p>Оплата защищена. Не примет ресторан — вернём деньги.</p></div>
     <p class="delivery-note" id="delivery-note">Доставку организует ресторан. YAAM принимает оплату только за еду. <a href="legal/delivery.html" target="_blank" rel="noopener">Подробнее</a></p>
@@ -210,6 +223,7 @@
     <button class="pay" onclick="openQR()">Оплатить еду по СБП · <span id="c-total"></span></button>
     <p class="offer-accept-note">Нажимая «Оплатить», вы принимаете условия <a href="legal/offer.html" target="_blank" rel="noopener">оферты YAAM</a>.</p>
     <div class="center-wrap"><button class="ghost" onclick="backToMenu()">← Вернуться к меню</button></div>
+    </div>
   </div>
 </div>
 

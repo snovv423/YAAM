@@ -123,8 +123,13 @@ test('A: штора голосования выезжает снизу ввер�
     .toBeGreaterThanOrEqual(viewport.height - 2);
   expect(openBox.y, 'штора не занимает весь экран — это нижняя шторка').toBeGreaterThan(0);
 
-  // Единственное, что анимируется, — transform: раскладка не пересчитывается.
-  expect(await sheet.evaluate((el) => getComputedStyle(el).transitionProperty)).toBe('transform');
+  // Анимируются только transform и visibility: ни одно из этих свойств не
+  // пересчитывает раскладку. visibility добавлена, чтобы ЗАКРЫТАЯ штора не
+  // рисовала ни одного пикселя (её внешняя тень доставала до экрана даже за
+  // границей viewport) — переключение отложено ровно на длительность
+  // transform-перехода, поэтому движение выше остаётся непрерывным.
+  const animated = await sheet.evaluate((el) => getComputedStyle(el).transitionProperty);
+  expect(animated.split(',').map((p) => p.trim()).sort()).toEqual(['transform', 'visibility']);
 
   // Кликать надо по видимой части затемнения — центр оверлея закрыт самой
   // шторой, занимающей нижние 70% экрана.

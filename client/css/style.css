@@ -648,3 +648,420 @@
   .vote-list{padding-bottom:calc(4px + env(safe-area-inset-bottom))}
 
   @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}.card.reveal{opacity:1!important;transform:none!important}}
+
+  /* ==========================================================================
+     PREMIUM GLASS MATERIAL SYSTEM + RESPONSIVE LAYOUT
+     ==========================================================================
+     Всё ниже — надстройка над уже существующим языком YAAM, а не его замена.
+     Мобильная композиция сохранена: правила материала переопределяют только
+     границы/тени/подсветку уже существующих поверхностей, а весь desktop
+     живёт исключительно внутри media-запросов.
+
+     ПОЧЕМУ НЕ ОДИН backdrop-filter. Затемнённое стекло читается объёмным
+     только когда одновременно работают: прозрачность, размытие, неравномерная
+     подсветка кромки, внутреннее отражение, контактная тень и внешняя тень.
+     Один blur даёт «серый полупрозрачный прямоугольник» — ровно то, от чего
+     нужно было уйти.
+
+     ПРОИЗВОДИТЕЛЬНОСТЬ. Ни одного НОВОГО backdrop-filter внутри .dish и .card
+     не добавлено: в длинном меню их и так сотни (по две плашки на блюдо), и
+     каждый — отдельный слой композитинга. Толщина и свет кромки сделаны
+     градиентной маской и box-shadow — это рисуется на том же слое и не
+     создаёт новых surface'ов. Сильное стекло применено точечно: одна
+     desktop-корзина, шторы, модальные окна.
+     ========================================================================== */
+  :root{
+    /* Два уровня размытия. Больше не нужно — см. комментарий о слоях выше. */
+    --g-blur:16px;
+    --g-blur-lg:26px;
+
+    /* Кромка стекла. Свет НЕ равномерен по периметру: ярко на верхней и
+       верхне-левой грани, гаснет к середине, уходит в тень снизу. Именно эта
+       неравномерность читается как толщина и изгиб, а не как обводка. */
+    --g-edge:linear-gradient(157deg,
+      rgba(255,255,255,.60) 0%,
+      rgba(255,255,255,.26) 13%,
+      rgba(255,255,255,.07) 34%,
+      rgba(255,255,255,.03) 58%,
+      rgba(0,0,0,.16) 82%,
+      rgba(0,0,0,.30) 100%);
+    /* Тот же материал, но собраннее — для мелких плашек, где полный градиент
+       не успевает прочитаться на коротком периметре. */
+    --g-edge-sm:linear-gradient(150deg,
+      rgba(255,255,255,.52) 0%,
+      rgba(255,255,255,.18) 22%,
+      rgba(255,255,255,.04) 52%,
+      rgba(0,0,0,.16) 100%);
+    /* Кромка под курсором: света чуть больше, тень снизу мягче. */
+    --g-edge-hi:linear-gradient(157deg,
+      rgba(255,255,255,.85) 0%,
+      rgba(255,255,255,.38) 14%,
+      rgba(255,255,255,.10) 36%,
+      rgba(255,255,255,.04) 60%,
+      rgba(0,0,0,.12) 84%,
+      rgba(0,0,0,.26) 100%);
+
+    /* Внутреннее отражение вдоль верхней кромки. Не белая линия, а отсвет,
+       который гаснет к 26% высоты и потому не трогает нижние плашки. */
+    --g-inner-hi:linear-gradient(180deg,rgba(255,255,255,.11),rgba(255,255,255,.03) 12%,transparent 26%),
+                 radial-gradient(88% 38% at 50% -6%,rgba(255,255,255,.12),transparent 72%);
+    --g-inner-hi-sm:linear-gradient(180deg,rgba(255,255,255,.14),transparent 46%);
+
+    /* Тени. Тёплый зелёно-чёрный, а не чистый чёрный — чистый чёрный на
+       зелёном фоне читается как грязь. Контактная — узкая и близкая,
+       поднимающая — широкая и слабая. */
+    --g-contact:0 2px 6px rgba(2,14,8,.30);
+    --g-elev:0 16px 40px rgba(2,14,8,.36);
+    --g-elev-hi:0 26px 56px rgba(2,14,8,.44);
+    --g-float:0 32px 72px rgba(1,10,6,.52);
+    --g-inner-sh:inset 0 -1px 0 rgba(0,0,0,.20);
+
+    /* Плоскости по уровням: 1 — панели, 2 — карточки, 3 — плавающие
+       объекты, 4 — контролы. */
+    --g-l1:linear-gradient(180deg,rgba(255,255,255,.075),rgba(255,255,255,.028));
+    --g-l2:linear-gradient(180deg,rgba(255,255,255,.105),rgba(255,255,255,.038));
+    --g-l3:linear-gradient(180deg,rgba(13,36,23,.60),rgba(6,22,14,.72));
+    --g-l4:linear-gradient(180deg,rgba(255,255,255,.15),rgba(255,255,255,.055));
+
+    /* Оранжевый CTA слегка отражается в соседнем стекле. Очень слабо —
+       это отсвет, а не ореол. */
+    --g-amber-reflect:0 0 0 1px rgba(255,154,46,.05),0 8px 22px rgba(255,154,46,.10);
+
+    /* Ширина контентной колонки и постоянной корзины. */
+    --shell:1180px;
+    --cart-w:340px;
+  }
+
+  /* --- Кольцо кромки -------------------------------------------------------
+     Градиент шириной 1px по периметру: padding-box вычитается маской, остаётся
+     только рамка. Толщина одинаковая, а яркость — нет, поэтому скруглённые
+     углы «ловят» свет по-разному сверху и снизу.
+     ВАЖНО: ::after у .pay/.ghost/.citychip/.cartbtn/.sheet-btn/.addbtn уже
+     занят ripple-эффектом (см. выше) — эти селекторы сюда НЕ входят. */
+  .card::after,.dish::after,.dplate::after,.dactions::after,.info::after,
+  .chip::after,.mtab::after,.field::after,.panel::after,.deskcart::after,
+  .confirm-box::after,.vote-item::after{
+    content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;
+    padding:1px;background:var(--g-edge);
+    -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);
+    -webkit-mask-composite:xor;
+    mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);
+    mask-composite:exclude;
+  }
+  .dplate::after,.dactions::after,.chip::after,.mtab::after{background:var(--g-edge-sm)}
+  .mtab,.field,.panel,.vote-item{position:relative}
+  .card::after,.dish::after{z-index:6}
+  .dplate::after,.dactions::after,.info::after,.chip::after{z-index:2}
+
+  /* --- Внутреннее отражение -------------------------------------------------
+     Отдельный слой над фотографией, но под нижними плашками по яркости: к 26%
+     высоты градиент уже прозрачен, поэтому .info/.dactions он не засвечивает.
+     Фотография при этом НЕ размывается — меняется только освещение оболочки. */
+  .card::before,.dish::before{
+    content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;
+    z-index:4;background:var(--g-inner-hi);
+  }
+  .dplate::before,.dactions::before,.info::before{
+    content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;
+    z-index:1;background:var(--g-inner-hi-sm);
+  }
+  .dplate>*,.dactions>*,.info>*{position:relative;z-index:2}
+
+  /* --- Глубина: карточки отделяются от фона -------------------------------- */
+  .card{box-shadow:var(--g-contact),var(--g-elev)}
+  .dish{box-shadow:var(--g-contact),var(--g-elev)}
+  .card,.dish{border:0}
+
+  /* Плашки названия и цены — то же семейство материала: прозрачнее, чем
+     раньше (сквозь них должна читаться подложка), но с кромкой и отражением,
+     поэтому текст остаётся контрастным. */
+  .dplate,.dactions{
+    background:linear-gradient(180deg,rgba(10,28,18,.42),rgba(6,20,12,.52));
+    border:0;box-shadow:var(--g-contact),var(--g-inner-sh);
+  }
+  .dplate{text-shadow:0 1px 2px rgba(0,0,0,.45)}
+  .info{background:linear-gradient(180deg,rgba(10,28,18,.44),rgba(6,20,12,.56));border:0;
+    box-shadow:var(--g-contact),0 10px 24px rgba(2,14,8,.30),var(--g-inner-sh)}
+  .chip{border:0;box-shadow:var(--g-contact)}
+  /* Тёплый отсвет оранжевой кнопки на стекле рядом — очень деликатный. */
+  .dactions{box-shadow:var(--g-contact),var(--g-inner-sh),var(--g-amber-reflect)}
+
+  /* Категории — стекло того же семейства; активная подсвечена тёплым. */
+  .mtab{background:var(--g-l1);border:0;box-shadow:var(--g-contact),var(--g-inner-sh)}
+  .mtab.on{background:linear-gradient(180deg,#FFA847,var(--amber-d));color:#3a1c00;
+    box-shadow:0 6px 18px rgba(255,154,46,.38),inset 0 1px 0 rgba(255,255,255,.45)}
+  .mtab.on::after{background:linear-gradient(150deg,rgba(255,255,255,.7),rgba(255,255,255,.12) 40%,rgba(0,0,0,.16))}
+  .field,.panel{background:var(--g-l1);border:0;box-shadow:var(--g-contact),var(--g-inner-sh)}
+  .field:focus-within{box-shadow:var(--g-contact),0 0 0 3px rgba(255,154,46,.14)}
+  .field.err::after{background:linear-gradient(157deg,rgba(255,140,120,.9),rgba(255,112,89,.4) 50%,rgba(120,30,20,.4))}
+
+  /* --- Микровзаимодействия --------------------------------------------------
+     Отдельное свойство translate, а не transform: transform уже занят
+     reveal-анимацией карточек (.card.reveal) и press-эффектом, и две разные
+     длительности на одном свойстве несовместимы. */
+  /* min-width здесь по существу, а не для красоты: подъём карточки — это
+     desktop-аффорданс, а на узком экране он ещё и мешает. Приподнятая
+     карточка меняет область прокрутки документа, и на коротком меню, где
+     весь запас прокрутки — несколько десятков пикселей, возврат из карточки
+     блюда терял сохранённую позицию (воспроизводилось в e2e: курсор остаётся
+     над блюдом, и на возврате оно оказывается приподнято). На реальном
+     телефоне hover:hover не срабатывает вовсе, так что ограничение ничего не
+     отнимает у мобильных. */
+  @media (hover:hover) and (pointer:fine) and (min-width:720px){
+    .card,.dish{transition:transform .16s ease,translate .26s cubic-bezier(.2,.8,.2,1),box-shadow .26s ease}
+    .card.revealed{transition:opacity .6s cubic-bezier(.2,.8,.2,1),transform .6s cubic-bezier(.2,.8,.2,1),
+                              translate .26s cubic-bezier(.2,.8,.2,1),box-shadow .26s ease}
+    .card:hover,.dish:hover{translate:0 -4px;box-shadow:var(--g-contact),var(--g-elev-hi)}
+    .card:hover::after,.dish:hover::after{background:var(--g-edge-hi)}
+    .card::after,.dish::after{transition:background .26s ease}
+    .mtab:hover:not(.on){background:var(--g-l2)}
+    .add:hover{filter:brightness(1.06)}
+  }
+  @media (min-width:720px){.card:active,.dish:active{translate:0 0}}
+
+  /* Клавиатурная навигация не должна теряться на стекле. */
+  .add:focus-visible,.mtab:focus-visible,.citychip:focus-visible,.pay:focus-visible,
+  .ghost:focus-visible,.cartbtn:focus-visible,.sheet-btn:focus-visible,.dc-rm:focus-visible,
+  .qty button:focus-visible,.card:focus-visible,.dish:focus-visible{
+    outline:2px solid rgba(255,154,46,.85);outline-offset:2px}
+
+  /* --- Закрытая нижняя штора не должна рисовать НИ ОДНОГО пикселя ----------
+     Было: закрытое состояние выражалось только transform'ом
+     translateY(calc(100% + 60px)). Сам блок при этом уезжал за экран, но его
+     ВНЕШНЯЯ тень — нет: box-shadow:0 -30px 70px направлена ВВЕРХ и достаёт до
+     100px выше верхней кромки, то есть при запасе в 60px около 40px тени
+     оставались внутри viewport. На iPhone это и читалось как «округлый
+     тёмно-зелёный край снизу»: тень плюс border-top плюс верхние радиусы.
+     Подобрать больший отступ в пикселях нельзя — фактическая высота шторы
+     зависит от контента, safe-area и динамической панели Safari.
+
+     Решение геометрически безусловное: закрытая штора выключается из
+     отрисовки целиком (visibility:hidden). Скрытый элемент не рисует ни фон,
+     ни бордер, ни радиус, ни тень, ни хват, ни детей — при любой высоте
+     viewport, любом состоянии панели Safari, в PWA и в обеих ориентациях.
+     Анимацию это не ломает: visibility — дискретное свойство, и переключение
+     отложено ровно на длительность transform-перехода, поэтому закрытие
+     доигрывает полностью, а открытие начинается сразу. */
+  .sheet{visibility:hidden;transition:transform .52s cubic-bezier(.25,1,.2,1),visibility 0s linear .52s}
+  .sheet.on{visibility:visible;transition:transform .52s cubic-bezier(.25,1,.2,1),visibility 0s linear 0s}
+  .vote-sheet{visibility:hidden;transition:transform .42s cubic-bezier(.25,1,.2,1),visibility 0s linear .42s}
+  .vote-sheet.on{visibility:visible;transition:transform .42s cubic-bezier(.25,1,.2,1),visibility 0s linear 0s}
+  /* Запас к уезду увеличен до высоты самой тени — на случай, если в каком-то
+     движке visibility будет проигнорирована при активном transform-переходе. */
+  .sheet{transform:translateX(-50%) translateY(calc(100% + 120px))}
+  .vote-sheet{transform:translateX(-50%) translateY(calc(100% + 120px))}
+  .sheet.on,.vote-sheet.on{transform:translateX(-50%) translateY(0)}
+
+  /* Шторы и модальные окна — единственные места с сильным стеклом. */
+  .sheet{background:var(--g-l3);backdrop-filter:blur(var(--g-blur-lg)) saturate(165%);
+    -webkit-backdrop-filter:blur(var(--g-blur-lg)) saturate(165%);
+    border-top:0;box-shadow:var(--g-float),inset 0 1px 0 rgba(255,255,255,.34)}
+  .confirm-box{background:var(--g-l3);backdrop-filter:blur(var(--g-blur-lg)) saturate(165%);
+    -webkit-backdrop-filter:blur(var(--g-blur-lg)) saturate(165%);border:0;
+    box-shadow:var(--g-float),inset 0 1px 0 rgba(255,255,255,.30)}
+  .confirm-box{position:relative}
+
+  /* ==========================================================================
+     RESPONSIVE: MOBILE -> TABLET -> DESKTOP -> WIDE
+     ==========================================================================
+     Одна и та же разметка, один и тот же cart/order/API. Меняется только
+     раскладка. Точки перелома выбраны по фактической геометрии, а не по
+     «стандартным» числам:
+       720px  — с этой ширины помещаются две карточки ресторана комфортного
+                размера, телефонная колонка перестаёт быть оправданной;
+       1100px — только здесь после колонки корзины (340px) у каталога
+                остаётся ~730px, то есть два полноразмерных блюда в ряд.
+                Раньше корзина сжимала каталог, поэтому на планшете
+                сохраняется мобильная штора;
+       1600px — хватает на три колонки, оставаясь в комфортной ширине карточки.
+     ========================================================================== */
+  @media (min-width:720px){
+    body{max-width:none;padding-bottom:120px}
+    .screen,#home{max-width:var(--shell);margin:0 auto;padding-left:clamp(18px,3vw,40px);padding-right:clamp(18px,3vw,40px)}
+    /* Липкая шапка обязана оставаться во всю ширину экрана, поэтому её
+       собственные отступы компенсируют падинги контейнера. */
+    .top{margin-left:calc(-1 * clamp(18px,3vw,40px));margin-right:calc(-1 * clamp(18px,3vw,40px));
+      padding-left:clamp(18px,3vw,40px);padding-right:clamp(18px,3vw,40px);padding-top:30px}
+    .wm{font-size:72px}
+    .intro{margin-left:0;margin-right:0}
+    .sec{padding:26px 2px 4px}
+    .sec h2{font-size:17px}
+    /* Рестораны: сетка вместо колонки. Карточка не мельчает — она растёт. */
+    .list{padding:14px 0 10px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:22px}
+    .photo{height:230px}
+    /* Меню ресторана: блюда в две колонки. */
+    #m-body{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;padding:4px 0 8px}
+    .cat-h{grid-column:1/-1;padding:22px 2px 6px;font-size:19px}
+    .dish{margin:0}
+    .hero{height:280px;border-radius:26px;margin-top:14px}
+    .menu-sticky-group{margin-left:calc(-1 * clamp(18px,3vw,40px));margin-right:calc(-1 * clamp(18px,3vw,40px));
+      padding-left:clamp(18px,3vw,40px);padding-right:clamp(18px,3vw,40px)}
+    .mtabs{padding:16px 0 6px}
+    .dhero{border-radius:26px;margin-top:14px}
+    .dwrap{padding:14px 2px 0}
+    #dish,#cart,#qr,#status,#rejected{max-width:860px}
+    .cartbar,.dish-add{max-width:560px}
+    .site-footer{padding-bottom:40px}
+  }
+
+  @media (min-width:1100px){
+    :root{--shell:1180px}
+    /* Страница ресторана: слева меню, справа постоянная корзина.
+       Обёртки в разметке нет намеренно — корзина ставится в колонку 2 и
+       растягивается на все строки, а остальные дети остаются в колонке 1.
+       Так DOM меняется ровно на один элемент. */
+    #menu.active{display:grid;grid-template-columns:minmax(0,1fr) var(--cart-w);
+      column-gap:28px;align-items:start}
+    #menu>*{grid-column:1;min-width:0}
+    #menu>.deskcart{grid-column:2;grid-row:1/span 6;display:flex}
+    /* Липкая полоса категорий не должна заезжать под корзину. */
+    .menu-sticky-group{margin-right:0;padding-right:0}
+    .hero{height:320px}
+    .cartbar,.dish-add{max-width:640px}
+  }
+
+  @media (min-width:1600px){
+    :root{--shell:1520px;--cart-w:360px}
+    .list{grid-template-columns:repeat(3,minmax(0,1fr))}
+    #m-body{grid-template-columns:repeat(3,minmax(0,1fr))}
+    .photo{height:250px}
+  }
+
+  /* --- Постоянная корзина на desktop ---------------------------------------
+     Плавающий стеклянный объект, а не сайдбар и не панель администратора:
+     собственный крупный радиус, толщина кромки, внутреннее отражение,
+     контактная и внешняя тень. Единственное место в интерфейсе с сильным
+     backdrop-filter на большой площади — ровно один элемент, поэтому это не
+     стоит производительности длинного меню. */
+  .deskcart{display:none;flex-direction:column;position:sticky;top:16px;
+    max-height:calc(100vh - 32px);border-radius:26px;overflow:hidden;
+    background:var(--g-l3);
+    backdrop-filter:blur(var(--g-blur-lg)) saturate(170%);
+    -webkit-backdrop-filter:blur(var(--g-blur-lg)) saturate(170%);
+    box-shadow:var(--g-contact),var(--g-float),inset 0 1px 0 rgba(255,255,255,.30);
+    z-index:20}
+  .deskcart::before{content:"";position:absolute;inset:0;pointer-events:none;z-index:1;
+    border-radius:inherit;background:var(--g-inner-hi)}
+  .deskcart::after{z-index:3}
+  .dc-head{position:relative;z-index:2;flex:0 0 auto;display:flex;align-items:baseline;gap:9px;
+    padding:20px 20px 14px}
+  .dc-title{font-weight:800;font-size:17px;letter-spacing:.2px}
+  .dc-count{font-size:12.5px;font-weight:700;color:var(--txt2)}
+  .dc-list{position:relative;z-index:2;flex:1 1 auto;overflow-y:auto;overscroll-behavior:contain;
+    padding:0 14px 4px;display:flex;flex-direction:column;gap:8px;scrollbar-width:thin}
+  .dc-list::-webkit-scrollbar{width:6px}
+  .dc-list::-webkit-scrollbar-thumb{background:rgba(255,255,255,.16);border-radius:999px}
+  .dc-item{position:relative;display:grid;grid-template-columns:1fr auto;gap:4px 10px;
+    align-items:center;padding:11px 12px;border-radius:16px;
+    background:var(--g-l1);box-shadow:var(--g-contact),var(--g-inner-sh)}
+  .dc-i-name{font-weight:700;font-size:13.5px;line-height:1.35}
+  .dc-i-price{grid-column:1;font-weight:800;font-size:14px;color:var(--amber)}
+  .dc-i-ctl{grid-column:2;grid-row:1/span 2;display:flex;align-items:center;gap:8px}
+  .dc-item .qty{transform:scale(.86);transform-origin:right center}
+  .dc-rm{width:26px;height:26px;flex:0 0 auto;border:none;border-radius:9px;cursor:pointer;
+    background:rgba(255,255,255,.07);color:var(--txt2);font-family:inherit;font-size:15px;
+    line-height:1;transition:background .16s ease,color .16s ease}
+  .dc-rm:hover{background:rgba(255,112,89,.20);color:#ffb3a6}
+  .dc-foot{position:relative;z-index:2;flex:0 0 auto;padding:12px 16px 16px;
+    border-top:1px solid rgba(255,255,255,.10)}
+  .dc-total{display:flex;justify-content:space-between;align-items:baseline;padding:4px 4px 12px}
+  .dc-total span:first-child{font-size:13.5px;font-weight:600;color:var(--txt2)}
+  .dc-total b{font-size:22px;font-weight:800}
+  .dc-total.bump b{animation:dcBump .34s cubic-bezier(.2,.9,.3,1.2)}
+  @keyframes dcBump{0%{transform:scale(1)}45%{transform:scale(1.09)}100%{transform:scale(1)}}
+  .dc-cta{width:100%;background:var(--amber);color:#3a1c00;border:none;border-radius:16px;
+    padding:15px;font-family:inherit;font-weight:800;font-size:14.5px;cursor:pointer;
+    box-shadow:0 10px 26px rgba(255,154,46,.42),inset 0 1px 0 rgba(255,255,255,.4);
+    transition:filter .16s ease,translate .16s ease}
+  .dc-cta:hover{filter:brightness(1.05)}
+  .dc-cta:active{translate:0 1px}
+  .dc-cta[disabled]{background:rgba(255,255,255,.10);color:rgba(255,255,255,.4);
+    box-shadow:none;cursor:default}
+  .dc-clear{display:block;width:100%;margin-top:8px;background:none;border:none;
+    color:var(--txt2);font-family:inherit;font-size:12.5px;font-weight:700;cursor:pointer;padding:7px}
+  .dc-clear:hover{color:#e8998f}
+  .dc-min{position:relative;z-index:2;margin:0 14px 10px;padding:10px 12px;border-radius:13px;
+    font-size:12.5px;font-weight:700;color:#ffd59a;background:rgba(255,154,46,.13)}
+  .dc-empty{position:relative;z-index:2;flex:1 1 auto;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;gap:8px;padding:36px 24px 44px;text-align:center}
+  .dc-empty-mark{width:46px;height:46px;border-radius:16px;background:var(--g-l1);
+    box-shadow:var(--g-contact),inset 0 1px 0 rgba(255,255,255,.25);
+    display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.5)}
+  .dc-empty-t{font-weight:800;font-size:14.5px}
+  .dc-empty-s{font-size:12.5px;font-weight:600;color:var(--txt2);line-height:1.5;max-width:210px}
+  /* Появление и исчезновение позиции. Класс .enter вешается только на строки,
+     которых не было в прошлом рендере (см. renderDeskCart) — иначе анимация
+     проигрывалась бы на всём списке при каждом +/−. */
+  .dc-item.enter{animation:dcIn .28s cubic-bezier(.2,.8,.2,1)}
+  .dc-item.leaving{animation:dcOut .19s ease forwards;pointer-events:none}
+  @keyframes dcIn{from{opacity:0;transform:translateY(-6px) scale(.98)}to{opacity:1;transform:none}}
+  @keyframes dcOut{to{opacity:0;transform:translateX(14px) scale(.97)}}
+
+  /* --- Checkout на desktop --------------------------------------------------
+     Бизнес-логика не меняется: те же поля, тот же порядок, та же кнопка.
+     Меняется только раскладка — данные клиента слева, состав и итог справа,
+     чтобы не оставлять телефонную колонку посреди монитора. */
+  /* Обёртка правой колонки прозрачна для раскладки везде, кроме широкого
+     экрана: на мобильном порядок и вид блоков остаются прежними. */
+  .co-side{display:contents}
+  @media (min-width:1000px){
+    #cart{max-width:1000px}
+    .co{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,.95fr);
+      column-gap:28px;align-items:start;padding:18px 0}
+    .co>*{grid-column:1}
+    /* Правая колонка — ОДИН элемент грида на всю высоту: строки грида общие
+       для обеих колонок, и без этого высокий блок состава растягивал строку
+       формы, разрывая её пополам. */
+    .co-side{display:flex;flex-direction:column;grid-column:2;grid-row:1/span 30}
+    .co-side>.panel{margin-top:0}
+    .ctitle{padding-top:26px}
+  }
+
+  /* --- Доводка по результатам визуальной проверки --------------------------- */
+
+  /* Состояние «фото недоступно» было единственной по-настоящему СЕРОЙ
+     поверхностью в интерфейсе (#3a423e -> #242b28). У RAZRYAD фотографий нет
+     вовсе, поэтому именно оно и определяло вид всего меню — ровно тот «серый
+     полупрозрачный прямоугольник», от которого нужно было уйти. Тот же
+     материал, что и у остального стекла, только без изображения под ним. */
+  .photo.nophoto,.dphoto.nophoto{
+    background:
+      radial-gradient(120% 80% at 50% -10%,rgba(255,255,255,.07),transparent 60%),
+      linear-gradient(160deg,#173d29,#102b1d 55%,#0b2116)!important}
+  .photo.nophoto::after,.dphoto.nophoto::after{color:rgba(255,255,255,.28)}
+
+  /* Плашка названия и блок цены — абсолютно спозиционированы по разным углам и
+     при длинном названии вместе с раскрытым счётчиком налезали друг на друга
+     («Медальоны в сливочн|810 ₽»). Ширина названия теперь считается от места,
+     которое реально занимает самый широкий вариант правого блока. */
+  .dplate{max-width:calc(100% - 172px)}
+
+  /* Главная: одна карточка в трёхколоночной сетке выглядела потерянной, а
+     справа оставалось пустое поле в две трети экрана. Flex-обёртка с переносом
+     центрирует неполный ряд и позволяет карточке дорасти до комфортной
+     ширины, сохраняя те же 2-3 колонки, когда ресторанов достаточно. */
+  @media (min-width:720px){
+    .list{display:flex;flex-wrap:wrap;justify-content:center;align-items:stretch;gap:22px}
+    .list>.card{flex:1 1 340px;max-width:560px}
+    .intro{max-width:780px;margin-left:auto;margin-right:auto}
+  }
+  @media (min-width:1600px){
+    .list>.card{max-width:480px}
+  }
+
+
+  /* Пока изображение не подгружено виртуализацией (есть data-src, но ещё нет
+     src) или уже снято обработчиком ошибки, пустой <img> рисовал в углу
+     карточки иконку «битой картинки». Само изображение это не трогает —
+     скрывается только элемент без источника. */
+  .dphoto>img:not([src]),.photo>img:not([src]){display:none}
+
+  /* Кольцо кромки рисуется ВНУТРИ элемента (::after + mask), а не бордером,
+     поэтому у контролов, у которых бордер убран, внешняя геометрия обязана
+     остаться прежней: иначе таблетка категории теряет 2px высоты — и вместе с
+     ней столько же теряет тач-таргет и высота всей страницы меню. Последнее не
+     косметика: восстановление позиции прокрутки при возврате из карточки блюда
+     живёт на запасе в считанные пиксели (см. e2e critical-order-smoke). */
+  .mtab{padding:10px 17px}
+  .field{padding:14px 17px}
+  .panel{padding:16px 18px}

@@ -97,14 +97,24 @@ async function goToCheckoutWithOneDish(page: Page) {
   await expect(dish).toBeVisible();
   await dish.locator('button.add').click();
 
-  // Нижняя панель корзины -> шторка -> "Оформить заказ".
-  const cartBarButton = page.locator('#cartbar .cartbtn');
-  await expect(cartBarButton).toBeVisible();
-  await cartBarButton.click();
+  // Путь к оформлению зависит от ширины окна, а не от отдельной логики:
+  // на широком экране заказ постоянно виден справа (постоянная корзина), и
+  // нижняя плашка там не показывается, чтобы не дублировать её же итог и
+  // кнопку. На узком — прежняя цепочка «плашка -> шторка -> оформить».
+  const deskCart = page.locator('#deskcart');
+  if (await deskCart.isVisible()) {
+    const deskCta = deskCart.locator('.dc-cta');
+    await expect(deskCta).toBeVisible();
+    await deskCta.click();
+  } else {
+    const cartBarButton = page.locator('#cartbar .cartbtn');
+    await expect(cartBarButton).toBeVisible();
+    await cartBarButton.click();
 
-  const sheetCheckoutButton = page.locator('#sheet-checkout');
-  await expect(sheetCheckoutButton).toBeVisible();
-  await sheetCheckoutButton.click();
+    const sheetCheckoutButton = page.locator('#sheet-checkout');
+    await expect(sheetCheckoutButton).toBeVisible();
+    await sheetCheckoutButton.click();
+  }
 
   // Экран оформления: обязательные имя, телефон и адрес доставки + согласие
   // на обработку ПДн. Телефон и адрес заполняются явно с тех пор, как из
