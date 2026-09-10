@@ -35,7 +35,12 @@ const { VARIANTS } = require('../services/hq/media/imagePipeline');
 
 const DRY = process.argv.includes('--dry-run');
 const MEDIA_ROOT = process.env.MEDIA_LOCAL_ROOT || '/opt/yaam-prod/media';
+// Раскладка хранилища: приватные мастера и публичные варианты лежат в двух
+// разных поддеревьях с одинаковой внутренней структурой
+// (<owner-type>/<id>/<uuid>/), поэтому путь к публичному каталогу получается
+// переносом относительного пути из одного корня в другой.
 const MASTERS_ROOT = path.join(MEDIA_ROOT, 'private', 'masters');
+const PUBLIC_ROOT = path.join(MEDIA_ROOT, 'public');
 const VARIANT = 'card2x';
 const opts = VARIANTS[VARIANT];
 
@@ -60,10 +65,9 @@ function findMasters(dir, acc = []) {
   return acc;
 }
 
-// Публичные варианты лежат рядом друг с другом, вне private/masters.
 function publicDirForMaster(masterPath) {
   const rel = path.relative(MASTERS_ROOT, path.dirname(masterPath));
-  return path.join(MEDIA_ROOT, rel);
+  return path.join(PUBLIC_ROOT, rel);
 }
 
 (async () => {
