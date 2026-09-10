@@ -1038,6 +1038,7 @@ function scrollToMenuSection(idx){
   const behavior=menuScrollBehavior(window.scrollY,target,window.innerHeight);
   menuCategoryScrollLockUntil=Date.now()+(behavior==='smooth'?900:150);
   setActiveMenuTab(idx);
+  focusPhotoQueue(target);
   window.scrollTo({top:target,behavior});
 }
 function initMenuScrollFX(){
@@ -1094,23 +1095,29 @@ function menuPhotoSrcset(d){
   if(!d||!d.photoUrl||!d.photoUrl2x)return '';
   return ` data-srcset="${esc(d.photoUrl)} 800w, ${esc(d.photoUrl2x)} 1200w" sizes="${MENU_PHOTO_SIZES}"`;
 }
-function dishCard(d,ci,ii){
+function dishCard(d,ci,ii,head){
   const k=key(ci,ii);const q=cart[k]?cart[k].q:0;const so=d.available===false;
   const hasSrc=!!(d.photoUrl||d.im);
   const photoSrc=hasSrc?(d.photoUrl||U(d.im,700)):'';
   const safePhotoSrc=esc(photoSrc);
   const srcsetAttr=menuPhotoSrcset(d);
-  const photo=hasSrc?`<img data-src="${safePhotoSrc}"${srcsetAttr}${cropDataAttrs(d.photoCrop,d.photoRotation)} loading="lazy" decoding="async" onerror="this.dataset.failed='1';this.closest('.dphoto').classList.add('nophoto');this.removeAttribute('src')">`:'';
+  const photo=hasSrc?`<img data-src="${safePhotoSrc}"${srcsetAttr}${cropDataAttrs(d.photoCrop,d.photoRotation)} decoding="async" onerror="this.dataset.failed='1';this.closest('.dphoto').classList.add('nophoto');this.removeAttribute('src')">`:'';
   return `<div class="dish ${so?'dis':''}" ${so?'':`onclick="openDish('${k}')"`}>
-    <div class="dphoto ${hasSrc?'':'nophoto'}" style="background:${d.g}">${photo}
+    <div class="dphoto ${hasSrc?'':'nophoto'}"${hasSrc&&head?' data-head="1"':''} style="background:${d.g}">${photo}
     <div class="dplate"><div class="dname">${esc(d.n)}${d.pop?' <span class="hit">Хит</span>':''}</div><div class="ddesc">${esc(d.d)}</div></div>
     <div class="dactions"><div class="dprice">${d.p} ₽</div>${so?'<span class="soldout">Нет в наличии</span>':`<div data-ctrl-key="${k}" onclick="event.stopPropagation()">${q>0?qtyHtml(k,q):`<button class="add" onclick="addItem('${k}',event)">+</button>`}</div>`}</div></div></div>`;
 }
 function renderMenuBody(){
   let html='';
-  curRest.menu.forEach((c,ci)=>{html+=`<div class="cat-h" id="sec${ci}">${esc(c.cat)}</div>`+c.items.map((d,ii)=>dishCard(d,ci,ii)).join('');});
+  curRest.menu.forEach((c,ci)=>{
+    let withPhoto=0;
+    html+=`<div class="cat-h" id="sec${ci}">${esc(c.cat)}</div>`+c.items.map((d,ii)=>{
+      const head=!!(d.photoUrl||d.im)&&withPhoto++<IMG_CATEGORY_WARM;
+      return dishCard(d,ci,ii,head);
+    }).join('');
+  });
   document.getElementById('m-body').innerHTML=html;
-  initDishImageVirtualization();
+  initMenuPhotoQueue();
 }
 // srcset назначается ВМЕСТЕ с src и обязательно раньше него: если сначала
 // поставить src, браузер уже начнёт грузить 800-й вариант, и появившийся следом
@@ -1126,77 +1133,221 @@ function clearPhotoSources(img){
   if(img.getAttribute('srcset'))img.removeAttribute('srcset');
   if(img.getAttribute('src'))img.removeAttribute('src');
 }
-let dishImageObserver=null,dishImageEvictObserver=null;
-// Измерено на production до правки: после прокрутки длинного меню 72 из 82
-// изображений оказывались выгруженными (src снят), и при возврате наверх
-// карточки заново «догоняли» на глазах — при быстрой прокрутке 9 из 10 видимых
-// карточек были не готовы. Причина: один и тот же порог и на загрузку, и на
-// выгрузку — стоило картинке выйти за 1200px, её src немедленно снимался.
+// ПОРЯДОК ЗАГРУЗКИ ФОТОГРАФИЙ МЕНЮ.
 //
-// Теперь порогов два. Загрузка идёт с запасом примерно в два экрана вперёд,
-// чтобы карточка была готова ДО того, как до неё долистали. Выгрузка — только
-// когда картинка ушла очень далеко (около шести экранов): обычная прокрутка
-// вверх-вниз в такое окно не попадает, поэтому ничего не перезагружается, а
-// защита памяти на длинном меню сохраняется.
-const IMG_LOAD_AHEAD='150%';
-const IMG_EVICT_BEYOND='600%';
-function initDishImageVirtualization(){
-  if(dishImageObserver)dishImageObserver.disconnect();
-  if(dishImageEvictObserver)dishImageEvictObserver.disconnect();
-  const photos=[...document.querySelectorAll('#m-body .dphoto')];
+// Замеры на production (LTE 10 Мбит/с, 70 мс, меню 109 блюд / 82 фотографии,
+// высота 14 000 px на десктопе и 18 800 px на мобильном) показали три разные
+// причины того, что человек видит пустые карточки:
+//
+//  1. Переключение категории готовило ровно ничего: сразу после нажатия вкладки
+//     не готовы были ВСЕ видимые карточки (6 из 6, 4 из 4, 5 из 5), и через
+//     полторы секунды треть всё ещё догружалась. Наблюдатель реагировал только
+//     на близость по прокрутке, а прыжок по вкладке — не прокрутка.
+//  2. Выгрузка уничтожала уже готовое: за один проход вниз и обратно у 117
+//     полностью загруженных изображений снимался src (при 82 уникальных), после
+//     чего они назначались заново — 139 назначений вместо 82. Сеть этого не
+//     видела (immutable-кэш), но между назначением src и повторным декодом
+//     карточка снова пуста. Это и есть «фото проявляются» при возврате.
+//  3. Упреждения не хватало по времени: 1.5 экрана при скорости пальца
+//     ~2200 px/с — это около 600 мс форы, а фотография приезжала за 1300 мс на
+//     мобильном и 2200 мс на десктопе. Из 82 карточек к моменту появления в
+//     кадре были готовы 22, а 60 догружались на глазах.
+//
+// Отсюда решение: не «порог видимости», а очередь по расстоянию до того места,
+// куда смотрит человек. Ближайшее грузится первым и получает весь канал;
+// далёкое ждёт. Готовое не выгружается вовсе, пока не упрёмся в бюджет памяти.
+//
+// Оба числа подобраны замером на том же сценарии (полное меню, 2200 px/с,
+// LTE 10 Мбит/с), а не на глаз. Кадров с пустыми карточками из 526:
+//   при упреждении 5 экранов — 2 параллельных → 88, 3 → 0, 4 → 0, 6 → 4, 8 → 13;
+//   при упреждении 3 экрана — те же параллельные дают от 19 до 80.
+// Зависимость понятная: чем уже очередь, тем больше канала достаётся ближайшей
+// фотографии и тем раньше она готова; ниже трёх — уже не успевает заполнять.
+const IMG_MAX_INFLIGHT=4;      // одновременных загрузок; сверх этого очередь только удлиняется
+const IMG_NEAR_AHEAD=5;        // потолок упреждения в экранах — столько нужно на быстром пролистывании
+const IMG_REST_AHEAD=2;        // сколько готовим, пока человек стоит на месте
+const IMG_RUNWAY_SEC=2;        // на столько секунд хода вперёд смотрим: фотография приезжает за ~1.3 с
+const IMG_NEAR_BEHIND=1;       // экран назад — на случай короткого отката
+const IMG_CATEGORY_WARM=4;     // голова каждой категории: именно её видно сразу после прыжка по вкладке
+const IMG_LOADED_BUDGET=160;   // потолок удерживаемых фотографий (см. enforceImageBudget)
+const IMG_STALL_MS=12000;      // страховка: зависшая загрузка не должна навсегда занять слот
+const IMG_FOCUS_MS=1500;       // сколько цель прыжка по категории считается тем, куда смотрит человек
 
-  dishImageObserver=new IntersectionObserver((entries)=>{
-    entries.forEach(entry=>{
-      if(!entry.isIntersecting)return;
-      const img=entry.target.querySelector('img[data-src]');
-      if(!img||img.dataset.failed==='1')return;
-      if(img.getAttribute('src'))return;
-      // Приоритет назначается ДО src — после старта загрузки менять его поздно.
-      // На узком канале это и решает, что человек увидит первым: карточки в
-      // самом окне обслуживаются раньше тех, что подгружаются про запас.
-      const box=entry.boundingClientRect;
-      const inView=box.bottom>0&&box.top<window.innerHeight;
-      img.setAttribute('fetchpriority',inView?'high':'low');
-      applyPhotoSources(img);
-      applyElementCrop(img);
-    });
-  },{rootMargin:`${IMG_LOAD_AHEAD} 0px`});
+let menuPhotos=[];
+let menuPhotoInflight=0;
+let menuPhotoMeasured=false;
+let menuPhotoPumpQueued=false;
+let menuPhotoFocusY=-1,menuPhotoFocusUntil=0;
+let menuPhotoScrollBound=false;
+let menuPhotoWarmScheduled=false;
 
-  dishImageEvictObserver=new IntersectionObserver((entries)=>{
-    entries.forEach(entry=>{
-      if(entry.isIntersecting)return;
-      // Экран меню на момент первой отрисовки ещё скрыт (go('menu') вызывается
-      // позже), а у скрытого элемента нулевая геометрия — и наблюдатель честно
-      // сообщает «не пересекается» про ВСЕ карточки сразу. Без этой проверки
-      // первый же колбэк снимал src, включая только что выставленный на первом
-      // экране: измерено — 2 картинки получали src и тут же теряли его.
-      const box=entry.boundingClientRect;
-      if(box.width===0&&box.height===0)return;
-      const img=entry.target.querySelector('img[data-src]');
-      if(!img||img.dataset.failed==='1')return;
-      clearPhotoSources(img);
-    });
-  },{rootMargin:`${IMG_EVICT_BEYOND} 0px`});
-
-  photos.forEach(photo=>{dishImageObserver.observe(photo);dishImageEvictObserver.observe(photo);});
-  // Приоритетная загрузка первого экрана — после того, как экран меню реально
-  // показан: до этого у карточек нет размеров и приоритет назначать нечему.
-  requestAnimationFrame(()=>primeFirstScreenImages(photos));
-}
-// Первые карточки не должны ждать своей очереди в общем потоке: их изображения
-// запрашиваются сразу и с высоким приоритетом, чтобы выиграть гонку у того, что
-// лежит ниже экрана. Высокий приоритет получают ровно первые несколько — иначе
-// «приоритет» перестаёт что-либо значить.
-const FIRST_SCREEN_IMAGES=6;
-function primeFirstScreenImages(photos){
-  photos.slice(0,FIRST_SCREEN_IMAGES).forEach(photo=>{
-    const img=photo.querySelector('img[data-src]');
-    if(!img||img.dataset.failed==='1'||img.getAttribute('src'))return;
-    img.setAttribute('fetchpriority','high');
-    img.setAttribute('loading','eager');
-    applyPhotoSources(img);
-    applyElementCrop(img);
+function initMenuPhotoQueue(){
+  menuPhotos=[...document.querySelectorAll('#m-body .dphoto')].map((el,i)=>{
+    const img=el.querySelector('img[data-src]');
+    return {el,img,top:0,bottom:0,head:el.dataset.head==='1',order:i,state:img?'idle':'skip'};
   });
+  menuPhotoInflight=0;menuPhotoMeasured=false;menuPhotoWarmScheduled=false;
+  menuPhotoFocusY=-1;menuPhotoFocusUntil=0;
+  menuPhotoLastT=0;menuPhotoSpeed=0;
+  if(!menuPhotoScrollBound){
+    menuPhotoScrollBound=true;
+    // Один пассивный слушатель на всё время жизни страницы, склейка по кадру:
+    // сама очередь не читает раскладку, поэтому прокрутка не дёргает layout.
+    window.addEventListener('scroll',schedulePhotoPump,{passive:true});
+    window.addEventListener('resize',()=>{menuPhotoMeasured=false;schedulePhotoPump();},{passive:true});
+  }
+  schedulePhotoPump();
+}
+
+function schedulePhotoPump(){
+  if(menuPhotoPumpQueued)return;
+  menuPhotoPumpQueued=true;
+  requestAnimationFrame(()=>{menuPhotoPumpQueued=false;pumpPhotoQueue();});
+}
+
+// Координаты карточек снимаются одним проходом и живут до смены размера окна:
+// во время прокрутки расстояние считается арифметикой, без обращения к раскладке.
+function measurePhotoGeometry(){
+  if(menuPhotoMeasured)return true;
+  const body=document.getElementById('m-body');
+  if(!body||!body.offsetHeight)return false;   // меню ещё скрыто — геометрии нет
+  const y=window.scrollY;
+  for(const p of menuPhotos){
+    const b=p.el.getBoundingClientRect();
+    p.top=b.top+y;p.bottom=b.bottom+y;
+  }
+  menuPhotoMeasured=true;
+  return true;
+}
+
+function photoDistance(p,y,vh){
+  let d=p.top>y+vh?p.top-(y+vh):(p.bottom<y?y-p.bottom:0);
+  if(menuPhotoFocusUntil>Date.now()&&menuPhotoFocusY>=0){
+    // Прыжок по вкладке: пока идёт долистывание, целевая категория считается
+    // тем же, на что человек смотрит, — иначе её фотографии начнут грузиться
+    // только по прибытии, и вкладка каждый раз открывается пустой.
+    const f=menuPhotoFocusY;
+    const df=p.top>f+vh?p.top-(f+vh):(p.bottom<f?f-p.bottom:0);
+    if(df<d)d=df;
+  }
+  return d;
+}
+
+// Упреждение — это трафик, потраченный до того, как человек попросил, поэтому
+// оно живёт по скорости прокрутки: стоящему хватает пары экранов, летящему нужны
+// все пять. Замер разницы: открыть меню и не листать — 3.34 МБ при постоянных
+// пяти экранах против 2.73 МБ при переменном, и то же ноль пустых кадров на
+// быстром пролистывании.
+// При включённой экономии данных и на медленной сети готовим только ближайший
+// экран: там дороже мегабайт, чем мгновенность.
+let menuPhotoLastY=0,menuPhotoLastT=0,menuPhotoSpeed=0;
+function updateScrollSpeed(){
+  const now=performance.now(),y=window.scrollY;
+  const dt=now-menuPhotoLastT;
+  if(menuPhotoLastT&&dt>0){
+    const v=Math.abs(y-menuPhotoLastY)/dt*1000;
+    // Сглаживание, чтобы одиночный кадр не раздувал окно и не схлопывал его.
+    menuPhotoSpeed=dt>400?v:menuPhotoSpeed*0.6+v*0.4;
+  }
+  menuPhotoLastY=y;menuPhotoLastT=now;
+}
+function nearAheadScreens(){
+  const c=navigator.connection;
+  if(c&&(c.saveData||/^(slow-2g|2g)$/.test(c.effectiveType||'')))return 1;
+  const vh=window.innerHeight||1;
+  return Math.min(IMG_NEAR_AHEAD,Math.max(IMG_REST_AHEAD,menuPhotoSpeed*IMG_RUNWAY_SEC/vh));
+}
+function pumpPhotoQueue(){
+  if(!menuPhotos.length||!cur('menu'))return;
+  if(!measurePhotoGeometry()){schedulePhotoPump();return;}
+  updateScrollSpeed();
+  const vh=window.innerHeight,y=window.scrollY,ahead=nearAheadScreens();
+  const from=y-IMG_NEAR_BEHIND*vh,to=y+(1+ahead)*vh;
+  const focusOn=menuPhotoFocusUntil>Date.now()&&menuPhotoFocusY>=0;
+  const fFrom=focusOn?menuPhotoFocusY-IMG_NEAR_BEHIND*vh:0;
+  const fTo=focusOn?menuPhotoFocusY+(1+IMG_REST_AHEAD)*vh:0;
+
+  const near=[];
+  for(const p of menuPhotos){
+    if(p.state!=='idle')continue;
+    const inWindow=p.bottom>=from&&p.top<=to;
+    const inFocus=focusOn&&p.bottom>=fFrom&&p.top<=fTo;
+    if(inWindow||inFocus)near.push(p);
+  }
+  let free=IMG_MAX_INFLIGHT-menuPhotoInflight;
+  if(free>0&&near.length){
+    near.sort((a,b)=>photoDistance(a,y,vh)-photoDistance(b,y,vh)||a.order-b.order);
+    for(const p of near){if(free<=0)break;startPhotoLoad(p,y,vh);free--;}
+  }
+  // Свободный канал уходит на подготовку того, что понадобится дальше.
+  if(free>0&&!near.length)scheduleCategoryWarm();
+  enforceImageBudget(y,vh);
+}
+
+function startPhotoLoad(p,y,vh){
+  const img=p.img;
+  if(!img||img.dataset.failed==='1'){p.state='failed';return;}
+  if(img.getAttribute('src')){p.state='done';return;}
+  p.state='loading';menuPhotoInflight++;
+  let settled=false;
+  const settle=(ok)=>{
+    if(settled)return;settled=true;
+    if(p.state==='loading'){p.state=ok?'done':'failed';menuPhotoInflight--;}
+    schedulePhotoPump();
+  };
+  img.addEventListener('load',()=>settle(true),{once:true});
+  img.addEventListener('error',()=>settle(false),{once:true});
+  // Страховка от зависшего запроса: слот освобождается, картинка остаётся.
+  setTimeout(()=>{if(!settled&&p.state==='loading'){settled=true;p.state='done';menuPhotoInflight--;schedulePhotoPump();}},IMG_STALL_MS);
+  // Приоритет назначается ДО src — после старта загрузки менять его поздно.
+  const inView=p.bottom>y&&p.top<y+vh;
+  img.setAttribute('fetchpriority',inView?'high':'low');
+  img.setAttribute('loading','eager');   // момент загрузки определяет очередь, а не эвристика браузера
+  applyPhotoSources(img);
+  applyElementCrop(img);
+}
+
+// Пока человек смотрит верх меню, простой канала тратится на головы категорий —
+// ровно те карточки, которые окажутся перед глазами сразу после нажатия вкладки.
+// Строго по одной за раз и только при пустой ближней очереди, поэтому подготовка
+// никогда не конкурирует с тем, на что человек смотрит сейчас.
+function scheduleCategoryWarm(){
+  if(menuPhotoWarmScheduled||menuPhotoInflight>0)return;
+  const conn=navigator.connection;
+  if(conn&&(conn.saveData||/^(slow-2g|2g)$/.test(conn.effectiveType||'')))return;
+  const next=menuPhotos.find(p=>p.state==='idle'&&p.head);
+  if(!next)return;
+  menuPhotoWarmScheduled=true;
+  const run=()=>{
+    menuPhotoWarmScheduled=false;
+    if(!cur('menu')||menuPhotoInflight>0)return;
+    if(next.state!=='idle')return schedulePhotoPump();
+    startPhotoLoad(next,window.scrollY,window.innerHeight);
+  };
+  if(typeof requestIdleCallback==='function')requestIdleCallback(run,{timeout:1200});
+  else setTimeout(run,300);
+}
+
+// Готовое изображение не выгружается: повторная установка src означает повторный
+// декод, а между ними карточка снова пустая (замер: 117 таких выгрузок за один
+// проход по меню). Бюджет оставлен как защита от патологически длинного меню —
+// на реальных меню (82 фотографии) он не срабатывает ни разу.
+function enforceImageBudget(y,vh){
+  const loaded=menuPhotos.filter(p=>p.state==='done'&&p.img&&p.img.getAttribute('src'));
+  if(loaded.length<=IMG_LOADED_BUDGET)return;
+  const from=y-IMG_NEAR_BEHIND*vh,to=y+(1+nearAheadScreens())*vh;
+  loaded.filter(p=>p.bottom<from||p.top>to)
+    .sort((a,b)=>photoDistance(b,y,vh)-photoDistance(a,y,vh))
+    .slice(0,loaded.length-IMG_LOADED_BUDGET)
+    .forEach(p=>{clearPhotoSources(p.img);p.state='idle';});
+}
+
+// Прыжок по вкладке сообщает очереди, куда смотрит человек, ещё до того, как
+// долистывание закончится.
+function focusPhotoQueue(targetY){
+  menuPhotoFocusY=Math.max(0,targetY|0);
+  menuPhotoFocusUntil=Date.now()+IMG_FOCUS_MS;
+  schedulePhotoPump();
 }
 function qtyHtml(k,q){return `<div class="qty"><button onclick="dec('${k}')">−</button><span>${q}</span><button onclick="inc('${k}',event)">+</button></div>`;}
 function addItem(k,e){const it=findItem(k);cart[k]={n:it.n,p:it.p,q:1,menuItemId:it.id};refreshAll(k);if(e)flyAnim(e);}
@@ -3289,7 +3440,7 @@ async function openSharedOrder(code,token){
 }
 
 function cur(id){return document.getElementById(id).classList.contains('active');}
-function go(id){document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));document.getElementById(id).classList.add('active');document.querySelector('.dish-add').style.display=(id==='dish')?'block':'none';if(id!=='status'&&id!=='rejected')document.getElementById('statusbg').style.display='none';window.scrollTo(0,0);updateBar();if(id==='home'&&introFadeHandler)introFadeHandler();try{const url=routeUrlForScreen(id);if(id!=='home')history.pushState({screen:id},'',url);else history.replaceState({screen:'home'},'',url);}catch(e){}}
+function go(id){document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));document.getElementById(id).classList.add('active');document.querySelector('.dish-add').style.display=(id==='dish')?'block':'none';if(id!=='status'&&id!=='rejected')document.getElementById('statusbg').style.display='none';window.scrollTo(0,0);updateBar();if(id==='home'&&introFadeHandler)introFadeHandler();if(id==='menu')schedulePhotoPump();try{const url=routeUrlForScreen(id);if(id!=='home')history.pushState({screen:id},'',url);else history.replaceState({screen:'home'},'',url);}catch(e){}}
 function resetAll(){
   const orderCodeForClear=currentOrderCode,orderTokenForClear=currentOrderAccessToken;
   clearInterval(preTimer);clearTimeout(preAutoTimer);preDeadline=null;stopQRTimer();qrDeadline=null;stopOrderPolling();showRestaurantPhone(null);showOrderDot(false);cart={};curRest=null;currentOrderCode=null;currentOrderAccessToken=null;currentCreateIdempotencyKey=null;currentRetryIdempotencyKey=null;currentPaymentUrl=null;currentOrderAmount=null;currentOrderRestaurantId=null;currentOrderItems=[];currentOrderAddress=null;currentOrderComment=null;orderCreatedAtMs=null;initialRecoveryBlocked=false;demoStage='qr';

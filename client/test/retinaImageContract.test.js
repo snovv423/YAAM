@@ -117,14 +117,15 @@ test('6. деталь блюда по-прежнему берёт full, а не 
   teardown(sandbox);
 });
 
-test('7. политика загрузки из performance-pass не изменена', () => {
-  // Новый вариант не должен превратиться в повод грузить всё сразу.
-  assert.match(APP, /IMG_LOAD_AHEAD\s*=\s*'150%'/);
-  assert.match(APP, /IMG_EVICT_BEYOND\s*=\s*'600%'/);
-  assert.match(APP, /FIRST_SCREEN_IMAGES\s*=\s*6/);
+test('7. HiDPI-вариант не превратился в повод грузить всё сразу', () => {
+  // Более тяжёлый вариант делает дисциплину загрузки важнее, а не наоборот:
+  // на iPhone при DPR 3 каждая карточка тянет 144 КБ вместо 69.
+  assert.match(APP, /const IMG_MAX_INFLIGHT=\d+;/);
+  assert.match(APP, /const IMG_NEAR_AHEAD=\d+;/);
+  assert.match(APP, /const RESTAURANT_CACHE_TTL_MS\s*=\s*90000/);
   assert.match(APP, /PREFETCH_MAX_PARALLEL\s*=\s*1/);
-  assert.match(APP, /RESTAURANT_CACHE_TTL_MS\s*=\s*90000/);
   assert.match(APP, /fetchpriority/);
+  assert.match(APP, /saveData/, 'при экономии трафика упреждение обязано сжиматься');
 });
 
 test('8. HiDPI-вариант доезжает из ответа API до модели карточки', () => {
